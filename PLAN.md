@@ -168,12 +168,68 @@ Deliberately left out:
 - Filters with no name and no extension (`in:projects` alone): the index
   scan needs a name to match, so these ask for one.
 
-## Phase 4: optimization and polish
+## Phase 4: optimization and polish ✅ built, manual check pending
 
-Profiling (Instruments), memory, battery, accessibility, crash recovery,
-and index-correctness fuzzing. Also carried over: a snapshot delta
-overlay for very large indexes, a configurable hotkey, launch at login,
-and a settings page for the options now in `config.toml`.
+Instruments needs Xcode, which is not installed. Profiling used `sample`,
+`footprint`, `vmmap`, `top` and `/usr/bin/time`, none of which need
+`sudo`. All figures are in BENCHMARKS.md.
+
+Done:
+
+- [x] UI benchmark (`SIFT_UI_BENCH`, `scripts/ui-bench.sh`) that types
+      through the real launcher
+- [x] Keystroke to frame: median 15.4 ms → 2.6 ms (p95 5.7 ms) at 100k
+      files, by drawing as soon as results arrive
+- [x] Memory: about 25–34 MB without a file index, about 47–55 MB with
+      100k files, and no growth with use. The icon cache is now bounded
+      and frees GPU textures
+- [x] Idle: 0 s CPU over 30 s hidden. Clipboard polling moved to a
+      background-QoS thread (6.3 → 2.3 wake-ups a second while on)
+- [x] Indexing throughput re-measured against Phase 0, side by side (6%
+      slower at 100k, from new per-folder checks) and profiled
+- [x] Crash recovery:
+      - a scan is one transaction, tested with kills at ten points;
+      - damaged `index.db` and `state.db` are set aside and rebuilt, the
+        folder list from `roots.bin`;
+      - index-thread panics are contained;
+      - an unclean exit is detected, and the index is checked at the
+        next start;
+      - a log file with crash backtraces
+- [x] Correctness:
+      - `sift verify` (integrity, nine invariants, comparison with disk);
+      - live-update fuzzing through FSEvents (18,000 operations over
+        8 seeds matched)
+- [x] Accessibility:
+      - VoiceOver announcements (selection, result count, messages);
+      - a named window;
+      - Increase Contrast and Differentiate Without Color
+
+Still open in Phase 4:
+
+1. **Manual checks** (need you):
+   - **VoiceOver:** turn it on (⌘F5), open Sift, type, and use the
+     arrows. Does it speak the highlighted result and the result count?
+     Is it too talkative?
+   - **Increase Contrast:** turn it on and open Sift.
+   - The earlier Phase 3 checks (clipboard capture, Quick Look, the
+     footer).
+2. **Not measured:**
+   - battery use over hours (`powermetrics` needs `sudo`);
+   - cold-cache indexing (`sudo purge`);
+   - a real crash notice in the GUI (the recovery paths are covered by
+     tests, the notice text was not seen on screen).
+
+Moved to later:
+
+- Snapshot delta overlay for indexes of millions of entries. Search at 1M
+  synthetic entries takes a median 0.5–3.5 ms, and an update rebuilds the
+  snapshot in about 0.2 s, off the main thread.
+- Faster scanning with `getattrlistbulk` and deferred index creation.
+  The profile shows where the time goes, but the current speed (about
+  550k entries a second, warm) meets the targets.
+- Configurable hotkey, launch at login (changes a system setting, so it
+  will be opt-in, and I will ask first), and a settings page for
+  `config.toml` options.
 
 ## Phase 5: packaging and release
 

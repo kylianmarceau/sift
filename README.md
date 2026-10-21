@@ -32,6 +32,10 @@ cargo run --release -- search prjrs --stats      # fuzzy, with timing
 # Inspect or drop roots
 cargo run --release -- status
 cargo run --release -- remove ~/Documents
+
+# Check the index: SQLite integrity, internal consistency, and a fresh
+# scan compared with what is indexed (--quick skips the scan)
+cargo run --release -- verify
 ```
 
 Useful index options: `--exclude <path>`, `--exclude-name node_modules`,
@@ -89,6 +93,21 @@ never kept. *Clear Clipboard History* deletes everything kept.
 
 Sift has no Dock icon and needs no Accessibility permission.
 
+**VoiceOver:** while VoiceOver runs, Sift speaks the highlighted result
+when it moves ("report.pdf, file, in Documents, 2 of 8"). It also speaks
+the number of results and the top one when typing pauses, and any message
+shown. **Increase Contrast** and **Differentiate Without Color** (System
+Settings › Accessibility › Display) give stronger colours and an outlined
+selection. Both are picked up the next time the panel opens.
+
+**If something goes wrong:** Sift keeps a log at
+`~/Library/Logs/Sift/sift.log`, including crash reports. Nothing leaves
+your Mac. If Sift did not quit normally, it checks the file index at the
+next start. A damaged index is moved aside (into a `damaged-…` folder
+next to it) and rebuilt from the saved folder list. A damaged `state.db`
+is renamed to `state.db.damaged-…`, and recents and favorites start
+again.
+
 **Choosing folders:** search for *Sift Settings* (or "preferences") and
 press Enter. Add the folders you want searchable. macOS asks once for
 access to Documents, Desktop or Downloads. Folders indexed with
@@ -96,7 +115,9 @@ access to Documents, Desktop or Downloads. Folders indexed with
 
 Environment options: `SIFT_INDEX_DIR` (index location),
 `SIFT_CONFIG_DIR` (where `config.toml` and `state.db` live),
-`SIFT_START_HIDDEN=1` (don't show the panel at launch), `SIFT_LOG=debug`.
+`SIFT_START_HIDDEN=1` (don't show the panel at launch), `SIFT_LOG=debug`,
+`SIFT_LOG_DIR` (log location), and `SIFT_ANNOUNCE=1` (make the VoiceOver
+announcements, logged at debug level, even when VoiceOver is off).
 
 To see timing logs (startup, catalog load, hotkey-to-first-frame), run the
 executable from a terminal instead:
@@ -116,9 +137,17 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/bench.sh            # reproducible benchmarks, see BENCHMARKS.md
+scripts/ui-bench.sh 5       # types through the launcher, then memory and idle CPU
 cargo run --release -p sift-apps --example bench_apps   # app search timing
 cargo run --release -p sift-files --example live_latency # change-to-searchable timing
+
+# Longer live-update fuzzing (the test suite runs 400 operations)
+SIFT_FUZZ_SEED=7 SIFT_FUZZ_OPS=3000 cargo test --release -p sift-files --test service random_edits
 ```
+
+`scripts/ui-bench.sh` needs the 100k-file tree from `scripts/bench.sh`. It
+opens the panel on screen while it types, using its own config, index and
+log directories.
 
 Design notes are in [ARCHITECTURE.md](ARCHITECTURE.md), the roadmap is in
 [PLAN.md](PLAN.md), and measurements are in [BENCHMARKS.md](BENCHMARKS.md).

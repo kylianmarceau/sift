@@ -608,12 +608,123 @@ hide, because opening the preview moves focus for a moment.
 `examples/quicklook_check.rs` verifies the wiring without a GUI session:
 the controller is found and the launcher stays key.
 
+## Reliability, performance and accessibility (Phase 4)
+
+### Crash recovery
+
+The design rule is that a crash at any moment leaves data that is either
+intact or detectably damaged. Detected damage is set aside, never
+deleted, and rebuilt from what the user chose.
+
+- **Scans are one transaction.** A killed `sift index` leaves the root
+  either absent or complete. `crates/sift-cli/tests/crash.rs` kills scans
+  with SIGKILL at ten points and checks this.
+- **The name snapshot** is written to `names.tmp-<pid>` and renamed into
+  place. Temporary files older than ten minutes, left by a killed
+  writer, are removed before the next write.
+- **`roots.bin`** (`sift-files::roots_file`), next to the index, holds
+  the list of indexed folders and their options. It is length-prefixed
+  binary, because paths may contain any byte, and is written to a
+  temporary file, then renamed. The database holds the same list, but
+  the database is a cache, while the folder list is the user's choice.
+- **Opening the index** (`IndexService`): if SQLite reports corruption,
+  or a requested `quick_check` fails, the database (with `-wal` and
+  `-shm`) and the snapshot move into `damaged-<time>/`. A fresh database
+  is then rescanned from `roots.bin`, and the panel says where the
+  damaged copy went.
+- **Panics in the index thread** are caught per command and per event
+  batch (`catch_unwind`). The service then rescans every root, restarts
+  the watcher and reports it, instead of silently stopping updates.
+- **`state.db`** (recents, favorites, clipboard history) gets the same
+  treatment: on corruption it is renamed to `state.db.damaged-<time>` and
+  started again, with a notice.
+- **Unclean exits.** The launcher writes its pid to `sift.pid` in the
+  config directory and removes it on a normal quit. If the file is still
+  there at the next start and that process is gone, the previous run
+  crashed or was killed. The index is then checked with `quick_check`
+  before use (10.6 ms at 100k entries).
+- **Logging.** The log goes to `~/Library/Logs/Sift/sift.log` at INFO,
+  and to stderr at the `SIFT_LOG` level. The file is rotated to
+  `sift.log.1` at startup past 1 MiB, and capped at 4 MiB per session. A
+  panic hook records the panic and a backtrace. Logs stay local.
+
+### Checking correctness
+
+- **`sift verify`** runs SQLite's `quick_check`, then nine SQL
+  invariants (`Store::verify`): every parent exists and is a folder in
+  the same root, ids increase from parent to child, names are unique per
+  folder, root rows and entry counts are consistent. Unless `--quick` is
+  given, it then scans each root into a scratch database and compares
+  path, kind, size and modification time (`sift_indexer::compare`).
+  Folder sizes and dates are ignored. It exits non-zero on any finding.
+- **Live-update fuzzing.** A test in `crates/sift-files/tests/service.rs`
+  makes random creates, edits, renames, moves and removals in a temporary
+  tree while the real service watches it through FSEvents. It then waits
+  until the index matches a fresh scan and passes `verify`. The seed and
+  length come from `SIFT_FUZZ_SEED` and `SIFT_FUZZ_OPS`.
+
+### Responsiveness
+
+- **Draw when results arrive.** GPUI draws on display-link ticks. A
+  keystroke's results arrived in about 4 ms, then waited up to a refresh
+  interval to be drawn. `set_results` now asks the panel's layer to
+  display right away (`draw_soon`, the same call as `Panel::draw_now`),
+  from a foreground task outside the GPUI update. Keystroke to frame went
+  from a median 15.4 ms to 2.6 ms.
+- **UI bench.** `SIFT_UI_BENCH=<rounds>` (`uibench.rs`) makes the
+  launcher type queries into itself and report keystroke-to-frame and
+  show-to-frame latencies. `scripts/ui-bench.sh` runs it and then reads
+  memory and idle CPU.
+
+### Memory and idle cost
+
+- **Icons** are decoded into GPUI `RenderImage`s on the background
+  executor, so the launcher owns every decoded icon.
+  `icons::IconCache` keeps application icons (released and re-added when
+  the catalog reloads) and at most 256 others, least recently used first
+  out. Evicted icons are removed from the texture atlas
+  (`App::drop_image`).
+- **Clipboard history** polls the pasteboard change counter on a
+  background-QoS thread (`sift_macos::ClipboardWatcher`). It wakes the
+  main thread only when the counter changed. Hidden with history off,
+  the launcher has 0.7 context switches a second, and `sample` shows
+  every thread blocked.
+
+### Accessibility
+
+GPUI 0.2 draws into one Metal view and has no accessibility tree, so
+VoiceOver cannot walk the result list. The launcher does three things
+instead, with no extra permission:
+
+- **Announcements** (`sift_macos::a11y::announce`, AppKit's
+  `NSAccessibilityAnnouncementRequestedNotification`). When the highlight
+  moves, it says the result, kind, folder name and position, interrupting
+  other speech. When the summary changes, it waits 400 ms after the last
+  change, then says the message, the empty-result text, or the count and
+  top result, politely. The text comes from `speech.rs`. VoiceOver state
+  is read each time the panel opens.
+- **The window is titled "Sift"** (the title stays hidden), so VoiceOver
+  and the window list name it.
+- **Display settings.** Increase Contrast switches to stronger colours
+  and outlines the selected row. Differentiate Without Color adds the
+  outline, so the selection does not rely on colour alone. The settings
+  are read when the panel opens (about 15 µs). The panel has no
+  animations, so Reduce Motion needs nothing, and it is opaque, so Reduce
+  Transparency needs nothing either.
+
+These AppKit calls are made on the main thread only; elsewhere they return
+defaults. Calling them from test threads crashed the test binary about
+once in 130 runs.
+
 ## What is deliberately deferred
 
 - A snapshot delta overlay for very large indexes (see "Index service").
 - `getattrlistbulk` scanning, and Launch Services package detection.
-- Launcher: a configurable hotkey, launch at login, lazy icon loading,
-  and app-folder watching (the catalog currently refreshes by age).
+- Launcher: a configurable hotkey, launch at login, lazy loading of
+  application icons (they are rendered with the catalog), and app-folder
+  watching (the catalog currently refreshes by age).
+- A real accessibility tree for the result list (needs GPUI support).
+  Announcements stand in for it.
 - Security-scoped bookmarks (only needed for a sandboxed build).
 - Auto-paste of snippets and clipboard entries (needs Accessibility),
   and non-text clipboard history.

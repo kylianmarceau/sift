@@ -422,3 +422,153 @@ less than one step. With the feature off, no timer exists.
   expected. `scripts/measure-hotkey.sh` needs a real key press.
 - Quick Look open time. The panel animates itself in, and it was checked
   for correctness only (`examples/quicklook_check.rs`).
+
+## 2026-10-21 — Phase 4: optimization and polish
+
+Same machine as above. Release builds. Each table says what it reports.
+
+### Typing in the launcher (`scripts/ui-bench.sh`)
+
+The launcher types queries into its own search field one character at a
+time, 60 ms apart, through the real search path. It runs against a copy of
+the 100k-file benchmark index plus the installed applications, with the
+panel on screen. The clock starts when the character is inserted. It
+stops inside the first `render` that shows the new results, so layout,
+paint and presentation follow, as in the hotkey measurement above. Seven
+queries, from `safari` to `monday ext:pdf`, give 59 keystrokes per round.
+
+**The fix.** New results arrived 3.9 ms (median) after a keystroke, but
+the frame waited for GPUI's next display-link tick, about 11 ms later. The
+launcher now asks for a draw as soon as results arrive (`draw_soon`, the
+same mechanism as `Panel::draw_now`).
+
+| build | rounds | keystrokes | median | p95 | max |
+|-------|-------:|-----------:|-------:|----:|----:|
+| before (`acdeeee`) | 3 | 177 | 15.4 ms | 18.5 ms | — |
+| after (`b2dab7c`)  | 3 | 177 | 3.4 ms  | 6.3 ms  | — |
+| current (`35dc224`) | 5 | 295 | **2.62 ms** | **5.70 ms** | 7.95 ms |
+
+At `35dc224`, results took a median 2.39 ms after the keystroke, and the
+wait to draw after that was a median 0.10 ms. The slowest full queries
+were `monday ext:pdf` (median 4.76 ms, a filter that reads sizes and
+dates) and `rport` (3.58 ms, a fuzzy match).
+
+**Show to first frame** in the same runs (the bench opens the panel once
+per round): median 8.59 ms, max 27.0 ms (n=5). The first show of a run is
+the slowest, because GPUI builds its glyph atlas and text layouts then.
+The hand-measured hotkey numbers above remain the reference for this.
+
+### Memory
+
+`footprint` (physical footprint, as Activity Monitor shows it). Single
+samples unless stated. Scratch config and index directories were used.
+
+| state | footprint | peak |
+|-------|----------:|-----:|
+| no file index, started hidden | 25 MB | — |
+| no file index, after a UI bench | 34 MB | — |
+| 100k-file index, started hidden | 29–30 MB (2 runs) | 40 MB |
+| 100k-file index, after 1 bench round | 50–53 MB (2 runs) | 72–78 MB |
+| 100k-file index, after 8 bench rounds | 47–55 MB (2 runs) | 70–78 MB |
+| 100k-file index, after 5 rounds at `35dc224` | 50 MB | 78 MB |
+
+- **No growth with use.** One round and eight rounds end at the same
+  footprint, within run-to-run noise. The rise after the first show is a
+  one-time cost: Metal drawables for the panel and IOSurfaces (about
+  6 MB), plus GPUI's glyph atlas and text-layout caches (about 7 MB of
+  malloc). `vmmap -summary` showed these before and after.
+- **Earlier figures of 38 MB hidden** included a one-off rebuild of the
+  name snapshot (the benchmark index had an older snapshot version). The
+  bench script now refreshes the snapshot first.
+- **Icon cache.** It was unbounded. Application icons are now kept, plus
+  at most 256 others, with the least recently used dropped first. Dropped
+  icons are also removed from GPUI's texture atlas. A bench round renders
+  about 24 non-application icons, so the bound does not change these
+  numbers. It caps a long session that sees many file types and bundles
+  at about 4 MB of icon pixels.
+
+Against the targets: the basic launcher idles under 50 MB (25–34 MB), and
+with a 100k-file index it idles under 100 MB (47–55 MB). A larger index
+adds its database pages and snapshot as mapped, mostly clean memory.
+
+### Idle CPU and wake-ups
+
+The panel was hidden after a 10 s settle. CPU time comes from `ps` over
+30–60 s, and context switches from `top -stats csw` over 30 s.
+
+| setting | CPU time | context switches/s |
+|---------|---------:|-------------------:|
+| clipboard history off | 0 s in 30 s (after a 5-round bench) | 0.7 |
+| clipboard history on, before | — | 6.3 |
+| clipboard history on, now | — | 2.3 |
+
+The clipboard poll moved from a GPUI timer on the main thread to a
+background-QoS thread. That thread reads the pasteboard change counter
+and wakes the main thread only when it changed. `sample` of the idle
+process showed every thread blocked. While the panel is open, GPUI's
+display link runs at the screen's refresh rate (about 0.5% CPU). That is
+inside GPUI and stops when the panel hides.
+
+### Indexing throughput
+
+Seven runs each, medians (min–max). Warm cache, 8 directory-reading
+threads. The Phase 0 code (`189da10`) was built in a scratch worktree and
+run in alternation with the current code (`35dc224`), two rounds.
+
+| tree | Phase 0 scan | current scan | current total |
+|------|-------------:|-------------:|--------------:|
+| 10,001 entries  | 18.9–19.8 ms   | 21.1–21.7 ms   | 23.0–23.6 ms |
+| 100,001 entries | 168.6–171.1 ms | 179.4–181.0 ms | 194.6–196.1 ms |
+
+(The ranges are the two rounds' medians.) The current scan is about 6%
+slower at 100k. One known cause is that it now checks each folder for a
+`CACHEDIR.TAG` file (6,365 folders here); the difference was not broken
+down further. The 158 ms in the Phase 0 table was a single sample; the
+same code measures 169–171 ms today.
+
+By thread count (100k, single runs): 1 thread 376 ms, 2 threads 264 ms,
+4 threads 209 ms, 8 threads 195 ms. A `sample` profile of a 2-thread run
+(1 ms interval, 100 samples on the writer):
+
+- **Readers:** opening directories (65 samples), `fstatat` per entry
+  (49), and `getdirentries` (14).
+- **Writer:** waiting for batches (36 samples), and SQLite inserts
+  including index maintenance and WAL writes (33).
+
+Possible future work: read names and attributes together with
+`getattrlistbulk` instead of `readdir` plus `fstatat`, and build the
+secondary indexes after the bulk insert. Neither is needed for the
+current targets.
+
+Peak footprint while indexing 100k: 12.1–12.9 MiB (`/usr/bin/time -l`,
+7 runs).
+
+### Crash recovery and correctness
+
+| check | result |
+|-------|--------|
+| `sift index` killed with SIGKILL at 10 points (5–150 ms) into a 20k-file scan | 8 left no root, 2 a complete root, 0 a partial one. All passed `quick_check` and `sift verify` (test `crash.rs`) |
+| `PRAGMA quick_check` on the 100k index (run at startup after a crash) | 10.6 ms (single run) |
+| `sift verify`, 10k index (check, invariants, compare with disk) | 4 + 17 + 62 ms |
+| `sift verify`, 100k index | 18 + 104 + 329 ms |
+| `sift verify --quick`, 1M synthetic index | 176 ms + 1.4 s |
+| Live-update fuzz: random creates, renames, moves, edits and removals through FSEvents, then a comparison with a fresh scan | seeds 1–8, 2,000–3,000 operations each (18,000 total): all matched, about 270 ms after the last edit |
+
+The fuzz test runs 400 operations with a fixed seed in `cargo test`.
+`SIFT_FUZZ_SEED` and `SIFT_FUZZ_OPS` run longer or different sequences.
+
+### Accessibility cost
+
+Reading the accessibility display settings and VoiceOver state when the
+panel opens takes 11–45 µs (8 shows, debug log, since removed). With
+VoiceOver off, the launcher does nothing else for accessibility.
+
+### Not measured
+
+- Battery impact over hours. The idle figures above (0 s CPU, 0.7 wake-ups
+  per second) are the proxy. `powermetrics` needs `sudo`, and Energy
+  Impact in Activity Monitor needs a person to watch it.
+- Announcements as heard with VoiceOver on. They were checked through
+  `SIFT_ANNOUNCE=1` and the debug log (see README). VoiceOver itself
+  needs a person.
+- Cold-cache indexing (needs `sudo purge`).

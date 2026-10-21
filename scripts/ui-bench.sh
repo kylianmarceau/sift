@@ -26,7 +26,7 @@ fi
 cargo build --release --quiet -p sift-launcher -p sift-cli --manifest-path "$ROOT/Cargo.toml"
 # Bring the source's name snapshot up to date (a no-op when it is), so the
 # launcher starts the way it does for a user, without a one-off rebuild.
-"$ROOT/target/release/sift" --index-dir "$SOURCE" search sift-ui-bench-warmup >/dev/null
+"$ROOT/target/release/sift" --index-dir "$SOURCE" search sift-ui-bench-warmup >/dev/null 2>&1
 rm -rf "$WORK"
 mkdir -p "$WORK/config"
 cp -R "$SOURCE" "$WORK/index"
