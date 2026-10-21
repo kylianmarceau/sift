@@ -359,3 +359,197 @@ fn a_verified_start_keeps_an_intact_index() {
     assert_eq!(FileProvider::new(index).search("kept", 5).len(), 1);
     drop(service);
 }
+
+/// A small deterministic generator (xorshift64*), so a failing run can be
+/// repeated with its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+/// Every folder and file under `dir` (relative), sorted.
+fn walk(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut folders = vec![PathBuf::new()];
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < folders.len() {
+        let current = dir.join(&folders[i]);
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.filter_map(Result::ok) {
+                let rel = folders[i].join(entry.file_name());
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => folders.push(rel),
+                    Ok(_) => files.push(rel),
+                    Err(_) => {}
+                }
+            }
+        }
+        i += 1;
+    }
+    folders.sort();
+    files.sort();
+    (folders, files)
+}
+
+/// One random filesystem operation inside `root` (or between `root` and
+/// `outside`). Failures (a name already taken, say) are fine: whatever
+/// happens on disk is what the index must end up matching.
+fn random_operation(rng: &mut Rng, root: &Path, outside: &Path, counter: &mut u64) {
+    let (folders, files) = walk(root);
+    let folder = &folders[rng.below(folders.len())];
+    *counter += 1;
+    let name = format!(
+        "n{counter}-{}",
+        ["a", "report", "Ünïcode", "with space", "x.rs"][rng.below(5)]
+    );
+    // Weighted towards creating, so the tree grows over the run.
+    match rng.below(14) {
+        0..=3 => {
+            let _ = std::fs::write(root.join(folder).join(format!("{name}.txt")), b"hello");
+        }
+        4 => {
+            if !files.is_empty() {
+                let file = &files[rng.below(files.len())];
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(root.join(file))
+                {
+                    use std::io::Write;
+                    let _ = f.write_all(&vec![b'z'; 1 + rng.below(4000)]);
+                }
+            }
+        }
+        5 => {
+            if !files.is_empty() {
+                let _ = std::fs::remove_file(root.join(&files[rng.below(files.len())]));
+            }
+        }
+        6..=8 => {
+            let _ = std::fs::create_dir_all(root.join(folder).join(&name).join("inner"));
+            let _ = std::fs::write(root.join(folder).join(&name).join("inner/deep.md"), b"d");
+        }
+        9 => {
+            // Only nested folders, so the tree keeps growing.
+            let nested: Vec<&PathBuf> = folders
+                .iter()
+                .filter(|f| f.components().count() >= 2)
+                .collect();
+            if !nested.is_empty() {
+                let gone = nested[rng.below(nested.len())];
+                let _ = std::fs::remove_dir_all(root.join(gone));
+            }
+        }
+        10 => {
+            if !files.is_empty() {
+                let file = &files[rng.below(files.len())];
+                let _ = std::fs::rename(root.join(file), root.join(folder).join(&name));
+            }
+        }
+        11 => {
+            if folders.len() > 1 {
+                let moved = &folders[1 + rng.below(folders.len() - 1)];
+                // Not into itself or one of its own subfolders.
+                if !folder.starts_with(moved) {
+                    let _ = std::fs::rename(root.join(moved), root.join(folder).join(&name));
+                }
+            }
+        }
+        12 => {
+            if folders.len() > 1 {
+                let moved = &folders[1 + rng.below(folders.len() - 1)];
+                let _ = std::fs::rename(root.join(moved), outside.join(&name));
+            }
+        }
+        _ => {
+            let (_, away) = walk(outside);
+            let (away_folders, _) = walk(outside);
+            if away_folders.len() > 1 {
+                let back = &away_folders[1 + rng.below(away_folders.len() - 1)];
+                let _ = std::fs::rename(outside.join(back), root.join(folder).join(&name));
+            } else if !away.is_empty() {
+                let _ = std::fs::rename(outside.join(&away[0]), root.join(folder).join(&name));
+            }
+        }
+    }
+}
+
+#[test]
+fn random_edits_through_fsevents_end_in_an_index_that_matches_the_disk() {
+    let seed: u64 = std::env::var("SIFT_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0x5eed_2026);
+    let operations: usize = std::env::var("SIFT_FUZZ_OPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(400);
+    eprintln!("seed {seed}, {operations} operations (SIFT_FUZZ_SEED / SIFT_FUZZ_OPS)");
+    let h = harness(|root| {
+        for dir in ["docs", "src/app", "photos/2024"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            touch(&root.join(dir).join("start.txt"));
+        }
+    });
+    let outside = h.base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let mut rng = Rng(seed);
+    let mut counter = 0;
+    let mut done = 0;
+    while done < operations {
+        // Bursts of edits with pauses between them, like real work.
+        let burst = 1 + rng.below(25);
+        for _ in 0..burst.min(operations - done) {
+            random_operation(&mut rng, &h.root, &outside, &mut counter);
+            done += 1;
+        }
+        std::thread::sleep(Duration::from_millis(rng.below(300) as u64));
+    }
+
+    // Once the service catches up, the index must match a fresh scan.
+    let db = h.base.join("index").join(sift_search::DB_FILE);
+    let scratch = h.base.join("fresh.db");
+    let started = Instant::now();
+    let mut last = None;
+    while started.elapsed() < TIMEOUT {
+        std::thread::sleep(Duration::from_millis(250));
+        let store = sift_store::Store::open_read_only(&db).expect("open index");
+        let root = store.root(&h.root).expect("roots").expect("root");
+        let diff =
+            sift_indexer::compare_with_disk(&store, &root, &IndexOptions::default(), &scratch)
+                .expect("compare");
+        assert_eq!(store.verify().expect("verify"), Vec::<String>::new());
+        if diff.is_empty() {
+            eprintln!(
+                "matches the disk ({} entries) {:?} after the last edit",
+                diff.on_disk,
+                started.elapsed()
+            );
+            return;
+        }
+        last = Some(diff);
+    }
+    let diff = last.expect("compared at least once");
+    let show = |paths: &[Vec<u8>]| {
+        paths
+            .iter()
+            .take(10)
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect::<Vec<_>>()
+    };
+    panic!(
+        "seed {seed}: index never matched the disk. missing {:?}, extra {:?}, changed {:?}",
+        show(&diff.missing),
+        show(&diff.extra),
+        show(&diff.changed)
+    );
+}
