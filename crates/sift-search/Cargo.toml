@@ -1,0 +1,25 @@
+[package]
+name = "sift-search"
+description = "Filename search over the sift file index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sift-store.workspace = true
+bytemuck.workspace = true
+memchr.workspace = true
+memmap2.workspace = true
+nucleo-matcher.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+sift-indexer.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
