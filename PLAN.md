@@ -227,9 +227,8 @@ Moved to later:
 - Faster scanning with `getattrlistbulk` and deferred index creation.
   The profile shows where the time goes, but the current speed (about
   550k entries a second, warm) meets the targets.
-- Configurable hotkey, launch at login (changes a system setting, so it
-  will be opt-in, and I will ask first), and a settings page for
-  `config.toml` options.
+- Configurable hotkey and a settings page for `config.toml` options.
+  (Launch at login landed in Phase 5, opt-in.)
 
 ## UI redesign ✅ built, visual check pending
 
@@ -251,14 +250,45 @@ was checked with a browser mockup using the same sizes and colours, but
 not on screen. Please look at both themes, Increase Contrast, a long
 file name, an error message, and the settings window.
 
-## Phase 5: packaging and release
+## Phase 5: packaging and release ✅ built, release not yet published
 
-`.app` bundle, signing, notarization, updates, documentation, Apple
-Silicon builds (Intel if justified).
+Decisions: MIT licence; updates are checked and reported, never
+installed; Apple Silicon only; Open at Login off by default.
+
+- [x] MIT licence, package metadata, and a generated list of third-party
+      licences shipped in the bundle
+- [x] App icon (`packaging/icon.svg` → `Sift.icns`)
+- [x] A proper bundle: Info.plist template with version and build
+      number, bundle id `io.github.kylianmarceau.sift`, macOS 13+,
+      hardened runtime
+- [x] `scripts/release.sh`: checks, Developer ID signing, notarization
+      and stapling when credentials are given, `.zip` and `.dmg`,
+      checksums. Tested ad-hoc: both packages extract to a bundle with a
+      valid signature, checksums match
+- [x] Open at Login through `SMAppService`, a switch in Settings
+- [x] Daily update check against GitHub Releases, reported in the footer
+      and Settings, with `[updates] check = false` to turn it off
+- [x] Install, privacy, uninstall, contributing, security, changelog and
+      release documentation
+
+Not yet done, and needing you:
+
+- **Open at Login on your Mac.** The switch's status reading is tested;
+  registering was not, because it changes your login items. Please turn
+  it on in Settings, check System Settings › General › Login Items, log
+  out and in, then turn it off again.
+- **Folder access again.** The new bundle id makes macOS see Sift as a
+  new app, so it asks again for Documents, Desktop or Downloads.
+- **Signing and notarization** need your Apple Developer ID and a
+  notarytool keychain profile (RELEASING.md). Without them, releases are
+  ad-hoc signed and users click Open Anyway once.
+- **Publishing.** Tagging v0.1.0, creating the GitHub release, and making
+  the repository public (the update check cannot see releases of a
+  private repository).
+- **CI** (GitHub Actions on macOS) is not set up. On a private
+  repository it uses paid runner minutes.
 
 ## Open questions for you
 
-- License for the open-source release (Rust projects usually use
-  MIT OR Apache-2.0).
-- Whether the GitHub repository should become public now or at a later
-  milestone. It is currently private.
+- When to make the repository public and publish 0.1.0.
+- Whether to set up CI once the repository is public (free there).
