@@ -4716,6 +4716,7 @@ dependencies = [
  "global-hotkey",
  "gpui",
  "raw-window-handle",
+ "resvg",
  "sift-apps",
  "sift-calc",
  "sift-core",
