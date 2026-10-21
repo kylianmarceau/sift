@@ -1,6 +1,6 @@
 //! The launcher view: search field, result list and footer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, SharedString,
-    Subscription, Task, Window, actions, div, img, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, RenderImage,
+    SharedString, Subscription, Task, Window, actions, div, img, prelude::*, px,
 };
 use sift_apps::{AppCatalog, AppProvider, Location};
 use sift_calc::CalculatorProvider;
@@ -20,7 +20,7 @@ use sift_macos::{LaunchError, Panel, QuickLook};
 
 use crate::clipboard;
 use crate::commands::{self, CommandProvider};
-use crate::icons::{IconKey, icon_for};
+use crate::icons::{IconCache, IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
 use crate::theme::Theme;
 use crate::user::{Reload, UserData, expand_placeholders};
@@ -111,7 +111,7 @@ pub struct Launcher {
     results: Vec<ResultItem>,
     selection: Selection,
     scroll_top: usize,
-    icons: HashMap<IconKey, Option<Arc<Image>>>,
+    icons: IconCache<Arc<RenderImage>>,
     /// Icons being rendered in the background.
     icon_jobs: HashSet<IconKey>,
     panel: Option<Panel>,
@@ -255,7 +255,7 @@ impl Launcher {
             results: Vec::new(),
             selection: Selection::default(),
             scroll_top: 0,
-            icons: HashMap::new(),
+            icons: IconCache::new(IconCache::<Arc<RenderImage>>::LIMIT),
             icon_jobs: HashSet::new(),
             panel: None,
             quick_look: None,
@@ -494,12 +494,13 @@ impl Launcher {
             return;
         }
         let started = Instant::now();
+        let decode = icon_decoder(cx);
         let discover = cx.background_spawn(async move {
             let catalog = AppCatalog::discover(&Location::defaults());
-            let icons: Vec<(PathBuf, Option<Vec<u8>>)> = catalog
+            let icons: Vec<(PathBuf, Option<Arc<RenderImage>>)> = catalog
                 .apps()
                 .iter()
-                .map(|app| (app.path.clone(), sift_macos::icon_png(&app.path, ICON_PX)))
+                .map(|app| (app.path.clone(), render_icon(&app.path, &decode)))
                 .collect();
             (catalog, icons)
         });
@@ -514,9 +515,11 @@ impl Launcher {
                 this.app_count = catalog.len();
                 this.apps = Some(Arc::new(AppProvider::new(catalog)));
                 this.rebuild_search();
-                for (path, png) in icons {
-                    this.icons.insert(IconKey::Path(path), png.map(png_image));
+                let mut dropped = this.icons.release_kept();
+                for (path, icon) in icons {
+                    dropped.extend(this.icons.insert(IconKey::Path(path), icon, true));
                 }
+                free_textures(dropped, cx);
                 this.catalog_loaded_at = Some(Instant::now());
                 this.catalog_task = None;
                 // Re-run the current query against the fresh catalog.
@@ -883,18 +886,27 @@ impl Launcher {
 
     /// The icon for `item`, if rendered. Missing icons are rendered on the
     /// background executor and the view refreshes when they arrive.
-    fn icon(&mut self, item: &ResultItem, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+    fn icon(&mut self, item: &ResultItem, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
         let (key, path) = icon_for(item)?;
         if let Some(icon) = self.icons.get(&key) {
-            return icon.clone();
+            return icon.cloned();
         }
         if self.icon_jobs.insert(key.clone()) {
-            let render = cx.background_spawn(async move { sift_macos::icon_png(&path, ICON_PX) });
+            let decode = icon_decoder(cx);
+            let render = cx.background_spawn(async move { render_icon(&path, &decode) });
             cx.spawn(async move |this, cx| {
-                let png = render.await;
+                let icon = render.await;
                 this.update(cx, |this, cx| {
                     this.icon_jobs.remove(&key);
-                    this.icons.insert(key, png.map(png_image));
+                    let rendered = icon.is_some();
+                    let dropped = this.icons.insert(key, icon, false);
+                    tracing::debug!(
+                        rendered,
+                        cached = this.icons.len(),
+                        evicted = dropped.len(),
+                        "icon ready"
+                    );
+                    free_textures(dropped, cx);
                     cx.notify();
                 })
                 .ok();
@@ -1072,8 +1084,32 @@ fn glyph(kind: ResultKind) -> Option<&'static str> {
 
 impl gpui::EventEmitter<IndexStatusChanged> for Launcher {}
 
-fn png_image(bytes: Vec<u8>) -> Arc<Image> {
-    Arc::new(Image::from_bytes(ImageFormat::Png, bytes))
+/// Decodes an icon's PNG into the form GPUI draws (BGRA pixels). Doing it
+/// here, off the main thread, also means the launcher owns every decoded
+/// icon and can free its texture when the icon is evicted.
+fn icon_decoder(cx: &App) -> impl Fn(Vec<u8>) -> Option<Arc<RenderImage>> + Send + 'static {
+    let renderer = cx.svg_renderer();
+    move |png| {
+        Image::from_bytes(ImageFormat::Png, png)
+            .to_image_data(renderer.clone())
+            .inspect_err(|error| tracing::debug!(%error, "cannot decode an icon"))
+            .ok()
+    }
+}
+
+/// Renders `path`'s icon (background thread).
+fn render_icon(
+    path: &Path,
+    decode: &impl Fn(Vec<u8>) -> Option<Arc<RenderImage>>,
+) -> Option<Arc<RenderImage>> {
+    decode(sift_macos::icon_png(path, ICON_PX)?)
+}
+
+/// Removes evicted icons from the windows' texture atlases.
+fn free_textures(images: Vec<Arc<RenderImage>>, cx: &mut App) {
+    for image in images {
+        cx.drop_image(image, None);
+    }
 }
 
 fn thousands(n: usize) -> String {
