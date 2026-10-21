@@ -13,6 +13,9 @@ publish = false
 sift-store = { path = "crates/sift-store" }
 sift-indexer = { path = "crates/sift-indexer" }
 sift-search = { path = "crates/sift-search" }
+sift-core = { path = "crates/sift-core" }
+sift-apps = { path = "crates/sift-apps" }
+sift-macos = { path = "crates/sift-macos" }
 
 anyhow = "1.0.104"
 bytemuck = "1.25"

@@ -1,0 +1,12 @@
+[package]
+name = "sift-core"
+description = "Search provider interface and shared result types for the sift launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
