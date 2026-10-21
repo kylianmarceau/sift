@@ -23,37 +23,70 @@ Done:
       across restarts, re-index after rename/delete, 60k-entry brute-force
       cross-check
 - [x] Benchmarks at 10k / 100k (on disk) and 10k / 100k / 1M (store-only)
+- [x] Real-data check on `~/Documents`, which led to:
+  - [x] dependency and cache folders skipped by default
+        (`--include-dependencies` to keep them)
+  - [x] index options saved per root; `sift index` with no paths
+        re-indexes every root
+  - [x] database compaction after large deletes
+  - [x] ranking: whole-word matches and the user's own files rank above
+        partial matches and files inside dependency folders
 
 Next (small milestones, in order):
 
-1. **Real-data check** (needs your go-ahead): index a real folder such as
-   `~/Documents` or a code directory and compare ranking quality and timing
-   with the synthetic results.
-2. **1M on-disk indexing benchmark** (needs your go-ahead): it creates a
+1. **1M on-disk indexing benchmark** (needs your go-ahead): it creates a
    million empty files under `$TMPDIR`. Also try a cold-cache run.
-3. **`getattrlistbulk` scanner**: fetch names and attributes per directory
+2. **`getattrlistbulk` scanner**: fetch names and attributes per directory
    in bulk instead of one `lstat` per entry. Measure against the current
    scanner.
-4. **Query syntax**: `f:` / `d:` prefixes and `ext:` filters in the query
+3. **Query syntax**: `f:` / `d:` prefixes and `ext:` filters in the query
    text itself (shared later by the launcher), plus path-fragment filters
    (`src/ main`).
-5. **Ranking polish**: CamelCase word boundaries, a light bonus for folders
+4. **Ranking polish**: CamelCase word boundaries, a light bonus for folders
    and apps, and a configurable deterministic tie-break.
-6. CI: `fmt` / `clippy` / `test` on a macOS runner.
+5. CI: `fmt` / `clippy` / `test` on a macOS runner.
 
-## Phase 1: minimal launcher (GPUI)
+## Phase 1: minimal launcher (GPUI) ✅ built, manual check pending
 
-- Verify GPUI's current release and how it is distributed (crates.io or
-  git), then build a floating panel window with a text field and result
-  list, keyboard navigation, and fast show/hide.
-- Discover applications (`/Applications`, `/System/Applications`,
-  `~/Applications`) and launch through `NSWorkspace` (objc2).
-- Add a global hotkey and measure hotkey-to-visible time.
-- Introduce a `core` crate for provider and result types.
+Done:
+
+- [x] `sift-core`: `Provider` trait, `ResultItem`/`Action`, multi-provider
+      `Search`, `QueryClock` (stale-result protection), `Selection`
+- [x] `sift-apps`: app discovery (system, user and CoreServices folders,
+      symlinked apps, duplicate bundle ids) and the app provider, using the
+      same matcher as file search
+- [x] `sift-macos`: app icons as PNG, `NSWorkspace` launching with error
+      reporting, panel placement and sizing, accessory activation policy
+- [x] `sift-launcher`: GPUI 0.2.2 floating panel (720 pt, dynamic height,
+      rounded corners, light and dark mode, footer hints), IME-capable
+      search field, arrow/Ctrl-N/Ctrl-P navigation, Enter opens,
+      Esc / click-away / Option+Space hides
+- [x] Global hotkey Option+Space without Accessibility permission (Carbon)
+- [x] `scripts/bundle-app.sh` → `target/release/Sift.app` (no Dock icon,
+      ad-hoc signed)
+- [x] Measured: 26 MB idle footprint, 0 s CPU in 60 s idle, about 100 ms
+      warm startup, app search ≤ 11 µs (BENCHMARKS.md)
+
+Still open in Phase 1:
+
+1. **Manual GUI check** (needs you, see README "Trying the launcher"):
+   look, typing, arrows, Enter, Esc, Option+Space, dark/light switch,
+   multiple displays, full-screen apps.
+2. **Hotkey-to-visible latency**: read the `hotkey to first frame` log
+   lines after a few presses and record them in BENCHMARKS.md.
+3. Fix whatever the manual check finds.
+
+Before Phase 2 (small, optional):
+
+- Lazy icon loading (icons for visible rows only) to shorten the first
+  catalog load.
+- A configurable hotkey and launch at login (`SMAppService`).
+- Recency boost for recently launched apps.
 
 ## Phase 2: unified file search
 
-- File provider backed by `sift-search`, with stale-result suppression.
+- File provider backed by `sift-search`, plugged into the existing
+  `Provider` trait and query clock.
 - FSEvents incremental updates: event-id persistence, a delta overlay on
   the snapshot, and subtree rescan on dropped history.
 - Settings UI for roots and exclusions, and security-scoped bookmarks.
