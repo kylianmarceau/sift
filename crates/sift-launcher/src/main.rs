@@ -140,6 +140,20 @@ fn main() {
             })
             .detach();
 
+            // SIFT_RUN_COMMAND=<id> runs a built-in command shortly after
+            // launch, from inside a launcher update as choosing it does (for
+            // testing commands such as `settings` without a person).
+            if let Ok(command) = std::env::var("SIFT_RUN_COMMAND") {
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                    tracing::info!(command, "running command from SIFT_RUN_COMMAND");
+                    let _ = window.update(cx, |launcher, _, cx| launcher.run_command(&command, cx));
+                })
+                .detach();
+            }
+
             if let Some(rounds) = std::env::var("SIFT_UI_BENCH")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())

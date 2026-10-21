@@ -740,8 +740,8 @@ impl Launcher {
         cx.notify();
     }
 
-    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        self.activate_selected(window, cx);
+    fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
+        self.activate_selected(cx);
     }
 
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
@@ -820,7 +820,7 @@ impl Launcher {
         self.selection.index().and_then(|i| self.results.get(i))
     }
 
-    fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn activate_selected(&mut self, cx: &mut Context<Self>) {
         if self.message.take().is_some() {
             // Enter dismisses an error first; the list is hidden under it.
             self.resize(cx);
@@ -854,7 +854,7 @@ impl Launcher {
             Action::Shell(command) => crate::shell::spawn(command),
             Action::Run(command) => {
                 self.record_use(&item);
-                self.run_command(command, window, cx);
+                self.run_command(command, cx);
                 return;
             }
         };
@@ -921,7 +921,8 @@ impl Launcher {
         }
     }
 
-    fn run_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Runs a built-in command (`commands::ALL`), as choosing it does.
+    pub fn run_command(&mut self, command: &str, cx: &mut Context<Self>) {
         match command {
             commands::EDIT_CONFIG => self.edit_config(cx),
             commands::CLIPBOARD => {
@@ -945,7 +946,11 @@ impl Launcher {
             }
             commands::SETTINGS => {
                 self.hide(cx);
-                crate::settings::open(cx.entity(), window, cx);
+                // Opening a window draws it at once, and the settings view
+                // reads the launcher while drawing. Inside this update that
+                // read panics, so open it once the update has returned.
+                let launcher = cx.entity();
+                cx.defer(move |cx| crate::settings::open(launcher, cx));
             }
             commands::QUIT => cx.quit(),
             other => tracing::warn!(command = other, "unknown command"),
@@ -1021,9 +1026,9 @@ impl Launcher {
                     gpui::transparent_black()
                 })
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
                 this.selection.select(index);
-                this.activate_selected(window, cx);
+                this.activate_selected(cx);
             }))
             .child(result_icon(kind, icon))
             .child(

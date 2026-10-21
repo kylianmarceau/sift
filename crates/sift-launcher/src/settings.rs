@@ -38,7 +38,10 @@ pub fn is_open(cx: &App) -> bool {
 }
 
 /// Opens the settings window, or brings the open one to the front.
-pub fn open(launcher: Entity<Launcher>, _window: &mut Window, cx: &mut App) {
+///
+/// Must not run inside an update of the launcher: the new window draws
+/// immediately, and drawing reads the launcher (see `Launcher::run_command`).
+pub fn open(launcher: Entity<Launcher>, cx: &mut App) {
     // Activation re-enters GPUI through AppKit callbacks, so it runs after
     // the current update (see `Panel::set_height` for the same issue).
     let activate = || {
@@ -73,6 +76,7 @@ pub fn open(launcher: Entity<Launcher>, _window: &mut Window, cx: &mut App) {
         cx.new(|cx| Settings::new(launcher, window, cx))
     }) {
         Ok(handle) => {
+            tracing::info!("settings window opened");
             cx.set_global(OpenSettings(handle));
             cx.spawn(async move |_| activate()).detach();
         }

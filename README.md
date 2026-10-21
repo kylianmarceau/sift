@@ -118,8 +118,10 @@ access to Documents, Desktop or Downloads. Folders indexed with
 Environment options: `SIFT_INDEX_DIR` (index location),
 `SIFT_CONFIG_DIR` (where `config.toml` and `state.db` live),
 `SIFT_START_HIDDEN=1` (don't show the panel at launch), `SIFT_LOG=debug`,
-`SIFT_LOG_DIR` (log location), and `SIFT_ANNOUNCE=1` (make the VoiceOver
-announcements, logged at debug level, even when VoiceOver is off).
+`SIFT_LOG_DIR` (log location), `SIFT_ANNOUNCE=1` (make the VoiceOver
+announcements, logged at debug level, even when VoiceOver is off), and
+`SIFT_RUN_COMMAND=<id>` (run a built-in command such as `settings` half a
+second after launch, as choosing it does; for testing).
 
 To see timing logs (startup, catalog load, hotkey-to-first-frame), run the
 executable from a terminal instead:
