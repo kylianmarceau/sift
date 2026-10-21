@@ -201,7 +201,7 @@ impl Watcher {
             return Err(WatchError::Create);
         }
 
-        let queue = DispatchQueue::new("dev.sift.fsevents", None);
+        let queue = DispatchQueue::new("io.github.kylianmarceau.sift.fsevents", None);
         // SAFETY: `stream` is a valid, not yet scheduled stream.
         let started = unsafe {
             FSEventStreamSetDispatchQueue(stream, Some(&queue));
