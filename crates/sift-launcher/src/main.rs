@@ -13,6 +13,7 @@ mod launcher;
 mod settings;
 mod shell;
 mod theme;
+mod uibench;
 mod user;
 
 use std::sync::OnceLock;
@@ -135,6 +136,14 @@ fn main() {
             }
         })
         .detach();
+
+        if let Some(rounds) = std::env::var("SIFT_UI_BENCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            cx.spawn(async move |cx| uibench::run(window, rounds, cx).await)
+                .detach();
+        }
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         tracing::info!(

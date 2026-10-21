@@ -123,6 +123,8 @@ pub struct Launcher {
     theme: Theme,
     /// When the hotkey was pressed, until the resulting frame is rendered.
     show_requested_at: Option<Instant>,
+    /// Timings for the built-in UI benchmark (`SIFT_UI_BENCH`).
+    bench: Option<crate::uibench::Recorder>,
     search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -235,6 +237,7 @@ impl Launcher {
             message: None,
             theme,
             show_requested_at: None,
+            bench: None,
             search_task: None,
             _subscriptions: subscriptions,
         };
@@ -261,6 +264,28 @@ impl Launcher {
         self.file_search = Search::new(vec![self.files.clone() as Arc<dyn Provider>])
             .with_boosts(self.user.boosts());
         self.clip_search = Search::new(vec![self.user.clipboard() as Arc<dyn Provider>]);
+    }
+
+    /// Whether applications and the file index have loaded (UI benchmark).
+    pub fn bench_ready(&self) -> bool {
+        self.app_count > 0 && !self.file_index.is_empty()
+    }
+
+    pub fn start_bench(&mut self) {
+        self.bench = Some(crate::uibench::Recorder::default());
+    }
+
+    pub fn bench(&self) -> Option<&crate::uibench::Recorder> {
+        self.bench.as_ref()
+    }
+
+    /// Types `text` into the search field, as the UI benchmark's keystroke.
+    pub fn bench_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(bench) = &mut self.bench {
+            bench.typed(text);
+        }
+        self.input
+            .update(cx, |input, cx| input.set_text(text.to_owned(), cx));
     }
 
     /// Picks up edits to config.toml (one `stat` when nothing changed).
@@ -504,6 +529,9 @@ impl Launcher {
             self.scroll_top = 0;
         }
         self.results = results;
+        if let Some(bench) = &mut self.bench {
+            bench.results(&self.query, self.results.len());
+        }
         if let Some(selected) = self.selection.index() {
             self.scroll_top = scroll_to_show(self.scroll_top, selected, VISIBLE_ROWS);
         }
@@ -1025,6 +1053,12 @@ impl Render for Launcher {
                 latency_ms = at.elapsed().as_secs_f64() * 1000.,
                 "hotkey to first frame"
             );
+            if let Some(bench) = &mut self.bench {
+                bench.shown(at.elapsed());
+            }
+        }
+        if let Some(bench) = &mut self.bench {
+            bench.frame();
         }
         let theme = self.theme;
         let divider = || div().h(px(DIVIDER)).w_full().bg(theme.divider);
