@@ -41,6 +41,10 @@ pub struct ServiceConfig {
     /// Apply at the latest this long after the first event of a batch,
     /// even if events keep arriving.
     pub max_delay: Duration,
+    /// Check the database page by page at startup (`quick_check`), for
+    /// example after an unclean shutdown. A damaged database is always
+    /// replaced when it cannot be opened at all.
+    pub verify: bool,
 }
 
 impl ServiceConfig {
@@ -50,6 +54,7 @@ impl ServiceConfig {
             latency: Duration::from_millis(300),
             quiet: Duration::from_millis(150),
             max_delay: Duration::from_secs(2),
+            verify: false,
         }
     }
 }
@@ -153,12 +158,12 @@ impl IndexService {
         let thread = std::thread::Builder::new()
             .name("sift-index".into())
             .spawn(move || {
-                let store = match Store::open(&config.index_dir.join(sift_search::DB_FILE)) {
-                    Ok(store) => store,
+                let (store, recovered) = match open_store(&config) {
+                    Ok(opened) => opened,
                     Err(error) => {
                         tracing::error!(%error, "cannot open the index database");
                         on_status(&Status {
-                            message: Some(error.to_string()),
+                            message: Some(error),
                             ..Status::default()
                         });
                         return;
@@ -174,8 +179,9 @@ impl IndexService {
                     on_status: Box::new(on_status),
                     last_update: None,
                     message: None,
+                    saved_roots: None,
                 };
-                worker.run(rx);
+                worker.run(rx, recovered);
             })?;
         Ok(Self {
             tx,
@@ -207,10 +213,63 @@ struct Worker {
     on_status: Box<dyn Fn(&Status) + Send>,
     last_update: Option<UpdateInfo>,
     message: Option<String>,
+    /// What `roots.bin` was last written with.
+    saved_roots: Option<Vec<(PathBuf, Vec<u8>)>>,
+}
+
+/// A damaged index was replaced at startup.
+struct Recovery {
+    message: String,
+}
+
+/// Opens the index database. A damaged one (it cannot be opened, or
+/// `quick_check` fails when `config.verify` is set) is moved aside with
+/// its snapshot and replaced by an empty database; the roots are then
+/// rescanned from `roots.bin`.
+fn open_store(config: &ServiceConfig) -> Result<(Store, Option<Recovery>), String> {
+    let db = config.index_dir.join(sift_search::DB_FILE);
+    let problem = match Store::open(&db) {
+        Ok(store) if !config.verify => return Ok((store, None)),
+        Ok(store) => {
+            let started = Instant::now();
+            let check = store.quick_check();
+            tracing::info!(
+                ms = started.elapsed().as_secs_f64() * 1000.,
+                "index database checked"
+            );
+            match check {
+                Ok(None) => return Ok((store, None)),
+                Ok(Some(problem)) => problem,
+                Err(error) => error.to_string(),
+            }
+        }
+        Err(error @ sift_store::StoreError::Corrupt { .. }) => error.to_string(),
+        Err(error) => return Err(error.to_string()),
+    };
+    tracing::error!(%problem, "the index database is damaged; rebuilding it");
+    let moved = sift_store::move_aside(&db).map_err(|e| e.to_string())?;
+    let snapshot = config.index_dir.join(sift_search::SNAPSHOT_FILE);
+    if snapshot.exists() {
+        let _ = std::fs::rename(&snapshot, moved.join(sift_search::SNAPSHOT_FILE));
+    }
+    let store = Store::open(&db).map_err(|e| e.to_string())?;
+    Ok((
+        store,
+        Some(Recovery {
+            message: format!(
+                "The file index was damaged and has been rebuilt. The damaged copy is in {}.",
+                moved.display()
+            ),
+        }),
+    ))
 }
 
 impl Worker {
-    fn run(&mut self, rx: Receiver<Msg>) {
+    fn run(&mut self, rx: Receiver<Msg>, recovered: Option<Recovery>) {
+        if let Some(recovery) = recovered {
+            self.rebuild_from_roots_file();
+            self.message = Some(recovery.message);
+        }
         self.startup();
         let mut pending: Option<Msg> = None;
         loop {
@@ -223,7 +282,10 @@ impl Worker {
             };
             match msg {
                 Msg::Shutdown => break,
-                Msg::Command(command) => self.command(command),
+                Msg::Command(command) => {
+                    let label = format!("{command:?}");
+                    self.contain(&label, |worker| worker.command(command));
+                }
                 Msg::Events(mut events, first_at) => {
                     // Batch: wait for a quiet period, bounded by max_delay.
                     let deadline = first_at + self.config.max_delay;
@@ -245,7 +307,9 @@ impl Worker {
                             break;
                         }
                     }
-                    self.apply_events(events, first_at);
+                    self.contain("filesystem changes", |worker| {
+                        worker.apply_events(events, first_at);
+                    });
                 }
             }
         }
@@ -282,7 +346,63 @@ impl Worker {
             self.index.reload_if_stale();
         }
         self.restart_watcher();
+        self.save_roots_file();
         self.emit();
+    }
+
+    /// Runs `work`, and keeps the service alive if it panics: the open
+    /// transaction (if any) rolls back as it unwinds, every root is
+    /// rescanned so the index matches the filesystem again, and the user
+    /// is told. A bug then costs one rescan instead of stopping live
+    /// updates for the rest of the session.
+    fn contain(&mut self, what: &str, work: impl FnOnce(&mut Self)) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self)));
+        if outcome.is_ok() {
+            return;
+        }
+        tracing::error!(what, "the index service hit an internal error; rescanning");
+        for root in self.roots() {
+            if root.path.is_dir() {
+                self.full_scan(&root.path, options_of(&root));
+            }
+        }
+        self.publish_snapshot();
+        self.restart_watcher();
+        self.message = Some(
+            "Sift hit an internal error while updating the file index and rescanned your folders."
+                .into(),
+        );
+        self.emit();
+    }
+
+    /// After a damaged database was replaced: scans the folders listed in
+    /// `roots.bin` into the new one.
+    fn rebuild_from_roots_file(&mut self) {
+        let roots = crate::roots_file::load(&self.config.index_dir);
+        tracing::info!(roots = roots.len(), "rebuilding the index from roots.bin");
+        for (path, options) in roots {
+            if path.is_dir() {
+                self.full_scan(&path, options);
+            } else {
+                tracing::warn!(root = %path.display(), "folder unavailable; not re-added");
+            }
+        }
+    }
+
+    /// Keeps `roots.bin` in step with the roots in the database.
+    fn save_roots_file(&mut self) {
+        let roots: Vec<(PathBuf, Vec<u8>)> = self
+            .roots()
+            .into_iter()
+            .map(|r| (r.path, r.options))
+            .collect();
+        if self.saved_roots.as_ref() == Some(&roots) {
+            return;
+        }
+        match crate::roots_file::save(&self.config.index_dir, &roots) {
+            Ok(()) => self.saved_roots = Some(roots),
+            Err(error) => tracing::warn!(%error, "cannot save roots.bin"),
+        }
     }
 
     fn command(&mut self, command: Command) {
@@ -336,6 +456,7 @@ impl Worker {
                 }
             }
         }
+        self.save_roots_file();
         self.emit();
     }
 

@@ -302,3 +302,60 @@ fn filters_narrow_file_results() {
     assert!(h.titles("in:docs").is_empty());
     assert!(h.titles("report size:huge").is_empty());
 }
+
+#[test]
+fn a_damaged_index_is_rebuilt_from_the_saved_roots() {
+    let mut h = harness(|root| touch(&root.join("survivor.txt")));
+    let index_dir = h.base.join("index");
+    assert!(index_dir.join("roots.bin").exists());
+    drop(h.service.take());
+
+    // Replace the database with garbage, as a disk error might.
+    for name in ["index.db-wal", "index.db-shm"] {
+        let _ = std::fs::remove_file(index_dir.join(name));
+    }
+    std::fs::write(index_dir.join("index.db"), vec![0x5a; 64 * 1024]).unwrap();
+
+    let (index, service, statuses, latest) = start(&h.base);
+    h.provider = FileProvider::new(index.clone());
+    h.index = index;
+    h.service = Some(service);
+    h.statuses = statuses;
+    h.latest = latest;
+    let status = h.wait_status(|s| {
+        s.message.as_deref().is_some_and(|m| m.contains("damaged"))
+            && s.roots.iter().any(|r| r.state == RootState::Watching)
+    });
+    assert_eq!(status.roots[0].path, h.root);
+    h.wait_search("survivor", |t| t == ["survivor.txt"]);
+    // The damaged copy is kept, not deleted.
+    let kept = std::fs::read_dir(&index_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| {
+            e.file_name().to_string_lossy().starts_with("damaged-")
+                && e.path().join("index.db").exists()
+        });
+    assert!(kept);
+}
+
+#[test]
+fn a_verified_start_keeps_an_intact_index() {
+    let mut h = harness(|root| touch(&root.join("kept.txt")));
+    drop(h.service.take());
+    let index = Arc::new(FileIndex::open(&h.base.join("index")));
+    let config = ServiceConfig {
+        verify: true,
+        ..config(&h.base)
+    };
+    let (tx, rx) = channel();
+    let service = IndexService::start(config, index.clone(), move |status| {
+        let _ = tx.send(status.clone());
+    })
+    .expect("start");
+    let status = rx.recv_timeout(TIMEOUT).expect("status");
+    assert_eq!(status.message, None);
+    assert_eq!(status.roots.len(), 1);
+    assert_eq!(FileProvider::new(index).search("kept", 5).len(), 1);
+    drop(service);
+}

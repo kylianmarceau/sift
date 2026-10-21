@@ -11,6 +11,7 @@
 mod filter;
 mod index;
 mod provider;
+mod roots_file;
 mod service;
 
 pub use filter::{Bound, FileQuery};
