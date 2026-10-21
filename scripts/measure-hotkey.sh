@@ -26,6 +26,7 @@ fi
 
 SIFT_LOG=info "$BIN" 2>"$LOG" &
 PID=$!
+disown "$PID"  # no "Terminated" job message when it is stopped at the end
 trap 'kill $PID 2>/dev/null; rm -f "$LOG"' EXIT
 sleep 1
 

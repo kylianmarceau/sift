@@ -4,7 +4,8 @@ use std::ptr::NonNull;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{AllocAnyThread, MainThreadMarker};
+use objc2::runtime::AnyObject;
+use objc2::{AllocAnyThread, MainThreadMarker, Message, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep,
     NSCompositingOperation, NSDeviceRGBColorSpace, NSEvent, NSGraphicsContext,
@@ -125,6 +126,8 @@ pub fn use_accessory_activation_policy() -> bool {
 #[derive(Clone)]
 pub struct Panel {
     window: Retained<NSWindow>,
+    /// GPUI's Metal-backed view (a subview of the window's content view).
+    view: Retained<NSView>,
     mtm: MainThreadMarker,
 }
 
@@ -141,7 +144,11 @@ impl Panel {
         // SAFETY: guaranteed by the caller.
         let view: &NSView = unsafe { ns_view.cast::<NSView>().as_ref() };
         let window = view.window()?;
-        Some(Self { window, mtm })
+        Some(Self {
+            window,
+            view: view.retain(),
+            mtm,
+        })
     }
 
     /// Turns GPUI's titled panel into a plain launcher surface: no title,
@@ -183,6 +190,27 @@ impl Panel {
                 .setFrameTopLeftPoint(NSPoint::new(x.round(), top.round()));
         }
         self.window.makeKeyAndOrderFront(None);
+    }
+
+    /// Draws a frame right now instead of waiting for GPUI's display link.
+    ///
+    /// GPUI stops its display link while the window is hidden, and starts it
+    /// again only when AppKit reports the window visible. That report is
+    /// asynchronous and arrives tens of milliseconds after the window is
+    /// shown. Asking the view's layer to display makes GPUI draw immediately
+    /// (through its `displayLayer:` handler).
+    ///
+    /// Like [`Panel::set_height`], call this from a GPUI foreground task,
+    /// never from inside a GPUI update or render.
+    pub fn draw_now(&self) {
+        // SAFETY: `-[NSView layer]` returns the backing CALayer or nil, and
+        // `-[CALayer display]` takes no arguments and returns nothing.
+        unsafe {
+            let layer: Option<Retained<AnyObject>> = msg_send![&*self.view, layer];
+            if let Some(layer) = layer {
+                let _: () = msg_send![&*layer, display];
+            }
+        }
     }
 
     pub fn hide(&self) {

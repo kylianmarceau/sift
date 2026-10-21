@@ -74,7 +74,7 @@ pub struct Launcher {
     panel: Option<Panel>,
     message: Option<SharedString>,
     theme: Theme,
-    /// When the hotkey was pressed, until the resulting frame is drawn.
+    /// When the hotkey was pressed, until the resulting frame is rendered.
     show_requested_at: Option<Instant>,
     search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -157,20 +157,13 @@ impl Launcher {
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.resize(cx);
-        if let Some(panel) = &self.panel {
+        if let Some(panel) = self.panel.clone() {
             panel.show();
+            // Draw the first frame as soon as this update returns, rather
+            // than when GPUI's display link restarts (see `Panel::draw_now`).
+            cx.spawn(async move |_, _| panel.draw_now()).detach();
         }
         window.focus(&self.input.focus_handle(cx));
-        if self.show_requested_at.is_some() {
-            cx.on_next_frame(window, |this, _, _| {
-                if let Some(at) = this.show_requested_at.take() {
-                    tracing::info!(
-                        latency_ms = at.elapsed().as_secs_f64() * 1000.,
-                        "hotkey to first frame"
-                    );
-                }
-            });
-        }
         let stale = self
             .catalog_loaded_at
             .is_none_or(|t| t.elapsed().as_secs() >= CATALOG_MAX_AGE_SECS);
@@ -498,6 +491,15 @@ impl Focusable for Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Measured here, inside the first frame after a hotkey press, rather
+        // than in an `on_next_frame` callback, which GPUI runs before it
+        // starts drawing. Layout, paint and GPU presentation still follow.
+        if let Some(at) = self.show_requested_at.take() {
+            tracing::info!(
+                latency_ms = at.elapsed().as_secs_f64() * 1000.,
+                "hotkey to first frame"
+            );
+        }
         let theme = self.theme;
         let divider = || div().h(px(DIVIDER)).w_full().bg(theme.divider);
         let end = (self.scroll_top + VISIBLE_ROWS).min(self.results.len());
