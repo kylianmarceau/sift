@@ -1,57 +1,80 @@
-# sift
+# Sift
 
 A Rust-native macOS launcher and file search engine: Raycast's keyboard-first
 launcher combined with Everything-style instant filename search, built for low
 memory use and near-zero idle CPU.
 
-**Status:** Phase 2. Option+Space opens a launcher that searches
-applications, files and folders. The file index updates itself as files
-change (FSEvents). There is also a command-line indexer and search tool.
-See [PLAN.md](PLAN.md) for the roadmap.
+Option+Space opens a panel that finds applications, files and folders as
+you type, with a calculator, snippets, custom commands and an optional
+clipboard history. The file index updates itself as files change. There is
+also a command-line indexer and search tool, `sift`.
 
-## Requirements
+**Status:** 0.1.0, the first release candidate. See [PLAN.md](PLAN.md) for
+the roadmap and [CHANGELOG.md](CHANGELOG.md) for what is in each release.
 
-- macOS (Apple Silicon is the primary target)
-- Rust 1.85 or newer (`rustup` stable)
-- Xcode Command Line Tools (for the bundled SQLite C build). Full Xcode
-  is not needed: the launcher compiles its Metal shaders at runtime.
+## Install
 
-## Usage
+Sift needs **macOS 13 (Ventura) or later on an Apple Silicon Mac**.
 
-```bash
-# Index one or more folders (the index lives in
-# ~/Library/Application Support/sift/dev-index unless --index-dir is given)
-cargo run --release -- index ~/Documents
+1. Download `Sift-VERSION-arm64.dmg` (or the `.zip`) from the
+   [latest release](https://github.com/kylianmarceau/sift/releases/latest).
+2. Open the disk image and drag **Sift** into **Applications**.
+3. Open Sift from Applications. The search panel appears once at launch;
+   after that, **Option+Space** shows and hides it.
 
-# Search
-cargo run --release -- search project
-cargo run --release -- search "annual report" --limit 10
-cargo run --release -- search report --ext pdf --files
-cargo run --release -- search prjrs --stats      # fuzzy, with timing
+**If macOS says Sift "cannot be opened" or "cannot be verified":** a
+release is notarized by Apple only when it was signed with a Developer ID
+(the release notes say which). For a build that is not, open
+**System Settings › Privacy & Security**, scroll to the message about
+Sift, and click **Open Anyway**. macOS remembers the choice.
 
-# Inspect or drop roots
-cargo run --release -- status
-cargo run --release -- remove ~/Documents
-
-# Check the index: SQLite integrity, internal consistency, and a fresh
-# scan compared with what is indexed (--quick skips the scan)
-cargo run --release -- verify
-```
-
-Useful index options: `--exclude <path>`, `--exclude-name node_modules`,
-`--descend-packages`, `--cross-devices`, `--include-sensitive`, `--include-dependencies`. Dependency and cache folders (`node_modules`, `.git`, `.venv`, …) are skipped by default, and the options are remembered per root: `sift index` with no paths re-indexes every root the same way. `~/Library`
-and `~/.Trash` are skipped by default, and indexing `/` or your whole home
-folder requires `--allow-broad-root`.
-
-## Trying the launcher
+To check a download, compare it with the release's `SHA256SUMS`:
 
 ```bash
-scripts/bundle-app.sh            # builds target/release/Sift.app
-open target/release/Sift.app
+shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-The panel appears once at launch. After that, **Option+Space** shows or
-hides it.
+**Permissions.** Sift has no Dock icon and needs no Accessibility, Full
+Disk Access or other special permission. macOS asks once when you add
+Documents, Desktop or Downloads as a search folder.
+
+**Open at Login** is off until you turn it on in Sift Settings › General.
+Sift then appears in System Settings › General › Login Items, where you
+can also remove it.
+
+### Updates and privacy
+
+Sift keeps everything on your Mac: the index, recents, favorites,
+clipboard history and logs. It sends no telemetry.
+
+The one network request it makes is the update check. At most once a day,
+when the panel opens, Sift asks GitHub for the version number of the
+latest release (one HTTPS request to `api.github.com`, which sees your IP
+address and the user agent `Sift/VERSION`). If a newer version exists, the
+panel footer says so; *Check for Updates* in the launcher, or the button
+in Settings, opens the release page. Sift never downloads or installs
+anything itself: you update by installing the new version the same way.
+
+To turn the check off, search for *Edit Sift Configuration* and set:
+
+```toml
+[updates]
+check = false
+```
+
+*Check for Updates* still works on request while the automatic check is
+off.
+
+### Uninstall
+
+1. Turn off Open at Login in Sift Settings, if you turned it on.
+2. Open the panel and press **Cmd-Q** to quit, then delete
+   `/Applications/Sift.app`.
+3. To remove your data too, delete `~/Library/Application Support/sift`
+   (index, settings, recents, favorites, clipboard history) and
+   `~/Library/Logs/Sift`.
+
+## Using Sift
 
 - Type to search apps, files and folders (files need two characters).
   With nothing typed, the panel lists your favorites and recent items.
@@ -91,9 +114,8 @@ Changes apply the next time the panel opens.
 search what you copied. Text that password managers mark as concealed is
 never kept. *Clear Clipboard History* deletes everything kept.
 
-Sift has no Dock icon and needs no Accessibility permission. It follows
-the system's light or dark appearance and your accent colour (System
-Settings › Appearance).
+Sift follows the system's light or dark appearance and your accent colour
+(System Settings › Appearance).
 
 **VoiceOver:** while VoiceOver runs, Sift speaks the highlighted result
 when it moves ("report.pdf, file, in Documents, 2 of 8"). It also speaks
@@ -111,7 +133,8 @@ is renamed to `state.db.damaged-…`, and recents and favorites start
 again.
 
 **Choosing folders:** search for *Sift Settings* (or "preferences") and
-press Enter. Add the folders you want searchable. macOS asks once for
+press Enter. Add the folders you want searchable. The General section at
+the top holds Open at Login and the update check. macOS asks once for
 access to Documents, Desktop or Downloads. Folders indexed with
 `sift index` in a terminal show up there too; they share one index.
 
@@ -121,7 +144,28 @@ Environment options: `SIFT_INDEX_DIR` (index location),
 `SIFT_LOG_DIR` (log location), `SIFT_ANNOUNCE=1` (make the VoiceOver
 announcements, logged at debug level, even when VoiceOver is off), and
 `SIFT_RUN_COMMAND=<id>` (run a built-in command such as `settings` half a
-second after launch, as choosing it does; for testing).
+second after launch, as choosing it does; for testing), and
+`SIFT_UPDATE_URL` (where the update check looks; also accepts a `file://`
+URL, for testing).
+
+## Building from source
+
+Requirements:
+
+- An Apple Silicon Mac with macOS 13 or later
+- Rust 1.85 or newer (`rustup` stable)
+- Xcode Command Line Tools (for the bundled SQLite C build). Full Xcode
+  is not needed: the launcher compiles its Metal shaders at runtime.
+
+```bash
+scripts/bundle-app.sh            # builds target/release/Sift.app
+open target/release/Sift.app
+```
+
+`scripts/bundle-app.sh --install` also copies the app to `~/Applications`.
+The bundle is ad-hoc signed, which is enough to run it on the Mac that
+built it. The first launch after a build takes about a second, while GPUI
+compiles its shaders.
 
 To see timing logs (startup, catalog load, hotkey-to-first-frame), run the
 executable from a terminal instead:
@@ -130,9 +174,35 @@ executable from a terminal instead:
 target/release/Sift.app/Contents/MacOS/Sift
 ```
 
-`scripts/bundle-app.sh --install` also copies the app to `~/Applications`.
-The first launch after a build takes about a second, while GPUI compiles
-its shaders.
+## The `sift` command-line tool
+
+Built from source (see above). It reads and writes the same index as the
+app, so folders indexed here show up in Sift Settings too.
+
+```bash
+# Index one or more folders (the index lives in
+# ~/Library/Application Support/sift/dev-index unless --index-dir is given)
+cargo run --release -- index ~/Documents
+
+# Search
+cargo run --release -- search project
+cargo run --release -- search "annual report" --limit 10
+cargo run --release -- search report --ext pdf --files
+cargo run --release -- search prjrs --stats      # fuzzy, with timing
+
+# Inspect or drop roots
+cargo run --release -- status
+cargo run --release -- remove ~/Documents
+
+# Check the index: SQLite integrity, internal consistency, and a fresh
+# scan compared with what is indexed (--quick skips the scan)
+cargo run --release -- verify
+```
+
+Useful index options: `--exclude <path>`, `--exclude-name node_modules`,
+`--descend-packages`, `--cross-devices`, `--include-sensitive`, `--include-dependencies`. Dependency and cache folders (`node_modules`, `.git`, `.venv`, …) are skipped by default, and the options are remembered per root: `sift index` with no paths re-indexes every root the same way. `~/Library`
+and `~/.Trash` are skipped by default, and indexing `/` or your whole home
+folder requires `--allow-broad-root`.
 
 ## Development
 
@@ -155,5 +225,16 @@ log directories. To compare two builds, keep a copy of the older
 `target/release/sift-launcher` and run it with
 `LAUNCHER=/path/to/copy scripts/ui-bench.sh 5`.
 
+Release builds: `scripts/release.sh` (see [RELEASING.md](RELEASING.md)).
+The app icon is drawn in `packaging/icon.svg`; `scripts/make-icon.sh`
+renders it into `packaging/Sift.icns`.
+
 Design notes are in [ARCHITECTURE.md](ARCHITECTURE.md), the roadmap is in
 [PLAN.md](PLAN.md), and measurements are in [BENCHMARKS.md](BENCHMARKS.md).
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md); to report a security
+problem, see [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT; see [LICENSE](LICENSE). The app bundle includes the licences of the
+Rust crates it is built from (`Contents/Resources/THIRD_PARTY_LICENSES.txt`).
