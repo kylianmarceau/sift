@@ -16,6 +16,7 @@
 //! cycles. Directories on other devices (mount points) and macOS package
 //! bundles such as `.app` are recorded without descending into them.
 
+mod update;
 mod walk;
 
 use std::collections::HashSet;
@@ -24,8 +25,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sift_store::{Store, StoreError};
+use sift_store::{EventMark, Store, StoreError};
 
+pub use update::{Change, UpdateReport, apply_changes, is_watched};
 pub use walk::ScanError;
 
 /// Directory extensions treated as opaque packages unless
@@ -203,8 +205,31 @@ pub enum IndexError {
     },
     #[error("{0} is not a directory")]
     NotADirectory(PathBuf),
+    /// The root is missing (deleted, renamed or on an unmounted drive).
+    /// Its index is left untouched.
+    #[error("{0} is not available")]
+    RootUnavailable(PathBuf),
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+/// The excluded paths that apply inside `root`: the user's exclusions plus,
+/// with [`IndexOptions::skip_sensitive`], the default sensitive locations.
+/// A root the user names explicitly is indexed even if it is itself one of
+/// the default exclusions; only locations inside it are skipped.
+pub(crate) fn effective_excludes(root: &Path, options: &IndexOptions) -> HashSet<PathBuf> {
+    let sensitive = if options.skip_sensitive {
+        IndexOptions::default_sensitive_excludes()
+    } else {
+        Vec::new()
+    };
+    options
+        .exclude_paths
+        .iter()
+        .chain(&sensitive)
+        .filter(|p| p.starts_with(root) && *p != root)
+        .cloned()
+        .collect()
 }
 
 /// Outcome of indexing one root.
@@ -235,6 +260,22 @@ pub fn index_root(
     store: &mut Store,
     root: &Path,
     options: &IndexOptions,
+    progress: impl FnMut(u64),
+) -> Result<IndexReport, IndexError> {
+    index_root_at(store, root, options, None, progress)
+}
+
+/// Like [`index_root`], and records `event` with the new scan.
+///
+/// A watcher passes the FSEvents id it read *before* the scan started.
+/// Changes made during the scan are then replayed from that id and
+/// re-applied, which is harmless because updates compare against the
+/// filesystem rather than trusting the event.
+pub fn index_root_at(
+    store: &mut Store,
+    root: &Path,
+    options: &IndexOptions,
+    event: Option<&EventMark>,
     mut progress: impl FnMut(u64),
 ) -> Result<IndexReport, IndexError> {
     let started = Instant::now();
@@ -250,26 +291,17 @@ pub fn index_root(
         return Err(IndexError::NotADirectory(root));
     }
 
-    // A root the user names explicitly is indexed even if it is itself one
-    // of the default exclusions; only locations inside it are skipped.
-    let sensitive = if options.skip_sensitive {
-        IndexOptions::default_sensitive_excludes()
-    } else {
-        Vec::new()
-    };
-    let exclude_paths: HashSet<PathBuf> = options
-        .exclude_paths
-        .iter()
-        .chain(&sensitive)
-        .filter(|p| p.starts_with(&root) && **p != root)
-        .cloned()
-        .collect();
+    let exclude_paths = effective_excludes(&root, options);
 
     let root_id = store.next_entry_id()?;
     let mut writer = store.replace_root(&root, root_id, &options.encode_saved())?;
+    if let Some(event) = event {
+        writer.set_event(event)?;
+    }
     let config = walk::WalkConfig {
-        root: &root,
-        root_id,
+        start: &root,
+        start_id: root_id,
+        next_id: root_id + 1,
         root_dev: std::os::unix::fs::MetadataExt::dev(&meta),
         options,
         exclude_paths: &exclude_paths,

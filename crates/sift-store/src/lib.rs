@@ -471,6 +471,15 @@ impl RootWriter<'_> {
         Ok(())
     }
 
+    /// Records the filesystem event position this scan reflects.
+    pub fn set_event(&mut self, event: &EventMark) -> Result<()> {
+        self.tx.execute(
+            "UPDATE roots SET event_id = ?1, event_uuid = ?2 WHERE id = ?3",
+            params![event.id as i64, event.uuid, self.root_id],
+        )?;
+        Ok(())
+    }
+
     /// Records the scan summary, bumps the store generation and commits.
     pub fn commit(self, summary: ScanSummary) -> Result<RootId> {
         let now = SystemTime::now()

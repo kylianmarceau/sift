@@ -34,8 +34,14 @@ impl std::fmt::Display for ScanError {
 }
 
 pub(crate) struct WalkConfig<'a> {
-    pub root: &'a Path,
-    pub root_id: EntryId,
+    /// Directory to walk: the root for a full scan, or a newly found
+    /// directory during an incremental update.
+    pub start: &'a Path,
+    /// Entry id of `start`, already written by the caller.
+    pub start_id: EntryId,
+    /// First id to allocate. Must be greater than every existing id.
+    pub next_id: EntryId,
+    /// Device of the index root (for `one_file_system`).
     pub root_dev: u64,
     pub options: &'a IndexOptions,
     pub exclude_paths: &'a HashSet<PathBuf>,
@@ -51,18 +57,18 @@ pub(crate) struct WalkStats {
     pub error_samples: Vec<ScanError>,
 }
 
-/// Walks the tree, calling `insert` on the current thread for every entry
-/// below the root (the root itself is written by the store).
+/// Walks the tree below `config.start`, calling `insert` on the current
+/// thread for every entry (`start` itself is written by the caller).
 pub(crate) fn walk(
     config: &WalkConfig<'_>,
     mut insert: impl FnMut(&NewEntry<'_>) -> Result<(), StoreError>,
     progress: &mut dyn FnMut(u64),
 ) -> Result<WalkStats, StoreError> {
     let queue = DirQueue::new(DirJob {
-        path: config.root.to_path_buf(),
-        id: config.root_id,
+        path: config.start.to_path_buf(),
+        id: config.start_id,
     });
-    let next_id = AtomicI64::new(config.root_id + 1);
+    let next_id = AtomicI64::new(config.next_id);
     // Parents of excluded paths: only entries in these directories need
     // their full path built for the exclusion check.
     let exclude_parents: HashSet<&Path> = config
@@ -234,7 +240,13 @@ impl WorkerCtx<'_> {
 
             if let Some(path) = path
                 && is_dir
-                && self.should_descend(name.as_bytes(), &path, metadata.as_ref())
+                && descends(
+                    options,
+                    self.config.root_dev,
+                    name.as_bytes(),
+                    &path,
+                    metadata.as_ref(),
+                )
             {
                 subdirs.push(DirJob { path, id });
             }
@@ -245,28 +257,35 @@ impl WorkerCtx<'_> {
         }
         true
     }
-
-    fn should_descend(&self, name: &[u8], path: &Path, metadata: Option<&Metadata>) -> bool {
-        let options = self.config.options;
-        if options.one_file_system
-            && let Some(m) = metadata
-            && m.dev() != self.config.root_dev
-        {
-            return false;
-        }
-        if !options.descend_packages && is_package(name) {
-            return false;
-        }
-        if options.skip_dependency_dirs
-            && (is_dependency_dir(name) || path.join(CACHEDIR_TAG).exists())
-        {
-            return false;
-        }
-        true
-    }
 }
 
-fn kind_of(file_type: FileType) -> EntryKind {
+/// Whether the contents of directory `path` (named `name`) are indexed.
+/// Directories that fail this are recorded but not descended. Shared by
+/// full scans and incremental updates so both index exactly the same set.
+pub(crate) fn descends(
+    options: &IndexOptions,
+    root_dev: u64,
+    name: &[u8],
+    path: &Path,
+    metadata: Option<&Metadata>,
+) -> bool {
+    if options.one_file_system
+        && let Some(m) = metadata
+        && m.dev() != root_dev
+    {
+        return false;
+    }
+    if !options.descend_packages && is_package(name) {
+        return false;
+    }
+    if options.skip_dependency_dirs && (is_dependency_dir(name) || path.join(CACHEDIR_TAG).exists())
+    {
+        return false;
+    }
+    true
+}
+
+pub(crate) fn kind_of(file_type: FileType) -> EntryKind {
     if file_type.is_symlink() {
         EntryKind::Symlink
     } else if file_type.is_dir() {
