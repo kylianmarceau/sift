@@ -440,6 +440,9 @@ impl Launcher {
         let result = match &action {
             Action::OpenApplication(path) => sift_macos::open_application(path, report),
             Action::OpenPath(path) => sift_macos::open_path(path, report),
+            Action::OpenUrl(url) => sift_macos::open_url(url, report),
+            Action::CopyText(text) => sift_macos::copy_text(text),
+            Action::Shell(command) => crate::shell::spawn(command),
             Action::Run(command) => {
                 self.run_command(command, window, cx);
                 return;

@@ -10,6 +10,7 @@ mod icons;
 mod input;
 mod launcher;
 mod settings;
+mod shell;
 mod theme;
 
 use std::sync::OnceLock;

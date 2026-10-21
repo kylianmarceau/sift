@@ -4704,6 +4704,7 @@ dependencies = [
  "sift-indexer",
  "sift-macos",
  "sift-search",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

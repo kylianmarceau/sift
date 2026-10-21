@@ -3,8 +3,9 @@
 //!
 //! - [`icon_png`]: the Finder icon of any file, folder or app as PNG bytes.
 //! - [`open_application`]: launch or activate an app with `NSWorkspace`.
-//! - [`open_path`] / [`reveal_in_finder`]: open a file with its default
-//!   application, or show it in Finder.
+//! - [`open_path`] / [`open_url`] / [`reveal_in_finder`]: open a file or
+//!   URL with its default application, or show a file in Finder.
+//! - [`copy_text`]: put text on the clipboard.
 //! - [`choose_folder`]: the standard folder picker, non-modal.
 //! - [`use_accessory_activation_policy`] / [`activate_app`]: run without a
 //!   Dock icon, and come to the front for the settings window.
@@ -23,6 +24,12 @@ pub enum LaunchError {
     NotAnApp(PathBuf),
     #[error("macOS could not open {path}: {reason}")]
     Failed { path: PathBuf, reason: String },
+    #[error("{0} is not a valid URL")]
+    BadUrl(String),
+    #[error("could not write to the clipboard")]
+    Clipboard,
+    #[error("could not run the command: {0}")]
+    Command(String),
 }
 
 /// Checks that `path` looks like a launchable bundle before handing it to
@@ -45,8 +52,8 @@ mod imp;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    Panel, activate_app, choose_folder, icon_png, open_application, open_path, reveal_in_finder,
-    use_accessory_activation_policy,
+    Panel, activate_app, choose_folder, copy_text, icon_png, open_application, open_path, open_url,
+    reveal_in_finder, use_accessory_activation_policy,
 };
 
 #[cfg(test)]

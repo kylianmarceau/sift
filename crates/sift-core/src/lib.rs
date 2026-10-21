@@ -12,25 +12,54 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// What a result refers to. Drives the label and icon in the UI, and later
-/// per-kind filters such as `a:` (applications) or `f:` (files).
+/// What a result refers to. Drives the label and icon in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResultKind {
     Application,
     File,
     Folder,
     Command,
+    Calculator,
+    Snippet,
+    Clipboard,
 }
 
 impl ResultKind {
+    pub const ALL: [ResultKind; 7] = [
+        Self::Application,
+        Self::File,
+        Self::Folder,
+        Self::Command,
+        Self::Calculator,
+        Self::Snippet,
+        Self::Clipboard,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Application => "Application",
             Self::File => "File",
             Self::Folder => "Folder",
             Self::Command => "Command",
+            Self::Calculator => "Calculator",
+            Self::Snippet => "Snippet",
+            Self::Clipboard => "Clipboard",
         }
     }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.label() == label)
+    }
+}
+
+/// The match tier encoded in bits 48–55 of a score. Rank keys from
+/// `sift_search` use 1 (fuzzy) to 6 (exact); [`TIER_TOP`] is above all of
+/// them, for results that answer the query directly (a calculation).
+pub const TIER_TOP: u64 = 7;
+
+/// A score in the top tier, above every name match.
+pub fn top_score() -> u64 {
+    TIER_TOP << 48
 }
 
 /// What happens when the user activates a result.
@@ -40,6 +69,13 @@ pub enum Action {
     OpenApplication(PathBuf),
     /// Open a file or folder with its default application.
     OpenPath(PathBuf),
+    /// Open a URL with its default handler (browser, mail client, ...).
+    OpenUrl(Arc<str>),
+    /// Put text on the clipboard (calculator results, snippets, clipboard
+    /// history).
+    CopyText(Arc<str>),
+    /// Run a user-defined shell command (from the config file).
+    Shell(Arc<str>),
     /// Run one of the launcher's built-in commands, by id.
     Run(&'static str),
 }
@@ -50,8 +86,38 @@ impl Action {
     pub fn path(&self) -> Option<&std::path::Path> {
         match self {
             Self::OpenApplication(path) | Self::OpenPath(path) => Some(path),
-            Self::Run(_) => None,
+            _ => None,
         }
+    }
+
+    /// A stable text form for storing (recent items, favorites).
+    pub fn encode(&self) -> String {
+        use std::os::unix::ffi::OsStrExt;
+        let path = |p: &PathBuf| String::from_utf8_lossy(p.as_os_str().as_bytes()).into_owned();
+        match self {
+            Self::OpenApplication(p) => format!("app:{}", path(p)),
+            Self::OpenPath(p) => format!("path:{}", path(p)),
+            Self::OpenUrl(url) => format!("url:{url}"),
+            Self::CopyText(text) => format!("copy:{text}"),
+            Self::Shell(command) => format!("shell:{command}"),
+            Self::Run(id) => format!("run:{id}"),
+        }
+    }
+
+    /// Reverses [`Action::encode`]. Built-in command ids are only accepted
+    /// if they are in `commands`, so stored data can never name a command
+    /// that does not exist.
+    pub fn decode(text: &str, commands: &[&'static str]) -> Option<Self> {
+        let (tag, rest) = text.split_once(':')?;
+        Some(match tag {
+            "app" => Self::OpenApplication(rest.into()),
+            "path" => Self::OpenPath(rest.into()),
+            "url" => Self::OpenUrl(rest.into()),
+            "copy" => Self::CopyText(rest.into()),
+            "shell" => Self::Shell(rest.into()),
+            "run" => Self::Run(commands.iter().copied().find(|c| *c == rest)?),
+            _ => return None,
+        })
     }
 }
 
@@ -93,24 +159,39 @@ pub fn tier_of(score: u64) -> u8 {
     (score >> 48) as u8
 }
 
+/// Per-item ranking bonus from usage, by result id: higher for favorites
+/// and for items used often and recently. Applied within a match tier.
+pub type Boosts = Arc<std::collections::HashMap<Arc<str>, u8>>;
+
 /// Queries every provider and merges their results into one ranked list.
 #[derive(Clone, Default)]
 pub struct Search {
     providers: Vec<Arc<dyn Provider>>,
+    boosts: Boosts,
 }
 
 impl Search {
     /// `providers` in priority order: within the same match tier, results
     /// of earlier providers come first (applications before files).
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
-        Self { providers }
+        Self {
+            providers,
+            boosts: Boosts::default(),
+        }
+    }
+
+    /// Uses `boosts` to order results within a match tier.
+    pub fn with_boosts(mut self, boosts: Boosts) -> Self {
+        self.boosts = boosts;
+        self
     }
 
     /// Runs all providers in parallel and merges their results:
     ///
     /// 1. match tier, so an exact file name beats a fuzzy application match;
-    /// 2. provider priority, so `Notes` the app precedes `notes.txt`;
-    /// 3. the provider's score, then the title for a stable order.
+    /// 2. usage boost (favorites, then frequently and recently used);
+    /// 3. provider priority, so `Notes` the app precedes `notes.txt`;
+    /// 4. the provider's score, then the title for a stable order.
     ///
     /// Results with the same id (an app that is also in the file index)
     /// are kept once, from the higher-priority provider.
@@ -138,9 +219,11 @@ impl Search {
             .enumerate()
             .flat_map(|(i, items)| items.into_iter().map(move |item| (i, item)))
             .collect();
+        let boost = |item: &ResultItem| self.boosts.get(&item.id).copied().unwrap_or(0);
         results.sort_by(|(pa, a), (pb, b)| {
             tier_of(b.score)
                 .cmp(&tier_of(a.score))
+                .then(boost(b).cmp(&boost(a)))
                 .then(pa.cmp(pb))
                 .then(b.score.cmp(&a.score))
                 .then_with(|| a.title.cmp(&b.title))
@@ -297,6 +380,50 @@ mod tests {
             // tiers: the better match first, whatever the provider.
             ["notes", "notes.txt", "notebook", "nota fuzzy", "not exact"]
         );
+    }
+
+    #[test]
+    fn usage_boost_orders_within_a_tier_only() {
+        let apps = Fixed("apps", vec![item("notes", key(6, 1))]);
+        let files = Fixed(
+            "files",
+            vec![item("notes.md", key(6, 1)), item("notebook", key(4, 1))],
+        );
+        let boosts: Boosts = Arc::new(
+            [(Arc::from("notes.md"), 3u8), (Arc::from("notebook"), 9u8)]
+                .into_iter()
+                .collect(),
+        );
+        let search = Search::new(vec![Arc::new(apps), Arc::new(files)]).with_boosts(boosts);
+        // The used file passes the app in the same tier; the heavily used
+        // prefix match stays below both exact matches.
+        assert_eq!(
+            titles(&search.search("not", 10)),
+            ["notes.md", "notes", "notebook"]
+        );
+    }
+
+    #[test]
+    fn actions_round_trip_through_their_text_form() {
+        let actions = [
+            Action::OpenApplication("/Applications/Safari.app".into()),
+            Action::OpenPath("/Users/me/a b.txt".into()),
+            Action::OpenUrl("https://example.com/?q=1".into()),
+            Action::CopyText("line one\nline: two".into()),
+            Action::Shell("say hi".into()),
+            Action::Run("settings"),
+        ];
+        for action in actions {
+            assert_eq!(
+                Action::decode(&action.encode(), &["settings"]),
+                Some(action)
+            );
+        }
+        assert_eq!(Action::decode("run:format-disk", &["settings"]), None);
+        assert_eq!(Action::decode("nonsense", &[]), None);
+        for kind in ResultKind::ALL {
+            assert_eq!(ResultKind::from_label(kind.label()), Some(kind));
+        }
     }
 
     #[test]

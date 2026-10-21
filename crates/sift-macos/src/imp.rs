@@ -9,8 +9,8 @@ use objc2::{AllocAnyThread, MainThreadMarker, Message, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep,
     NSCompositingOperation, NSDeviceRGBColorSpace, NSEvent, NSGraphicsContext, NSModalResponse,
-    NSOpenPanel, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowButton,
-    NSWindowTitleVisibility, NSWorkspace, NSWorkspaceOpenConfiguration,
+    NSOpenPanel, NSPasteboard, NSPasteboardTypeString, NSRunningApplication, NSScreen, NSView,
+    NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -115,29 +115,65 @@ pub fn open_path(
     on_failure: impl Fn(LaunchError) + Send + Sync + 'static,
 ) -> Result<(), LaunchError> {
     let url = file_url(path)?;
+    open_with_default_app(&url, path.to_path_buf(), on_failure);
+    Ok(())
+}
+
+/// Opens a URL (`https:`, `mailto:`, `x-apple.systempreferences:`, ...)
+/// with its default handler. Only URLs with a scheme are accepted; text
+/// that does not parse fails immediately.
+pub fn open_url(
+    url: &str,
+    on_failure: impl Fn(LaunchError) + Send + Sync + 'static,
+) -> Result<(), LaunchError> {
+    let invalid = || LaunchError::BadUrl(url.to_owned());
+    let parsed = NSURL::URLWithString(&NSString::from_str(url)).ok_or_else(invalid)?;
+    if parsed.scheme().is_none_or(|s| s.length() == 0) {
+        return Err(invalid());
+    }
+    open_with_default_app(&parsed, PathBuf::from(url), on_failure);
+    Ok(())
+}
+
+fn open_with_default_app(
+    url: &NSURL,
+    label: PathBuf,
+    on_failure: impl Fn(LaunchError) + Send + Sync + 'static,
+) {
     let configuration = NSWorkspaceOpenConfiguration::configuration();
     configuration.setActivates(true);
-    let owned = path.to_path_buf();
     let completion = RcBlock::new(
         move |_app: *mut NSRunningApplication, error: *mut NSError| {
             // SAFETY: AppKit passes either null or a valid NSError for the
             // duration of the callback.
             if let Some(error) = unsafe { error.as_ref() } {
                 let reason = error.localizedDescription().to_string();
-                tracing::warn!(path = %owned.display(), %reason, "open failed");
+                tracing::warn!(target = %label.display(), %reason, "open failed");
                 on_failure(LaunchError::Failed {
-                    path: owned.clone(),
+                    path: label.clone(),
                     reason,
                 });
             }
         },
     );
     NSWorkspace::sharedWorkspace().openURL_configuration_completionHandler(
-        &url,
+        url,
         &configuration,
         Some(&completion),
     );
-    Ok(())
+}
+
+/// Replaces the clipboard contents with `text` (plain text only).
+pub fn copy_text(text: &str) -> Result<(), LaunchError> {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    // SAFETY: NSPasteboardTypeString is an immutable framework constant.
+    let kind = unsafe { NSPasteboardTypeString };
+    if pasteboard.setString_forType(&NSString::from_str(text), kind) {
+        Ok(())
+    } else {
+        Err(LaunchError::Clipboard)
+    }
 }
 
 /// Opens a Finder window with `path` selected.
