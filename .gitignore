@@ -4,4 +4,4 @@
 *.db-shm
 /bench-data/
 .DS_Store
-prompt.txt
+prompt*.txt

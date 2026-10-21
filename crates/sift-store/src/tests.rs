@@ -12,7 +12,7 @@ fn temp_store() -> (tempfile::TempDir, Store) {
 
 /// Writes a small tree: /data/root { a.txt, sub/ { b.rs } }.
 fn write_tree(store: &mut Store, root: &Path, first_id: EntryId) {
-    let mut w = store.replace_root(root, first_id).unwrap();
+    let mut w = store.replace_root(root, first_id, b"opts").unwrap();
     let entries = [
         (first_id + 1, first_id, EntryKind::File, "a.txt"),
         (first_id + 2, first_id, EntryKind::Dir, "sub"),
@@ -111,7 +111,9 @@ fn uncommitted_scan_keeps_previous_index() {
     let (_dir, mut store) = temp_store();
     write_tree(&mut store, Path::new("/data/root"), 1);
     {
-        let mut w = store.replace_root(Path::new("/data/root"), 10).unwrap();
+        let mut w = store
+            .replace_root(Path::new("/data/root"), 10, &[])
+            .unwrap();
         w.insert(&NewEntry {
             id: 11,
             parent_id: 10,
@@ -143,7 +145,7 @@ fn rejects_nested_root_and_absorbs_children() {
     );
 
     let err = store
-        .replace_root(Path::new("/data/root/sub"), 100)
+        .replace_root(Path::new("/data/root/sub"), 100, &[])
         .err()
         .unwrap();
     assert!(matches!(err, StoreError::NestedRoot { .. }));
@@ -180,7 +182,7 @@ fn streams_entries_in_id_order() {
 #[test]
 fn stores_non_utf8_and_unicode_names() {
     let (_dir, mut store) = temp_store();
-    let mut w = store.replace_root(Path::new("/data"), 1).unwrap();
+    let mut w = store.replace_root(Path::new("/data"), 1, &[]).unwrap();
     let names: [&[u8]; 3] = [
         b"caf\xc3\xa9 menu.txt",
         b"bad\xff\xfename",
@@ -222,4 +224,87 @@ fn reports_corrupt_database() {
 fn read_only_open_of_missing_file_fails() {
     let dir = tempfile::tempdir().unwrap();
     assert!(Store::open_read_only(&dir.path().join("missing.db")).is_err());
+}
+
+#[test]
+fn saves_options_with_each_root() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    assert_eq!(store.roots().unwrap()[0].options, b"opts");
+}
+
+#[test]
+fn migrates_version_1_databases() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
+             CREATE TABLE roots (id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE,
+                 entry_id INTEGER NOT NULL, entry_count INTEGER NOT NULL DEFAULT 0,
+                 error_count INTEGER NOT NULL DEFAULT 0, indexed_at INTEGER NOT NULL DEFAULT 0,
+                 scan_millis INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE entries (id INTEGER PRIMARY KEY, root_id INTEGER NOT NULL,
+                 parent_id INTEGER, kind INTEGER NOT NULL, name BLOB NOT NULL,
+                 size INTEGER, mtime INTEGER);
+             INSERT INTO meta VALUES ('generation', 3);
+             INSERT INTO roots (path, entry_id) VALUES (CAST('/old' AS BLOB), 1);
+             INSERT INTO entries (id, root_id, kind, name) VALUES (1, 1, 1, CAST('/old' AS BLOB));
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+
+    // A read-only handle cannot migrate but still reads the old layout.
+    let old = Store::open_read_only(&db).unwrap();
+    assert!(old.roots().unwrap()[0].options.is_empty());
+    drop(old);
+
+    let mut store = Store::open(&db).unwrap();
+    assert_eq!(store.generation().unwrap(), 3);
+    assert_eq!(store.roots().unwrap()[0].path, PathBuf::from("/old"));
+    write_tree(&mut store, Path::new("/old"), 10);
+    assert_eq!(store.roots().unwrap()[0].options, b"opts");
+    let version: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn compacts_after_large_shrink() {
+    let (dir, mut store) = temp_store();
+    let big_name = vec![b'x'; 200];
+    {
+        let mut w = store.replace_root(Path::new("/big"), 1, &[]).unwrap();
+        for i in 0..20_000 {
+            w.insert(&NewEntry {
+                id: 2 + i,
+                parent_id: 1,
+                kind: EntryKind::File,
+                name: &big_name,
+                size: Some(1),
+                mtime: None,
+            })
+            .unwrap();
+        }
+        w.commit(ScanSummary::default()).unwrap();
+    }
+    store.checkpoint();
+    assert!(
+        !store.compact_if_fragmented().unwrap(),
+        "nothing to reclaim yet"
+    );
+    let before = std::fs::metadata(dir.path().join("index.db"))
+        .unwrap()
+        .len();
+
+    // remove_root compacts on its own once most pages are free.
+    assert!(store.remove_root(Path::new("/big")).unwrap());
+    let after = std::fs::metadata(dir.path().join("index.db"))
+        .unwrap()
+        .len();
+    assert!(after * 4 < before, "{after} not much smaller than {before}");
 }

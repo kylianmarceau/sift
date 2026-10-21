@@ -25,7 +25,10 @@ pub use types::{
 };
 
 /// Current on-disk schema version, stored in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+///
+/// - 1: initial schema.
+/// - 2: `roots.options` stores the indexing options used for each root.
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (
@@ -40,7 +43,9 @@ CREATE TABLE roots (
     entry_count INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
     indexed_at  INTEGER NOT NULL DEFAULT 0,
-    scan_millis INTEGER NOT NULL DEFAULT 0
+    scan_millis INTEGER NOT NULL DEFAULT 0,
+    -- Opaque, encoded by the indexer: what was included or excluded.
+    options     BLOB
 );
 
 -- One row per filesystem object. The root directory of each indexed tree
@@ -86,10 +91,17 @@ pub enum StoreError {
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
+/// Upgrades from older schema versions, applied in order inside one
+/// transaction when a database is opened for writing.
+const MIGRATIONS: &[(i64, &str)] = &[(2, "ALTER TABLE roots ADD COLUMN options BLOB;")];
+
 /// Handle to an index database.
 pub struct Store {
     conn: Connection,
     path: PathBuf,
+    /// Schema version of the open database. A read-only handle on an older
+    /// database cannot migrate it and adapts its queries instead.
+    version: i64,
 }
 
 impl Store {
@@ -141,7 +153,19 @@ impl Store {
                     "BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
                 ))
                 .map_err(corrupt)?;
+            } else if version < SCHEMA_VERSION {
+                let mut batch = String::from("BEGIN;");
+                for (_, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > version) {
+                    batch.push_str(sql);
+                }
+                batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"));
+                conn.execute_batch(&batch).map_err(corrupt)?;
             }
+            return Ok(Self {
+                conn,
+                path,
+                version: SCHEMA_VERSION,
+            });
         } else if version == 0 {
             // Read-only handle on an empty or foreign file.
             return Err(StoreError::Corrupt {
@@ -150,7 +174,11 @@ impl Store {
             });
         }
 
-        Ok(Self { conn, path })
+        Ok(Self {
+            conn,
+            path,
+            version,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -185,10 +213,11 @@ impl Store {
     }
 
     pub fn roots(&self) -> Result<Vec<RootInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, entry_id, entry_count, error_count, indexed_at, scan_millis
-             FROM roots ORDER BY path",
-        )?;
+        let options = if self.version >= 2 { "options" } else { "NULL" };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, path, entry_id, entry_count, error_count, indexed_at, scan_millis, {options}
+             FROM roots ORDER BY path"
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok(RootInfo {
                 id: row.get(0)?,
@@ -198,6 +227,7 @@ impl Store {
                 error_count: row.get::<_, i64>(4)? as u64,
                 indexed_at: row.get(5)?,
                 scan_millis: row.get::<_, i64>(6)? as u64,
+                options: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -212,7 +242,15 @@ impl Store {
     ///
     /// Roots may not nest. Indexing a directory inside an existing root is
     /// rejected; indexing a parent of existing roots absorbs them.
-    pub fn replace_root(&mut self, root: &Path, root_entry_id: EntryId) -> Result<RootWriter<'_>> {
+    ///
+    /// `options` is stored with the root for the indexer to reuse; the store
+    /// does not interpret it.
+    pub fn replace_root(
+        &mut self,
+        root: &Path,
+        root_entry_id: EntryId,
+        options: &[u8],
+    ) -> Result<RootWriter<'_>> {
         let existing = self.roots()?;
         if let Some(outer) = existing
             .iter()
@@ -231,8 +269,8 @@ impl Store {
 
         let root_blob = root.as_os_str().as_bytes();
         tx.execute(
-            "INSERT INTO roots (path, entry_id) VALUES (?1, ?2)",
-            params![root_blob, root_entry_id],
+            "INSERT INTO roots (path, entry_id, options) VALUES (?1, ?2, ?3)",
+            params![root_blob, root_entry_id, options],
         )?;
         let root_id = tx.last_insert_rowid();
         tx.execute(
@@ -260,6 +298,7 @@ impl Store {
         bump_generation(&tx)?;
         tx.commit()?;
         self.checkpoint();
+        self.compact_if_fragmented()?;
         Ok(true)
     }
 
@@ -319,6 +358,26 @@ impl Store {
         let _ = self
             .conn
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
+
+    /// Rewrites the database when more than a quarter of it is free pages,
+    /// as happens after re-indexing a root with far fewer entries. SQLite
+    /// otherwise keeps the space for reuse and never shrinks the file.
+    /// Returns whether a compaction ran.
+    pub fn compact_if_fragmented(&self) -> Result<bool> {
+        let pages: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let free: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        // Small databases are not worth rewriting.
+        if pages < 256 || free * 4 < pages {
+            return Ok(false);
+        }
+        self.conn.execute_batch("VACUUM")?;
+        self.checkpoint();
+        Ok(true)
     }
 }
 

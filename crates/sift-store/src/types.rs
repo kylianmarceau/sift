@@ -78,6 +78,9 @@ pub struct RootInfo {
     /// Unix timestamp (seconds) of the last completed scan.
     pub indexed_at: i64,
     pub scan_millis: u64,
+    /// Indexing options saved with the root (opaque to the store; empty if
+    /// none were saved).
+    pub options: Vec<u8>,
 }
 
 /// Summary of a finished scan, stored with the root.

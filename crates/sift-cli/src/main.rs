@@ -55,8 +55,8 @@ enum Command {
 
 #[derive(Args)]
 struct IndexArgs {
-    /// Directories to index.
-    #[arg(required = true)]
+    /// Directories to index. With none, every saved root is re-indexed
+    /// with its saved options.
     paths: Vec<PathBuf>,
     /// Skip this path (repeatable).
     #[arg(long, value_name = "PATH")]
@@ -68,6 +68,10 @@ struct IndexArgs {
     /// Also index ~/Library and ~/.Trash when they fall inside a root.
     #[arg(long)]
     include_sensitive: bool,
+    /// Also descend into dependency, tool and cache folders such as
+    /// node_modules, .git, .venv and CACHEDIR.TAG-tagged directories.
+    #[arg(long)]
+    include_dependencies: bool,
     /// Descend into package bundles such as Foo.app.
     #[arg(long)]
     descend_packages: bool,
@@ -185,8 +189,24 @@ fn open_store(index_dir: &Path) -> Result<Store> {
 }
 
 fn cmd_index(index_dir: &Path, args: IndexArgs) -> Result<()> {
+    let mut store = open_store(index_dir)?;
+    let saved: Vec<(PathBuf, Vec<u8>)> = store
+        .roots()?
+        .into_iter()
+        .map(|r| (r.path, r.options))
+        .collect();
+
+    let paths: Vec<PathBuf> = if args.paths.is_empty() {
+        if saved.is_empty() {
+            bail!("nothing indexed yet; run `sift index <dir>`");
+        }
+        saved.iter().map(|(p, _)| p.clone()).collect()
+    } else {
+        args.paths.clone()
+    };
+
     let home = std::env::home_dir();
-    for path in &args.paths {
+    for path in &paths {
         let canonical = path
             .canonicalize()
             .with_context(|| format!("cannot access {}", path.display()))?;
@@ -199,33 +219,53 @@ fn cmd_index(index_dir: &Path, args: IndexArgs) -> Result<()> {
         }
     }
 
-    let mut store = open_store(index_dir)?;
-    let mut options = IndexOptions {
+    // Explicit flags define new options (which are then saved); without
+    // any, each root keeps the options it was last indexed with.
+    let flags_given = !args.exclude.is_empty()
+        || !args.exclude_name.is_empty()
+        || args.include_sensitive
+        || args.include_dependencies
+        || args.descend_packages
+        || args.cross_devices;
+    let from_flags = IndexOptions {
         one_file_system: !args.cross_devices,
         descend_packages: args.descend_packages,
+        skip_dependency_dirs: !args.include_dependencies,
+        skip_sensitive: !args.include_sensitive,
         exclude_names: args.exclude_name.iter().map(Into::into).collect(),
+        exclude_paths: args
+            .exclude
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect(),
         ..IndexOptions::default()
     };
-    if let Some(threads) = args.threads {
-        options.threads = threads.max(1);
-    }
-    options.exclude_paths = args
-        .exclude
-        .iter()
-        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
-        .collect();
-    if !args.include_sensitive {
+    let options_for = |root: &Path| -> IndexOptions {
+        let mut options = if flags_given {
+            from_flags.clone()
+        } else {
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            saved
+                .iter()
+                .find(|(p, _)| *p == canonical)
+                .and_then(|(_, bytes)| IndexOptions::decode_saved(bytes))
+                .unwrap_or_default()
+        };
+        if let Some(threads) = args.threads {
+            options.threads = threads.max(1);
+        }
+        // Never index our own database churn.
+        if let Ok(dir) = index_dir.canonicalize()
+            && !options.exclude_paths.contains(&dir)
+        {
+            options.exclude_paths.push(dir);
+        }
         options
-            .exclude_paths
-            .extend(IndexOptions::default_sensitive_excludes());
-    }
-    // Never index our own database churn.
-    if let Ok(dir) = index_dir.canonicalize() {
-        options.exclude_paths.push(dir);
-    }
+    };
 
     let interactive = std::io::stderr().is_terminal();
-    for path in &args.paths {
+    for path in &paths {
+        let options = options_for(path);
         eprintln!("Indexing {} …", path.display());
         let report = index_root(&mut store, path, &options, |n| {
             if interactive {
@@ -390,8 +430,43 @@ fn cmd_status(index_dir: &Path) -> Result<()> {
             thousands(root.scan_millis),
             age(root.indexed_at)
         );
+        if let Some(options) = IndexOptions::decode_saved(&root.options) {
+            println!("           {}", describe_options(&options));
+        }
     }
     Ok(())
+}
+
+/// One-line summary of saved indexing options for `sift status`.
+fn describe_options(options: &IndexOptions) -> String {
+    let mut parts = Vec::new();
+    parts.push(if options.skip_dependency_dirs {
+        "dependency folders skipped".to_string()
+    } else {
+        "dependency folders included".to_string()
+    });
+    if !options.skip_sensitive {
+        parts.push("sensitive folders included".into());
+    }
+    if options.descend_packages {
+        parts.push("inside packages".into());
+    }
+    if !options.one_file_system {
+        parts.push("crosses volumes".into());
+    }
+    if !options.exclude_names.is_empty() {
+        let names: Vec<_> = options
+            .exclude_names
+            .iter()
+            .map(|n| n.to_string_lossy())
+            .collect();
+        parts.push(format!("excluding names {}", names.join(", ")));
+    }
+    let user_paths = options.exclude_paths.len();
+    if user_paths > 0 {
+        parts.push(format!("{user_paths} excluded paths"));
+    }
+    parts.join(" · ")
 }
 
 fn cmd_remove(index_dir: &Path, path: &Path) -> Result<()> {

@@ -9,7 +9,7 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 
 use sift_store::{EntryId, EntryKind, NewEntry, StoreError};
 
-use crate::{IndexOptions, PACKAGE_EXTENSIONS};
+use crate::{CACHEDIR_TAG, DEPENDENCY_DIR_NAMES, IndexOptions, PACKAGE_EXTENSIONS};
 
 /// Records per batch sent from a worker to the writer.
 const BATCH_ROWS: usize = 1024;
@@ -234,7 +234,7 @@ impl WorkerCtx<'_> {
 
             if let Some(path) = path
                 && is_dir
-                && self.should_descend(name.as_bytes(), metadata.as_ref())
+                && self.should_descend(name.as_bytes(), &path, metadata.as_ref())
             {
                 subdirs.push(DirJob { path, id });
             }
@@ -246,7 +246,7 @@ impl WorkerCtx<'_> {
         true
     }
 
-    fn should_descend(&self, name: &[u8], metadata: Option<&Metadata>) -> bool {
+    fn should_descend(&self, name: &[u8], path: &Path, metadata: Option<&Metadata>) -> bool {
         let options = self.config.options;
         if options.one_file_system
             && let Some(m) = metadata
@@ -254,7 +254,15 @@ impl WorkerCtx<'_> {
         {
             return false;
         }
-        options.descend_packages || !is_package(name)
+        if !options.descend_packages && is_package(name) {
+            return false;
+        }
+        if options.skip_dependency_dirs
+            && (is_dependency_dir(name) || path.join(CACHEDIR_TAG).exists())
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -268,6 +276,10 @@ fn kind_of(file_type: FileType) -> EntryKind {
     } else {
         EntryKind::Other
     }
+}
+
+fn is_dependency_dir(name: &[u8]) -> bool {
+    DEPENDENCY_DIR_NAMES.iter().any(|d| d.as_bytes() == name)
 }
 
 fn is_package(name: &[u8]) -> bool {

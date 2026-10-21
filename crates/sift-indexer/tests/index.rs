@@ -322,3 +322,76 @@ fn single_threaded_and_parallel_scans_agree() {
     index_root(&mut f.store, &f.root, &many, |_| {}).unwrap();
     assert_eq!(serial, indexed(&f.store, &f.root));
 }
+
+#[test]
+fn dependency_and_cache_dirs_are_recorded_but_not_descended() {
+    let mut f = fixture();
+    touch(&f.root.join("app/src/main.js"));
+    touch(&f.root.join("app/node_modules/react/index.js"));
+    touch(&f.root.join("py/.venv/lib/site.py"));
+    touch(&f.root.join("repo/.git/HEAD"));
+    touch(&f.root.join("rust/target/CACHEDIR.TAG"));
+    touch(&f.root.join("rust/target/debug/app"));
+    touch(&f.root.join("notes/target/plan.md")); // no tag: user data
+
+    index_root(&mut f.store, &f.root, &options(), |_| {}).unwrap();
+    let paths = indexed(&f.store, &f.root);
+    for kept in [
+        "app/src/main.js",
+        "app/node_modules",
+        "py/.venv",
+        "repo/.git",
+        "rust/target",
+        "notes/target/plan.md",
+    ] {
+        assert!(paths.contains_key(Path::new(kept)), "missing {kept}");
+    }
+    for skipped in [
+        "app/node_modules/react",
+        "py/.venv/lib",
+        "repo/.git/HEAD",
+        "rust/target/debug",
+        "rust/target/CACHEDIR.TAG",
+    ] {
+        assert!(!paths.contains_key(Path::new(skipped)), "indexed {skipped}");
+    }
+
+    let everything = IndexOptions {
+        skip_dependency_dirs: false,
+        ..options()
+    };
+    index_root(&mut f.store, &f.root, &everything, |_| {}).unwrap();
+    let paths = indexed(&f.store, &f.root);
+    assert!(paths.contains_key(Path::new("app/node_modules/react/index.js")));
+    assert!(paths.contains_key(Path::new("rust/target/debug/app")));
+}
+
+#[test]
+fn options_are_saved_with_the_root() {
+    let mut f = fixture();
+    touch(&f.root.join("a.txt"));
+    let opts = IndexOptions {
+        descend_packages: true,
+        skip_dependency_dirs: false,
+        exclude_names: vec!["build".into(), "caf\u{e9}".into()],
+        exclude_paths: vec![f.root.join("private")],
+        ..options()
+    };
+    index_root(&mut f.store, &f.root, &opts, |_| {}).unwrap();
+
+    let saved = &f.store.roots().unwrap()[0].options;
+    let restored = IndexOptions::decode_saved(saved).unwrap();
+    // Run-time settings are not saved; everything that shapes the index is.
+    assert_eq!(
+        restored,
+        IndexOptions {
+            threads: restored.threads,
+            ..opts
+        }
+    );
+    assert_eq!(
+        IndexOptions::decode_saved(b"").unwrap(),
+        IndexOptions::default()
+    );
+    assert!(IndexOptions::decode_saved(b"garbage-without-equals").is_none());
+}

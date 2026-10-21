@@ -310,7 +310,7 @@ fn large_index_matches_brute_force() {
     ];
     let mut names = Vec::new();
     {
-        let mut w = store.replace_root(Path::new("/synthetic"), 1).unwrap();
+        let mut w = store.replace_root(Path::new("/synthetic"), 1, &[]).unwrap();
         for i in 0..60_000u32 {
             let name = format!(
                 "{}-{}-{}.txt",

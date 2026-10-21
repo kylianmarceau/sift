@@ -34,7 +34,7 @@ pub fn synth_store(store: &mut Store, count: usize, seed: u64) -> Result<Duratio
     let started = Instant::now();
     let root = Path::new("/synthetic");
     let first_id = store.next_entry_id()?;
-    let mut writer = store.replace_root(root, first_id)?;
+    let mut writer = store.replace_root(root, first_id, &[])?;
     let mut result = Ok(());
     synth::generate(count, seed, |entry: SynthEntry<'_>| {
         if result.is_err() {
