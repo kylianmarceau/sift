@@ -97,6 +97,11 @@ impl Launcher {
                     this.hide(cx);
                 }
             }),
+            // GPUI's layout size must follow every native resize; if it
+            // doesn't, part of the window is never drawn.
+            cx.observe_window_bounds(window, |_, window, _| {
+                tracing::debug!(height = f32::from(window.viewport_size().height), bounds = ?window.bounds(), scale = window.scale_factor(), "viewport");
+            }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 this.theme = Theme::for_appearance(window.appearance());
                 let theme = this.theme;
@@ -129,10 +134,10 @@ impl Launcher {
     }
 
     /// Connects the native window once GPUI has created it.
-    pub fn attach_panel(&mut self, panel: Panel) {
+    pub fn attach_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         panel.configure();
-        panel.set_height(window_height(0, false) as f64);
         self.panel = Some(panel);
+        self.resize(cx);
     }
 
     fn is_visible(&self) -> bool {
@@ -151,8 +156,8 @@ impl Launcher {
     }
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.resize(cx);
         if let Some(panel) = &self.panel {
-            panel.set_height(self.height() as f64);
             panel.show();
         }
         window.focus(&self.input.focus_handle(cx));
@@ -194,7 +199,6 @@ impl Launcher {
     ) {
         self.message = Some(error.to_string().into());
         self.show(window, cx);
-        self.resize();
     }
 
     fn refresh_catalog(&mut self, cx: &mut Context<Self>) {
@@ -278,7 +282,7 @@ impl Launcher {
         if let Some(selected) = self.selection.index() {
             self.scroll_top = scroll_to_show(self.scroll_top, selected, VISIBLE_ROWS);
         }
-        self.resize();
+        self.resize(cx);
         cx.notify();
     }
 
@@ -290,10 +294,21 @@ impl Launcher {
         self.message.is_some() || (self.results.is_empty() && !self.query.trim().is_empty())
     }
 
-    fn resize(&self) {
-        if let Some(panel) = &self.panel {
-            panel.set_height(self.height() as f64);
-        }
+    /// Fits the window to the current content.
+    ///
+    /// The native resize runs in a separate foreground task, after the
+    /// current GPUI update has returned. Resizing in place would lose
+    /// GPUI's resize notification (see `Panel::set_height`), and GPUI would
+    /// keep drawing at the old size, leaving the rest of the window black.
+    /// GPUI's own `Window::resize` defers the same way, but it grows the
+    /// window upwards.
+    fn resize(&self, cx: &mut Context<Self>) {
+        let Some(panel) = self.panel.clone() else {
+            return;
+        };
+        let height = self.height() as f64;
+        cx.spawn(async move |_, _| panel.set_height(height))
+            .detach();
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -342,7 +357,7 @@ impl Launcher {
                     }
                     Err(error) => {
                         self.message = Some(error.to_string().into());
-                        self.resize();
+                        self.resize(cx);
                         cx.notify();
                     }
                 }

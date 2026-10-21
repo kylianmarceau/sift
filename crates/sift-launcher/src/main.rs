@@ -73,7 +73,7 @@ fn main() {
                 unsafe { Panel::from_ns_view(appkit.ns_view) }
             });
             match panel {
-                Some(panel) => launcher.attach_panel(panel),
+                Some(panel) => launcher.attach_panel(panel, cx),
                 None => tracing::error!("cannot access the native window"),
             }
             // Show once at launch so starting the app visibly does something.

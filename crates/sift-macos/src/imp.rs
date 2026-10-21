@@ -122,6 +122,7 @@ pub fn use_accessory_activation_policy() -> bool {
 /// `WindowKind::PopUp`); this wraps it to do what GPUI has no API for:
 /// ordering it in and out without activating sift, placing it on the screen
 /// the user is working on, and growing it downwards from a fixed top edge.
+#[derive(Clone)]
 pub struct Panel {
     window: Retained<NSWindow>,
     mtm: MainThreadMarker,
@@ -191,6 +192,12 @@ impl Panel {
     /// Resizes the window to `height` points, keeping its top edge in place
     /// (AppKit's origin is the bottom-left corner, so a plain resize would
     /// grow upwards).
+    ///
+    /// Call this from a GPUI foreground task, never from inside a GPUI
+    /// update or render. AppKit reports the new size back to GPUI
+    /// synchronously, and GPUI drops that report if its app state is
+    /// already borrowed. The window would then keep drawing at the old
+    /// size, leaving the rest of the window black.
     pub fn set_height(&self, height: f64) {
         let frame = self.window.frame();
         if (frame.size.height - height).abs() < 0.5 {
