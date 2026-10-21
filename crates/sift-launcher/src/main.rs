@@ -31,8 +31,8 @@ use sift_macos::{LaunchError, Panel};
 
 use crate::input as text;
 use crate::launcher::{
-    Confirm, Dismiss, ForgetSelected, Launcher, RevealSelected, SelectNext, SelectPrevious,
-    ToggleFavorite,
+    Confirm, Dismiss, ForgetSelected, Launcher, QuickLookSelected, RevealSelected, SelectNext,
+    SelectPrevious, ToggleFavorite,
 };
 
 actions!(sift, [Quit]);
@@ -176,6 +176,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Confirm, Some("Launcher")),
         KeyBinding::new("cmd-enter", RevealSelected, Some("Launcher")),
         KeyBinding::new("cmd-d", ToggleFavorite, Some("Launcher")),
+        KeyBinding::new("cmd-y", QuickLookSelected, Some("Launcher")),
         KeyBinding::new("ctrl-x", ForgetSelected, Some("Launcher")),
         KeyBinding::new("cmd-w", settings::CloseSettings, Some("Settings")),
         KeyBinding::new("escape", Dismiss, Some("Launcher")),

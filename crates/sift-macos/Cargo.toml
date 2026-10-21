@@ -15,6 +15,7 @@ objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 block2.workspace = true
+objc2-quick-look-ui.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -444,6 +444,19 @@ impl Panel {
         self.window.isVisible()
     }
 
+    /// Whether the panel has keyboard focus.
+    pub fn is_key(&self) -> bool {
+        self.window.isKeyWindow()
+    }
+
+    pub(crate) fn window(&self) -> Retained<NSWindow> {
+        self.window.clone()
+    }
+
+    pub(crate) fn mtm(&self) -> MainThreadMarker {
+        self.mtm
+    }
+
     /// Places the panel horizontally centred, its top edge 28% below the
     /// top of the screen under the mouse pointer, and makes it key so
     /// typing goes to it. Because the panel is non-activating, the app the

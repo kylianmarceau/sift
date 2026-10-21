@@ -1,7 +1,8 @@
 //! The launcher view: search field, result list and footer.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use sift_apps::{AppCatalog, AppProvider, Location};
 use sift_calc::CalculatorProvider;
 use sift_core::{Action, Provider, QueryClock, ResultItem, ResultKind, Search, Selection};
 use sift_files::{FileIndex, FileProvider, FileQuery, IndexService, ServiceConfig, Status};
-use sift_macos::{LaunchError, Panel};
+use sift_macos::{LaunchError, Panel, QuickLook};
 
 use crate::clipboard;
 use crate::commands::{self, CommandProvider};
@@ -31,6 +32,7 @@ actions!(
         SelectPrevious,
         Confirm,
         RevealSelected,
+        QuickLookSelected,
         ToggleFavorite,
         ForgetSelected,
         Dismiss
@@ -52,6 +54,9 @@ const ICON_PX: u32 = 64;
 /// How often the clipboard's change counter is read while clipboard
 /// history is enabled.
 const CLIPBOARD_POLL: Duration = Duration::from_millis(750);
+/// How long to wait, after losing focus while a preview is open, before
+/// deciding whether the user left the launcher.
+const QUICK_LOOK_SETTLE: Duration = Duration::from_millis(150);
 /// Refresh the application list at most this often, when the launcher opens.
 const CATALOG_MAX_AGE_SECS: u64 = 60;
 
@@ -110,6 +115,10 @@ pub struct Launcher {
     /// Icons being rendered in the background.
     icon_jobs: HashSet<IconKey>,
     panel: Option<Panel>,
+    /// Previews of the selected file (⌘Y). All calls that show, move or
+    /// close the preview run outside GPUI updates, since they change which
+    /// window has focus.
+    quick_look: Option<Rc<QuickLook>>,
     message: Option<SharedString>,
     theme: Theme,
     /// When the hotkey was pressed, until the resulting frame is rendered.
@@ -131,7 +140,23 @@ impl Launcher {
             // Clicking another app (the panel resigning key) dismisses
             // sift, like Spotlight.
             cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active() && this.is_visible() {
+                if window.is_window_active() || !this.is_visible() {
+                    return;
+                }
+                if this.quick_look.as_ref().is_some_and(|q| q.is_visible()) {
+                    // The preview panel takes focus for a moment when it
+                    // opens (and hands it back); decide once that settles.
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(QUICK_LOOK_SETTLE).await;
+                        this.update(cx, |this, cx| {
+                            if this.is_visible() && !this.has_focus() {
+                                this.hide(cx);
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                } else {
                     this.hide(cx);
                 }
             }),
@@ -206,6 +231,7 @@ impl Launcher {
             icons: HashMap::new(),
             icon_jobs: HashSet::new(),
             panel: None,
+            quick_look: None,
             message: None,
             theme,
             show_requested_at: None,
@@ -277,6 +303,7 @@ impl Launcher {
     /// Connects the native window once GPUI has created it.
     pub fn attach_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         panel.configure();
+        self.quick_look = Some(Rc::new(panel.quick_look()));
         self.panel = Some(panel);
         self.resize(cx);
     }
@@ -373,6 +400,7 @@ impl Launcher {
     /// Hides the panel and resets the query. The window and all caches are
     /// kept, so the next show is just an order-front.
     pub fn hide(&mut self, cx: &mut Context<Self>) {
+        self.close_quick_look(cx);
         if let Some(panel) = &self.panel {
             panel.hide();
         }
@@ -479,6 +507,7 @@ impl Launcher {
         if let Some(selected) = self.selection.index() {
             self.scroll_top = scroll_to_show(self.scroll_top, selected, VISIBLE_ROWS);
         }
+        self.follow_quick_look(cx);
         self.resize(cx);
         cx.notify();
     }
@@ -544,6 +573,7 @@ impl Launcher {
         if let Some(selected) = self.selection.index() {
             self.scroll_top = scroll_to_show(self.scroll_top, selected, VISIBLE_ROWS);
         }
+        self.follow_quick_look(cx);
         cx.notify();
     }
 
@@ -552,7 +582,61 @@ impl Launcher {
     }
 
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
-        self.hide(cx);
+        // Esc closes the preview first, then the launcher.
+        if self.quick_look.as_ref().is_some_and(|q| q.is_visible()) {
+            self.close_quick_look(cx);
+        } else {
+            self.hide(cx);
+        }
+    }
+
+    /// Whether the launcher or its preview has keyboard focus.
+    fn has_focus(&self) -> bool {
+        self.panel.as_ref().is_some_and(Panel::is_key)
+            || self.quick_look.as_ref().is_some_and(|q| q.is_key())
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        self.selected()
+            .and_then(|item| item.action.path())
+            .map(Path::to_path_buf)
+    }
+
+    fn toggle_quick_look(&mut self, _: &QuickLookSelected, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(quick_look) = self.quick_look.clone() else {
+            return;
+        };
+        let path = self.selected_path();
+        cx.spawn(async move |_, _| {
+            if quick_look.is_visible() {
+                quick_look.close();
+            } else if let Some(path) = path {
+                quick_look.show(&path);
+            }
+        })
+        .detach();
+    }
+
+    /// Keeps an open preview on the selected item.
+    fn follow_quick_look(&self, cx: &mut Context<Self>) {
+        let Some(quick_look) = self.quick_look.clone() else {
+            return;
+        };
+        if !quick_look.is_visible() {
+            return;
+        }
+        let path = self.selected_path();
+        cx.spawn(async move |_, _| quick_look.follow(path.as_deref()))
+            .detach();
+    }
+
+    fn close_quick_look(&self, cx: &mut Context<Self>) {
+        let Some(quick_look) = self.quick_look.clone() else {
+            return;
+        };
+        if quick_look.is_visible() {
+            cx.spawn(async move |_, _| quick_look.close()).detach();
+        }
     }
 
     fn reveal(&mut self, _: &RevealSelected, _: &mut Window, cx: &mut Context<Self>) {
@@ -877,6 +961,7 @@ impl Launcher {
                     .gap_4()
                     .child(hint("↵", open_label))
                     .when(can_reveal, |row| row.child(hint("⌘↵", "Show in Finder")))
+                    .when(can_reveal, |row| row.child(hint("⌘Y", "Quick Look")))
                     .when_some(favorite_label, |row, label| row.child(hint("⌘D", label)))
                     .child(hint("esc", "Close")),
             )
@@ -965,6 +1050,7 @@ impl Render for Launcher {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::reveal))
             .on_action(cx.listener(Self::toggle_favorite))
+            .on_action(cx.listener(Self::toggle_quick_look))
             .on_action(cx.listener(Self::forget_selected))
             .on_action(cx.listener(Self::dismiss))
             .size_full()

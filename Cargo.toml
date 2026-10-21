@@ -33,6 +33,7 @@ objc2 = "0.6.5"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 block2 = "0.6.2"
+objc2-quick-look-ui = { version = "0.3.2", default-features = false, features = ["std", "QLPreviewPanel", "QLPreviewItem", "objc2-app-kit"] }
 raw-window-handle = "0.6.2"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFString", "CFUUID"] }

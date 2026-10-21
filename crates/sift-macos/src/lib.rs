@@ -11,6 +11,8 @@
 //! - [`use_accessory_activation_policy`] / [`activate_app`]: run without a
 //!   Dock icon, and come to the front for the settings window.
 //! - [`Panel`]: show, hide, position and resize the launcher window.
+//! - [`QuickLook`]: preview the selected file with the system Quick Look
+//!   panel.
 //!
 //! Everything here uses public, documented AppKit APIs and needs no special
 //! permissions (no Accessibility, no Full Disk Access).
@@ -50,6 +52,11 @@ pub fn validate_app_bundle(path: &Path) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "macos")]
 mod imp;
+#[cfg(target_os = "macos")]
+mod quicklook;
+
+#[cfg(target_os = "macos")]
+pub use quicklook::QuickLook;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
