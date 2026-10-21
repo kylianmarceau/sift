@@ -237,6 +237,14 @@ can still become key, joins every Space and appears over full-screen apps.
 The panel is 720 pt wide. Its height is search field + up to 8 rows +
 footer, so it grows and shrinks as you type.
 
+Resizes are never made from inside a GPUI update. AppKit reports a
+resize back to GPUI synchronously, and GPUI drops that report while its
+app state is borrowed. The window would then grow while GPUI kept laying
+out at the old size, leaving the new area black (a bug in the first
+build). The launcher therefore resizes from a separate foreground task,
+as GPUI's own `Window::resize` does. With `SIFT_LOG=debug` every
+viewport change is logged, so a mismatch is easy to spot.
+
 **Show and hide.** Showing is `makeKeyAndOrderFront` on the existing
 window, and hiding is `orderOut`. Nothing is rebuilt, so the process,
 GPUI's text and image caches and the app catalog stay warm. The panel

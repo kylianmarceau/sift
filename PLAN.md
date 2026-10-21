@@ -72,9 +72,12 @@ Still open in Phase 1:
 1. **Manual GUI check** (needs you, see README "Trying the launcher"):
    look, typing, arrows, Enter, Esc, Option+Space, dark/light switch,
    multiple displays, full-screen apps.
-2. **Hotkey-to-visible latency**: read the `hotkey to first frame` log
-   lines after a few presses and record them in BENCHMARKS.md.
+2. **Hotkey-to-visible latency**: run `scripts/measure-hotkey.sh` and
+   record the result in BENCHMARKS.md.
 3. Fix whatever the manual check finds.
+
+Fixed after the first manual try: a black area under the results (GPUI
+missed the window's resize events; see ARCHITECTURE.md, "Launcher").
 
 Before Phase 2 (small, optional):
 

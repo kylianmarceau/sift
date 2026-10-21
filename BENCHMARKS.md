@@ -228,10 +228,12 @@ icons.
 ### Not measured yet
 
 - **Hotkey to visible.** The launcher logs `hotkey to first frame` with
-  the latency on every Option+Space press. That needs a real key press,
-  which I couldn't send in this session. Run the app from a terminal
-  (`target/release/Sift.app/Contents/MacOS/Sift`), press Option+Space a
-  few times, and read the log.
+  the latency on every Option+Space press. `scripts/measure-hotkey.sh`
+  collects 20 samples from real key presses and prints min / median /
+  p90 / max. It needs someone at the keyboard with the screen unlocked:
+  synthetic key events need Accessibility permission, and macOS draws no
+  frames while the display sleeps. Both blocked a measurement in this
+  session.
 - **Keystroke to rendered results** (search plus layout plus paint), and
   memory after long use with many queries.
 
