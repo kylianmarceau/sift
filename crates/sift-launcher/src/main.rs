@@ -5,6 +5,7 @@
 //! The process, window and caches stay alive between uses, so showing the
 //! panel is an order-front, not a relaunch.
 
+mod clipboard;
 mod commands;
 mod icons;
 mod input;

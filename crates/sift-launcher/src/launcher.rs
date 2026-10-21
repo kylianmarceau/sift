@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
@@ -17,6 +17,7 @@ use sift_core::{Action, Provider, QueryClock, ResultItem, ResultKind, Search, Se
 use sift_files::{FileIndex, FileProvider, FileQuery, IndexService, ServiceConfig, Status};
 use sift_macos::{LaunchError, Panel};
 
+use crate::clipboard;
 use crate::commands::{self, CommandProvider};
 use crate::icons::{IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
@@ -48,6 +49,9 @@ pub const VISIBLE_ROWS: usize = 8;
 /// Results fetched per query.
 const RESULT_LIMIT: usize = 40;
 const ICON_PX: u32 = 64;
+/// How often the clipboard's change counter is read while clipboard
+/// history is enabled.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(750);
 /// Refresh the application list at most this often, when the launcher opens.
 const CATALOG_MAX_AGE_SECS: u64 = 60;
 
@@ -82,6 +86,10 @@ pub struct Launcher {
     search: Search,
     /// Files only, for queries with filters (`ext:pdf`, `in:projects`).
     file_search: Search,
+    /// Clipboard history only, for `clip …` queries.
+    clip_search: Search,
+    /// Watches the clipboard while clipboard history is enabled.
+    clipboard_task: Option<Task<()>>,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -179,6 +187,8 @@ impl Launcher {
             input,
             search: Search::default(),
             file_search: Search::default(),
+            clip_search: Search::default(),
+            clipboard_task: None,
             apps: None,
             files,
             file_index,
@@ -203,6 +213,7 @@ impl Launcher {
             _subscriptions: subscriptions,
         };
         this.rebuild_search();
+        this.watch_clipboard(cx);
         this.refresh_catalog(cx);
         this.run_query(String::new(), cx);
         this
@@ -223,12 +234,14 @@ impl Launcher {
         self.search = Search::new(providers).with_boosts(self.user.boosts());
         self.file_search = Search::new(vec![self.files.clone() as Arc<dyn Provider>])
             .with_boosts(self.user.boosts());
+        self.clip_search = Search::new(vec![self.user.clipboard() as Arc<dyn Provider>]);
     }
 
     /// Picks up edits to config.toml (one `stat` when nothing changed).
     fn reload_config(&mut self, cx: &mut Context<Self>) {
         if let Reload::Reloaded(problems) = self.user.reload_config() {
             self.rebuild_search();
+            self.watch_clipboard(cx);
             if let Some(first) = problems.first() {
                 let more = match problems.len() {
                     1 => String::new(),
@@ -280,6 +293,58 @@ impl Launcher {
         } else {
             self.show_requested_at = Some(requested_at);
             self.show(window, cx);
+        }
+    }
+
+    /// Starts or stops watching the clipboard to match the config. While
+    /// on, the change counter is read every `CLIPBOARD_POLL`; the contents
+    /// are read only after a change. What was on the clipboard before
+    /// watching started is not recorded.
+    fn watch_clipboard(&mut self, cx: &mut Context<Self>) {
+        if !self.user.clipboard_enabled() {
+            if self.clipboard_task.take().is_some() {
+                tracing::info!("clipboard history off");
+            }
+            return;
+        }
+        if self.clipboard_task.is_some() {
+            return;
+        }
+        tracing::info!("clipboard history on");
+        self.clipboard_task = Some(cx.spawn(async move |this, cx| {
+            let mut last = sift_macos::clipboard_change_count();
+            loop {
+                cx.background_executor().timer(CLIPBOARD_POLL).await;
+                let count = sift_macos::clipboard_change_count();
+                if count == last {
+                    continue;
+                }
+                last = count;
+                let text = sift_macos::clipboard_text();
+                if this
+                    .update(cx, |this, cx| this.clipboard_changed(text, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn clipboard_changed(&mut self, text: sift_macos::ClipboardText, cx: &mut Context<Self>) {
+        match text {
+            sift_macos::ClipboardText::Text(text) => {
+                if self.user.record_clipboard(&text) {
+                    self.rebuild_search();
+                    if clipboard::scope(&self.query).is_some() {
+                        self.run_query(self.query.clone(), cx);
+                    }
+                }
+            }
+            sift_macos::ClipboardText::Private => {
+                tracing::debug!("clipboard content marked private; not kept");
+            }
+            sift_macos::ClipboardText::None => {}
         }
     }
 
@@ -383,7 +448,9 @@ impl Launcher {
             self.set_results(home, same_query, cx);
             return;
         }
-        let search = if FileQuery::parse(&query) == Ok(None) {
+        let search = if self.in_clipboard_scope(&query) {
+            self.clip_search.clone()
+        } else if FileQuery::parse(&query) == Ok(None) {
             self.search.clone()
         } else {
             self.file_search.clone()
@@ -418,6 +485,19 @@ impl Launcher {
 
     fn height(&self) -> f32 {
         window_height(self.visible_rows(), self.shows_message())
+    }
+
+    /// What to say when a query finds nothing.
+    fn empty_message(&self) -> String {
+        if self.in_clipboard_scope(&self.query) {
+            return if self.user.clipboard().len() == 0 {
+                "Nothing copied since clipboard history was turned on".into()
+            } else {
+                "No copied text matches".into()
+            };
+        }
+        FileQuery::problem(&self.query)
+            .unwrap_or_else(|| format!("No results for “{}”", self.query.trim()))
     }
 
     /// Result rows on screen: none while a message is shown.
@@ -545,6 +625,10 @@ impl Launcher {
         }
     }
 
+    fn in_clipboard_scope(&self, query: &str) -> bool {
+        self.user.clipboard_enabled() && clipboard::scope(query).is_some()
+    }
+
     fn record_use(&mut self, item: &ResultItem) {
         self.user.record_use(item);
         self.rebuild_search();
@@ -593,6 +677,25 @@ impl Launcher {
     fn run_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             commands::EDIT_CONFIG => self.edit_config(cx),
+            commands::CLIPBOARD => {
+                if self.user.clipboard_enabled() {
+                    self.input
+                        .update(cx, |input, cx| input.set_text("clip ", cx));
+                } else {
+                    self.message = Some(
+                        "Clipboard history is off. Turn it on in Edit Sift Configuration \
+                         ([clipboard] enabled = true)."
+                            .into(),
+                    );
+                    self.resize(cx);
+                    cx.notify();
+                }
+            }
+            commands::CLEAR_CLIPBOARD => {
+                self.user.clear_clipboard();
+                self.rebuild_search();
+                self.hide(cx);
+            }
             commands::SETTINGS => {
                 self.hide(cx);
                 crate::settings::open(cx.entity(), window, cx);
@@ -711,6 +814,8 @@ impl Launcher {
             "Indexing files…".into()
         } else if self.query.trim().is_empty() && !self.results.is_empty() {
             "Favorites and recent items".into()
+        } else if self.in_clipboard_scope(&self.query) {
+            format!("Clipboard history · {} kept", self.user.clipboard().len()).into()
         } else if self.results.is_empty() {
             format!(
                 "{} apps · {} files and folders",
@@ -842,13 +947,10 @@ impl Render for Launcher {
         let rows: Vec<AnyElement> = (self.scroll_top..end)
             .map(|i| self.render_row(i, cx))
             .collect();
-        let message: Option<SharedString> = self.message.clone().or_else(|| {
-            self.shows_message().then(|| {
-                FileQuery::problem(&self.query)
-                    .unwrap_or_else(|| format!("No results for “{}”", self.query.trim()))
-                    .into()
-            })
-        });
+        let message: Option<SharedString> = self
+            .message
+            .clone()
+            .or_else(|| self.shows_message().then(|| self.empty_message().into()));
         let message_color = if self.message.is_some() {
             theme.error
         } else {

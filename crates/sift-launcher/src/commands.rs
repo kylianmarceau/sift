@@ -5,10 +5,12 @@ use sift_search::{NameMatcher, fold};
 
 pub const SETTINGS: &str = "settings";
 pub const EDIT_CONFIG: &str = "edit-config";
+pub const CLIPBOARD: &str = "clipboard";
+pub const CLEAR_CLIPBOARD: &str = "clear-clipboard";
 pub const QUIT: &str = "quit";
 
 /// Every built-in command id (stored recents may only name these).
-pub const ALL: &[&str] = &[SETTINGS, EDIT_CONFIG, QUIT];
+pub const ALL: &[&str] = &[SETTINGS, EDIT_CONFIG, CLIPBOARD, CLEAR_CLIPBOARD, QUIT];
 
 struct Spec {
     id: &'static str,
@@ -30,6 +32,18 @@ const COMMANDS: &[Spec] = &[
         title: "Edit Sift Configuration",
         subtitle: "Snippets, custom commands and clipboard history (config.toml)",
         aliases: &["snippets", "custom commands", "config"],
+    },
+    Spec {
+        id: CLIPBOARD,
+        title: "Clipboard History",
+        subtitle: "Search text you copied (type clip, then words)",
+        aliases: &["paste history", "copied"],
+    },
+    Spec {
+        id: CLEAR_CLIPBOARD,
+        title: "Clear Clipboard History",
+        subtitle: "Delete every entry Sift has kept",
+        aliases: &["delete clipboard history"],
     },
     Spec {
         id: QUIT,

@@ -5,7 +5,8 @@
 //! - [`open_application`]: launch or activate an app with `NSWorkspace`.
 //! - [`open_path`] / [`open_url`] / [`reveal_in_finder`]: open a file or
 //!   URL with its default application, or show a file in Finder.
-//! - [`copy_text`]: put text on the clipboard.
+//! - [`copy_text`] / [`clipboard_text`] / [`clipboard_change_count`]: write
+//!   and read plain text on the clipboard, skipping content marked private.
 //! - [`choose_folder`]: the standard folder picker, non-modal.
 //! - [`use_accessory_activation_policy`] / [`activate_app`]: run without a
 //!   Dock icon, and come to the front for the settings window.
@@ -52,8 +53,9 @@ mod imp;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    Panel, activate_app, choose_folder, copy_text, format_local_now, icon_png, open_application,
-    open_path, open_text_file, open_url, reveal_in_finder, use_accessory_activation_policy,
+    ClipboardText, Panel, activate_app, choose_folder, clipboard_change_count, clipboard_text,
+    copy_text, format_local_now, icon_png, open_application, open_path, open_text_file, open_url,
+    reveal_in_finder, use_accessory_activation_policy,
 };
 
 #[cfg(test)]

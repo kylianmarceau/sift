@@ -15,6 +15,7 @@ use sift_core::{Action, Boosts, Provider, ResultItem, ResultKind};
 use sift_search::{NameMatcher, fold};
 use sift_state::{CommandAction, Config, CustomCommand, Snippet, StateDb};
 
+use crate::clipboard::ClipboardProvider;
 use crate::commands;
 
 /// Recents shown under the favorites when the query is empty.
@@ -31,6 +32,7 @@ pub struct UserData {
     db: Option<StateDb>,
     snippets: Arc<SnippetProvider>,
     custom: Arc<CustomCommandProvider>,
+    clipboard: Arc<ClipboardProvider>,
     favorites: HashSet<Arc<str>>,
     boosts: Boosts,
 }
@@ -58,6 +60,7 @@ impl UserData {
             db,
             snippets: Arc::default(),
             custom: Arc::default(),
+            clipboard: Arc::default(),
             favorites: HashSet::new(),
             boosts: Boosts::default(),
         };
@@ -89,6 +92,7 @@ impl UserData {
         self.config = loaded.config;
         self.snippets = Arc::new(SnippetProvider::new(&self.config.snippets));
         self.custom = Arc::new(CustomCommandProvider::new(&self.config.commands));
+        self.reload_clipboard();
         tracing::info!(
             snippets = self.config.snippets.len(),
             commands = self.config.commands.len(),
@@ -96,6 +100,57 @@ impl UserData {
             "configuration loaded"
         );
         Reload::Reloaded(loaded.problems)
+    }
+
+    pub fn clipboard_enabled(&self) -> bool {
+        self.config.clipboard.enabled
+    }
+
+    /// Clipboard history entries; empty while the feature is off.
+    pub fn clipboard(&self) -> Arc<ClipboardProvider> {
+        self.clipboard.clone()
+    }
+
+    fn reload_clipboard(&mut self) {
+        let entries = match (&self.db, self.config.clipboard.enabled) {
+            (Some(db), true) => db
+                .clipboard(self.config.clipboard.max_items)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "cannot read clipboard history");
+                    Vec::new()
+                }),
+            _ => Vec::new(),
+        };
+        self.clipboard = Arc::new(ClipboardProvider::new(entries));
+    }
+
+    /// Keeps `text` in the clipboard history (if enabled). Returns whether
+    /// it was kept (blank and very large text is not).
+    pub fn record_clipboard(&mut self, text: &str) -> bool {
+        let (Some(db), true) = (&self.db, self.config.clipboard.enabled) else {
+            return false;
+        };
+        let max = self.config.clipboard.max_items;
+        match db.clipboard_add(text, sift_state::now(), max) {
+            Ok(true) => {
+                self.reload_clipboard();
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(%error, "cannot record clipboard entry");
+                false
+            }
+        }
+    }
+
+    pub fn clear_clipboard(&mut self) {
+        if let Some(db) = &self.db
+            && let Err(error) = db.clipboard_clear()
+        {
+            tracing::warn!(%error, "cannot clear clipboard history");
+        }
+        self.reload_clipboard();
     }
 
     pub fn snippets(&self) -> Arc<dyn Provider> {
@@ -505,6 +560,37 @@ mod tests {
         };
         assert_eq!(user.toggle_favorite(&calc), None);
         assert!(user.home().is_empty());
+    }
+
+    #[test]
+    fn clipboard_history_is_kept_only_when_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut user = UserData::open(dir.path());
+        assert!(!user.record_clipboard("secret"));
+        assert_eq!(user.clipboard().len(), 0);
+
+        write_config(dir.path(), "[clipboard]\nenabled = true\nmax_items = 2\n");
+        user.reload_config();
+        assert!(user.record_clipboard("one"));
+        assert!(user.record_clipboard("two"));
+        assert!(user.record_clipboard("three"));
+        let titles: Vec<String> = user
+            .clipboard()
+            .search("clip", 10)
+            .into_iter()
+            .map(|r| r.title.to_string())
+            .collect();
+        assert_eq!(titles, ["three", "two"]);
+
+        // Turning it off hides what was kept (without deleting it).
+        write_config(dir.path(), "");
+        user.reload_config();
+        assert_eq!(user.clipboard().len(), 0);
+        write_config(dir.path(), "[clipboard]\nenabled = true\n");
+        user.reload_config();
+        assert_eq!(user.clipboard().len(), 2);
+        user.clear_clipboard();
+        assert_eq!(user.clipboard().len(), 0);
     }
 
     #[test]

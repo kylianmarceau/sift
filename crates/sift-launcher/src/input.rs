@@ -73,6 +73,13 @@ impl SearchInput {
         &self.content
     }
 
+    /// Replaces the text and puts the cursor at the end.
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        let end = text.len();
+        self.set_content(text, end..end, cx);
+    }
+
     /// Clears the field, e.g. when the launcher is dismissed.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if !self.content.is_empty() {

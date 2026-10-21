@@ -12,9 +12,11 @@ use serde::Deserialize;
 pub const TEMPLATE: &str = r#"# Sift configuration. Changes apply the next time the launcher opens.
 
 [clipboard]
-# Keep a history of copied text, searchable with "clip " (for example
-# "clip invoice"). Off by default: copied text can be sensitive. Items
-# that password managers mark as concealed are never recorded.
+# Keep a history of copied text (plain text only), searchable by typing
+# "clip" and then words, as in "clip invoice". Off by default: copied text
+# can be sensitive. Text that password managers mark as concealed is never
+# kept. Turning this off stops recording and hides the history; the
+# "Clear Clipboard History" command deletes it.
 enabled = false
 # How many entries to keep.
 max_items = 200
