@@ -24,6 +24,7 @@ libc = "0.2"
 memchr = "2.8"
 memmap2 = "0.9.11"
 nucleo-matcher = "0.3.1"
+plist = { version = "1.10", default-features = false }
 rayon = "1.12"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3.27"
