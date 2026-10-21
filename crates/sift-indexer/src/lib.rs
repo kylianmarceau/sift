@@ -213,6 +213,13 @@ pub enum IndexError {
     Store(#[from] StoreError),
 }
 
+/// Whether `path` (canonical) is too broad to index without explicit
+/// confirmation: the filesystem root or the home folder. Indexing either
+/// would pull in system files or private application data.
+pub fn is_broad_root(path: &Path) -> bool {
+    path == Path::new("/") || std::env::home_dir().as_deref() == Some(path)
+}
+
 /// The excluded paths that apply inside `root`: the user's exclusions plus,
 /// with [`IndexOptions::skip_sensitive`], the default sensitive locations.
 /// A root the user names explicitly is indexed even if it is itself one of

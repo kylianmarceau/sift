@@ -23,6 +23,12 @@ pub const DB_FILE: &str = "index.db";
 /// File name of the name snapshot inside an index directory.
 pub const SNAPSHOT_FILE: &str = "names.snap";
 
+/// Where the CLI and the launcher keep the index by default:
+/// `~/Library/Application Support/sift/dev-index`.
+pub fn default_index_dir() -> Option<PathBuf> {
+    std::env::home_dir().map(|home| home.join("Library/Application Support/sift/dev-index"))
+}
+
 /// How a result matched the query, from strongest to weakest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -130,6 +136,8 @@ pub struct SearchResult {
     pub size: Option<u64>,
     pub mtime: Option<i64>,
     pub tier: MatchTier,
+    /// Ranking key from the [`Hit`]; higher is better.
+    pub score: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +197,14 @@ impl SearchIndex {
         self.rebuilt
     }
 
+    /// Whether the index changed since this snapshot was built (for example
+    /// by another process). Reopen to pick the change up.
+    pub fn is_stale(&self) -> bool {
+        self.store
+            .generation()
+            .map_or(true, |g| g != self.snapshot.generation())
+    }
+
     /// Runs `query` against the snapshot. Pure CPU work over mapped memory;
     /// no database or filesystem access.
     pub fn search(&self, query: &Query) -> SearchOutcome {
@@ -243,6 +259,7 @@ impl SearchIndex {
                 size: record.size,
                 mtime: record.mtime,
                 tier: hit.tier,
+                score: hit.score,
             });
         }
         Ok(results)

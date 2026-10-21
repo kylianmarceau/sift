@@ -10,11 +10,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use sift_indexer::{IndexOptions, index_root};
+use sift_indexer::{IndexOptions, index_root_at};
 use sift_search::{
     DB_FILE, KindFilter, Query, SNAPSHOT_FILE, SearchIndex, Snapshot, SnapshotError,
 };
-use sift_store::{EntryKind, Store};
+use sift_store::{EntryKind, EventMark, Store};
 
 use crate::bench::ms;
 use crate::mem::bytes;
@@ -178,8 +178,7 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn default_index_dir() -> Result<PathBuf> {
-    let home = std::env::home_dir().context("cannot determine home directory")?;
-    Ok(home.join("Library/Application Support/sift/dev-index"))
+    sift_search::default_index_dir().context("cannot determine home directory")
 }
 
 fn open_store(index_dir: &Path) -> Result<Store> {
@@ -205,13 +204,11 @@ fn cmd_index(index_dir: &Path, args: IndexArgs) -> Result<()> {
         args.paths.clone()
     };
 
-    let home = std::env::home_dir();
     for path in &paths {
         let canonical = path
             .canonicalize()
             .with_context(|| format!("cannot access {}", path.display()))?;
-        let broad = canonical == Path::new("/") || home.as_deref() == Some(canonical.as_path());
-        if broad && !args.allow_broad_root {
+        if sift_indexer::is_broad_root(&canonical) && !args.allow_broad_root {
             bail!(
                 "refusing to index {} without --allow-broad-root; pick specific folders instead",
                 canonical.display()
@@ -269,7 +266,13 @@ fn cmd_index(index_dir: &Path, args: IndexArgs) -> Result<()> {
     for path in &paths {
         let options = options_for(path);
         eprintln!("Indexing {} …", path.display());
-        let report = index_root(&mut store, path, &options, |n| {
+        // Record where FSEvents stood before the scan, so the launcher can
+        // pick up every later change without rescanning.
+        let mark = sift_watch::event_store_uuid(path).map(|uuid| EventMark {
+            id: sift_watch::current_event_id(),
+            uuid,
+        });
+        let report = index_root_at(&mut store, path, &options, mark.as_ref(), |n| {
             if interactive {
                 eprint!("\r  {} entries", thousands(n));
                 let _ = std::io::stderr().flush();
