@@ -118,21 +118,62 @@ Still open in Phase 2:
 2. Your existing `~/Documents` index predates event positions, so the
    launcher rescans it once on first start (about 0.2 s).
 
-Next small milestones:
+Next small milestone: a snapshot delta overlay for indexes near a
+million entries (moved to Phase 4).
 
-- Snapshot delta overlay for indexes near a million entries.
-- `ext:` / `f:` / `d:` filters in the launcher query.
-- Quick Look on the selected file (Phase 3 list).
+## Phase 3: productivity features ✅ built, manual check pending
 
-## Phase 3: productivity features
+Each feature does no background work unless it is used, and its cost is
+measured in BENCHMARKS.md.
 
-Calculator, clipboard history, snippets, favorites, recent items, custom
-commands, Quick Look, and more filters (size, date, path).
+Done:
+
+- [x] `sift-state`: `config.toml` (snippets, custom commands, clipboard
+      options; problems reported, never fatal) and `state.db` (recents,
+      favorites, clipboard history)
+- [x] Recents and favorites: the empty query lists favorites, then recent
+      items. ⌘D toggles a favorite (★), ⌃X removes an item from the
+      history. Use counts and favorites order results within a match tier
+- [x] Calculator (`sift-calc`): arithmetic, functions and constants; the
+      value is the top result and Enter copies it. Ordinary searches
+      never show it
+- [x] Snippets (Enter copies, `{date}` / `{time}` / `{datetime}`) and
+      custom commands (URL, file or app, shell command) from the config,
+      reloaded when the file changes. *Edit Sift Configuration* command
+- [x] File filters: `ext:`, `type:`, `in:`, `size:`, `modified:`; scan-side
+      where possible, explained when not understood
+- [x] Clipboard history, opt-in: plain text only, private items skipped,
+      searched with `clip …`, *Clipboard History* and *Clear Clipboard
+      History* commands. Enter copies; nothing is pasted automatically
+- [x] Quick Look: ⌘Y previews the selected file, follows the selection,
+      Esc closes it first
+- [x] Measured: calculator 0.2 µs per query; filters 0.5–35 ms; state
+      database 12–273 µs per operation; clipboard polling ≤ 0.01 s CPU per
+      minute (BENCHMARKS.md)
+
+Still open in Phase 3:
+
+1. **Manual GUI check** (needs you), see README "Trying the launcher":
+   favorites and recents, calculator, a snippet and a custom command from
+   the config, filters, clipboard history after enabling it, and Quick
+   Look (⌘Y, arrows while previewing, Esc).
+2. Footer hints were sized by estimate, not on screen; with a file
+   selected the footer shows five hints.
+
+Deliberately left out:
+
+- Auto-paste of snippets and clipboard entries: it would need the
+  Accessibility permission. Enter copies instead.
+- Images and files in clipboard history (text only for now).
+- Filters with no name and no extension (`in:projects` alone): the index
+  scan needs a name to match, so these ask for one.
 
 ## Phase 4: optimization and polish
 
 Profiling (Instruments), memory, battery, accessibility, crash recovery,
-and index-correctness fuzzing.
+and index-correctness fuzzing. Also carried over: a snapshot delta
+overlay for very large indexes, a configurable hotkey, launch at login,
+and a settings page for the options now in `config.toml`.
 
 ## Phase 5: packaging and release
 

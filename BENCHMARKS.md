@@ -336,3 +336,89 @@ the open-panel cost is a Phase 4 item.
 | Changes made while sift was not running | Replayed at startup from the saved FSEvents position, without a rescan (tested end to end). |
 | Recovery from lost events | Subtree or root rescans (tested on the update path; drop and wrap flags are not reproducible in tests). |
 | Idle CPU ≈ 0 with watching on | Met with the panel hidden: 0.00 s in 60 s. |
+
+## 2026-10-21 — Phase 3: productivity features
+
+Same machine. **Code:** commits `38ae94f`–`b249021`, release builds.
+
+### Calculator
+
+`cargo run --release -p sift-calc --example calc_latency`: 200,000
+rounds over each input set.
+
+| input | time per query |
+|-------|---------------:|
+| expressions (`1+2*3`, `2^10 - sqrt(144)`, `log(1000) * ln(e)`, …) | 184 ns |
+| ordinary searches, rejected (`safari`, `1password`, `e-mail`, …) | 73 ns |
+| longest accepted input (255 bytes) | 2.4 µs |
+
+The calculator adds well under a microsecond to a keystroke, and nothing
+measurable to searches that are not arithmetic.
+
+### File filters
+
+`cargo run --release -p sift-files --example filter_latency -- <index>`
+on the store-only synthetic indexes from `scripts/bench.sh`. Each query
+asks for 40 results, timed over 30 runs. The timing covers the scan,
+resolving paths and the post-filter. It leaves out the final existence
+check, because the synthetic paths are not on disk.
+
+| query | 100,001 entries median | p95 | 1,000,001 entries median | p95 |
+|-------|-----:|----:|-----:|----:|
+| `report` (no filter, for comparison) | 0.72 ms | 0.93 ms | 0.69 ms | 0.89 ms |
+| `report ext:pdf` | 0.55 ms | 0.64 ms | 0.70 ms | 0.79 ms |
+| `ext:pdf` (no name) | 0.90 ms | 1.07 ms | 2.97 ms | 3.38 ms |
+| `type:image` (18 extensions, no name) | 1.56 ms | 1.85 ms | 9.71 ms | 12.92 ms |
+| `report type:document` | 0.48 ms | 0.59 ms | 0.97 ms | 7.31 ms |
+| `report in:src` | 12.77 ms | 13.25 ms | 18.47 ms | 18.84 ms |
+| `report size:>1mb` | 20.17 ms | 23.55 ms | 34.29 ms | 36.81 ms |
+| `report modified:<30d` | 19.81 ms | 22.74 ms | 32.82 ms | 35.74 ms |
+| `a in:zzzz-no-such-folder` | 22.22 ms | 22.80 ms | 34.75 ms | 48.61 ms |
+
+Extension and kind filters run inside the scan and cost about the same
+as an unfiltered search. Path, size and date filters resolve top matches
+until enough pass, at about 10–17 µs per match (one SQLite lookup and
+path assembly each). The worst case is when nothing passes and all 2000
+candidates are resolved: 20–35 ms. The synthetic entries carry no sizes
+or dates, which makes the size and date rows that worst case. Real
+queries usually stop earlier, as `report in:src` shows.
+
+### State database
+
+`cargo run --release -p sift-state --example state_latency`: a full
+history (500 recents, 20 favorites, 200 clipboard entries of about
+400 bytes), 200 runs each.
+
+| operation | when it runs | median | p95 |
+|-----------|--------------|-------:|----:|
+| `record_use` (upsert + prune to 500) | after opening something | 273 µs | 307 µs |
+| `recent(16)` | empty query (on hide) | 12 µs | 14 µs |
+| `favorites()` | empty query, after ⌘D | 17 µs | 23 µs |
+| `usage_boosts()` over 500 rows | after each use or ⌘D | 97 µs | 117 µs |
+| `clipboard_add` (dedupe + cap) | after a copy, if enabled | 73 µs | 99 µs |
+| `clipboard(200)` | after a copy, if enabled | 46 µs | 59 µs |
+
+None of these run while typing. Showing the launcher costs one `stat` of
+`config.toml`.
+
+### Clipboard history idle cost
+
+The release launcher was started hidden twice with scratch config and
+index directories, for 60 s after a 10 s settle. Nothing was copied
+during either run, and the history stayed empty.
+
+| setting | CPU time in 60 s |
+|---------|-----------------:|
+| clipboard history off (default) | 0.00 s |
+| clipboard history on (750 ms polling) | ≤ 0.01 s |
+
+`ps` reports CPU time in 10 ms steps, so 80 counter reads a minute cost
+less than one step. With the feature off, no timer exists.
+
+### Not measured
+
+- Hotkey-to-first-frame after Phase 3. The empty-query list is computed
+  when the launcher hides, and showing adds one `stat`, so no change is
+  expected. `scripts/measure-hotkey.sh` needs a real key press.
+- Quick Look open time. The panel animates itself in, and it was checked
+  for correctness only (`examples/quicklook_check.rs`).

@@ -2,8 +2,9 @@
 
 This document records the technical decisions behind sift and the
 reasoning for them. It covers what exists today: the indexer and search
-engine (Phase 0), the launcher (Phase 1), and live file search in the
-launcher (Phase 2). Later phases add sections as they land.
+engine (Phase 0), the launcher (Phase 1), live file search in the
+launcher (Phase 2), and the productivity features (Phase 3). Later
+phases add sections as they land.
 
 ## Workspace
 
@@ -18,7 +19,9 @@ sift/
 │   ├── sift-apps/     installed-application discovery and the app provider
 │   ├── sift-macos/    AppKit glue: icons, opening apps and files, panel, folder picker
 │   ├── sift-watch/    FSEvents change notifications (objc2-core-services)
-│   ├── sift-files/    file provider and the live index service
+│   ├── sift-files/    file provider, query filters and the live index service
+│   ├── sift-calc/     calculator: expression evaluator and provider
+│   ├── sift-state/    config.toml and state.db (recents, favorites, clipboard)
 │   └── sift-launcher/ GPUI launcher app (binary `sift-launcher`, bundled as Sift.app)
 ├── scripts/bench.sh       reproducible file-search benchmark run
 ├── scripts/bundle-app.sh  builds target/release/Sift.app
@@ -30,8 +33,9 @@ Dependency directions:
 
 - File search: `cli → {indexer, search} → store`. The indexer and search
   crates do not know about each other; the CLI composes them.
-- Launcher: `launcher → {core, apps, files, macos}`, `apps → {core, search}`,
-  `files → {core, indexer, search, store, watch}`.
+- Launcher: `launcher → {core, apps, files, calc, state, macos}`,
+  `apps → {core, search}`, `files → {core, indexer, search, store, watch}`,
+  `calc → core`, `state → core`.
   `sift-apps` reuses only `sift-search`'s folding and name matcher, so
   apps and files rank by the same rules.
 
@@ -454,15 +458,165 @@ used. Builds are ad-hoc signed, so macOS may ask again after a rebuild.
 Security-scoped bookmarks would only matter for a sandboxed build, which
 Sift is not.
 
+## Productivity features (Phase 3)
+
+Every feature here is a provider or a small piece of launcher state. None
+runs in the background unless the user turns it on, and each one's cost
+is in BENCHMARKS.md.
+
+### Results that are not files
+
+`sift-core` gained result kinds (calculator, snippet, clipboard) and
+actions: open a URL, copy text, run a shell command. Actions have a
+stable text form (`app:`, `path:`, `url:`, `copy:`, `shell:`, `run:`) for
+storing recents and favorites. Decoding accepts a built-in command id
+only if the command still exists.
+
+A rank key's tier sits in bits 48–55 (1 fuzzy … 6 exact). Tier 7 is new
+and reserved for results that answer the query outright: the calculator
+value and, in a `clip` search, clipboard entries.
+
+### Usage: recents, favorites and boosts (`sift-state`)
+
+`state.db` (SQLite, WAL) has three tables: `usage` (id, kind, title,
+subtitle, encoded action, count, last use; pruned to 500 rows),
+`favorites` and `clipboard`. Times are Unix seconds and are passed in, so
+tests control the clock.
+
+Search order is now: tier, then **usage boost**, then provider, then
+score. The boost is `1 + log2(count × age weight)`, from 1 to 7. The
+weight is 1 within a day, 0.7 within a week, 0.5 within a month and
+0.25 after that. Favorites add 8, so a favorite outranks anything used
+merely often. Because the boost comes after the tier, an exact name
+always beats a frequently used fuzzy match. Boosts are recomputed after
+each use (about 0.1 ms) and handed to `Search` as a shared map.
+
+The empty query shows favorites, then up to 8 recent items. Stored rows
+are never trusted as they are:
+
+- snippets and custom commands are looked up again in the current
+  config, so a command deleted from the file cannot run from history;
+- files and apps must still exist (one `lstat` each);
+- calculator results, clipboard entries and *Quit Sift* are never
+  recorded.
+
+The list is computed when the launcher hides (the query is cleared then),
+so showing the launcher reads nothing from disk.
+
+### Configuration (`config.toml`)
+
+The file is hand-edited TOML: `[clipboard]` options, `[[snippets]]`
+(name, optional keyword, text) and `[[commands]]` (name plus exactly one
+of `url`, `open`, `shell`). A parse error falls back to defaults, and an
+invalid command is dropped. Either way, each problem is reported in the
+launcher instead of failing silently. The file is checked with one `stat`
+each time the launcher opens, and reloaded when its modification time
+changes. *Edit Sift Configuration* writes a commented template if there
+is no file, and opens it in the default editor (TextEdit when nothing is
+registered for `.toml`).
+
+Shell commands run with `/bin/sh -c` from the home folder, with no
+input. A background thread logs the exit status and the start of stderr.
+They come only from the user's own config file.
+
+### Calculator (`sift-calc`)
+
+A recursive-descent evaluator over `f64`:
+
+- `+ - * / % ^` (also `× ÷ **`), parentheses and unary minus;
+- implicit multiplication (`2pi`, `3(1+2)`);
+- `pi`, `tau`, `e`, and common functions.
+
+There are no variables or assignments. Input is capped at 256 bytes and
+nesting depth at 200.
+
+To keep ordinary searches clean, a result appears only for a real
+calculation: at least one operation, every token understood, and a
+finite value. `2048`, `pi`, `1password`, `e-mail` and `1/0` show
+nothing. Values are shown with up to 10 decimals, trailing zeros
+trimmed (so 0.1 + 0.2 is 0.3), and in scientific notation outside
+1e-6..1e15.
+
+### File filters (`sift-files::FileQuery`)
+
+Filter words are split from the name:
+
+- `ext:` and `type:` (categories of extensions, or file/folder);
+- `in:` (part of the containing path, `~` expanded);
+- `size:` (`>10mb`, `<1k`);
+- `modified:` (`<7d`, `>1y`).
+
+Unknown `word:value` tokens stay part of the name.
+
+Extension and kind filters run inside the index scan. The engine's
+`Query` now takes a list of extensions. With only an extension, the
+needle is `.`, so `type:image` is a single scan. Path, size and date
+filters are checked on up to 2000 top matches, resolved in batches of
+100 and stopping once enough pass. The cost is therefore bounded, but a
+very selective filter on a common name can miss matches beyond the
+first 2000. Queries with filters search files only, and a filter that
+is not understood is explained where "No results" would be.
+
+### Clipboard history
+
+Opt-in (`[clipboard] enabled = true`).
+
+- **Watching.** A foreground task reads `NSPasteboard.changeCount` every
+  750 ms, and reads the contents only after a change. What was on the
+  clipboard before watching started is not recorded.
+- **Private content.** Content whose types include
+  `org.nspasteboard.ConcealedType`, `TransientType` or
+  `AutoGeneratedType` is skipped without reading the text. Password
+  managers mark items this way (nspasteboard.org).
+- **What is kept.** Plain text only, deduplicated (copying again moves an
+  entry to the top), capped at `max_items`. Blank text and text over
+  64 KiB are skipped.
+- **Searching.** Entries are searched only after a `clip` prefix, never
+  mixed into ordinary results, and Enter copies an entry back.
+- **No auto-paste.** Automatic pasting would need synthetic key events,
+  which need the Accessibility permission.
+- **Turning it off** stops the task and hides the history.
+  *Clear Clipboard History* deletes it.
+- **Tests** use private, uniquely named pasteboards and never touch the
+  user's clipboard.
+
+### Quick Look (`sift-macos::QuickLook`)
+
+`QLPreviewPanel` finds its data source through the key window's responder
+chain. `QuickLook` defines a small `NSResponder` subclass
+(`SiftQuickLookController`) that:
+
+- adopts `QLPreviewPanelDataSource` (one item, the selected file's URL);
+- accepts panel control;
+- is inserted as the launcher window's `nextResponder`. AppKit does not
+  retain that pointer, so `QuickLook` owns the controller and restores
+  the chain when dropped.
+
+Two details matter:
+
+- The launcher's app is never active, because its panel is
+  non-activating. The preview panel is therefore set not to hide on
+  deactivation, and placed one level above the launcher.
+- The preview panel makes itself key when it appears. As the panel's
+  delegate, the controller hands key status back to the launcher in
+  `windowDidBecomeKey:`, so typing, arrows and Esc keep working.
+
+The launcher defers every show, move or close of the preview out of GPUI
+updates, for the same re-entrancy reason as resizing. If it loses focus
+while a preview is open, it waits 150 ms before deciding whether to
+hide, because opening the preview moves focus for a moment.
+`examples/quicklook_check.rs` verifies the wiring without a GUI session:
+the controller is found and the launcher stays key.
+
 ## What is deliberately deferred
 
 - A snapshot delta overlay for very large indexes (see "Index service").
-- Path filters, size and date filters, and usage-based ranking (recency,
-  favorites).
 - `getattrlistbulk` scanning, and Launch Services package detection.
-- Launcher: a configurable hotkey, launch at login, usage-based ranking,
-  lazy icon loading, and app-folder watching (the catalog currently
-  refreshes by age).
+- Launcher: a configurable hotkey, launch at login, lazy icon loading,
+  and app-folder watching (the catalog currently refreshes by age).
 - Security-scoped bookmarks (only needed for a sandboxed build).
-- Quick Look, and query syntax such as `ext:` in the launcher.
+- Auto-paste of snippets and clipboard entries (needs Accessibility),
+  and non-text clipboard history.
+- A settings page for `config.toml` options; the file is the interface
+  for now.
 - Full-text content indexing (out of scope for the MVP).
