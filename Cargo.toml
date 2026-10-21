@@ -8,6 +8,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
+license = "MIT"
+repository = "https://github.com/kylianmarceau/sift"
+authors = ["Kylian Dabancourt"]
 
 [workspace.dependencies]
 sift-store = { path = "crates/sift-store" }

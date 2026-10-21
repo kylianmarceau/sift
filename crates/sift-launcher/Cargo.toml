@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 # The binary keeps the package name: "Sift" would collide with the
 # "sift" CLI in target/release on case-insensitive APFS. The .app bundle
