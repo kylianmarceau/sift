@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, RenderImage,
-    SharedString, Subscription, Task, Window, actions, div, img, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat,
+    RenderImage, SharedString, Subscription, Task, Window, actions, div, img, prelude::*, px,
+    relative, svg,
 };
 use sift_apps::{AppCatalog, AppProvider, Location};
 use sift_calc::CalculatorProvider;
@@ -24,7 +25,7 @@ use crate::commands::{self, CommandProvider};
 use crate::icons::{IconCache, IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
 use crate::speech;
-use crate::theme::Theme;
+use crate::theme::{Theme, tile_color};
 use crate::user::{Reload, UserData, expand_placeholders};
 
 actions!(
@@ -42,12 +43,22 @@ actions!(
 );
 
 pub const WIDTH: f32 = 720.;
-const HEADER_HEIGHT: f32 = 58.;
-const ROW_HEIGHT: f32 = 46.;
+const HEADER_HEIGHT: f32 = 56.;
+const ROW_HEIGHT: f32 = 42.;
 const LIST_PADDING: f32 = 6.;
+/// The label above the results ("Results", "Favorites and Recents").
+const SECTION_HEIGHT: f32 = 26.;
 const MESSAGE_HEIGHT: f32 = 56.;
-const FOOTER_HEIGHT: f32 = 34.;
+const FOOTER_HEIGHT: f32 = 38.;
 const DIVIDER: f32 = 1.;
+/// Left edge shared by the search icon, section labels and result icons,
+/// so icons sit in one column and text in another.
+const INSET: f32 = 18.;
+/// Highlighted rows are inset from the window edge by this much.
+const ROW_MARGIN: f32 = 8.;
+const ICON_SIZE: f32 = 28.;
+/// Space between an icon and its text.
+const ICON_GAP: f32 = 12.;
 /// Rows visible at once; more results scroll with the selection.
 pub const VISIBLE_ROWS: usize = 8;
 /// Results fetched per query.
@@ -69,7 +80,7 @@ const CATALOG_MAX_AGE_SECS: u64 = 60;
 /// `render` exactly, since the native window is sized from it.
 pub fn window_height(rows: usize, message: bool) -> f32 {
     let body = if rows > 0 {
-        DIVIDER + 2. * LIST_PADDING + rows.min(VISIBLE_ROWS) as f32 * ROW_HEIGHT
+        DIVIDER + 2. * LIST_PADDING + SECTION_HEIGHT + rows.min(VISIBLE_ROWS) as f32 * ROW_HEIGHT
     } else if message {
         DIVIDER + MESSAGE_HEIGHT
     } else {
@@ -158,7 +169,7 @@ impl Launcher {
     pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme = Theme::for_appearance(window.appearance());
         let input = cx.new(|cx| {
-            let mut input = SearchInput::new("Search apps and files…", cx);
+            let mut input = SearchInput::new("Search apps, files and commands…", cx);
             apply_theme(&mut input, &theme);
             input
         });
@@ -986,25 +997,22 @@ impl Launcher {
             .subtitle
             .as_ref()
             .map(|s| SharedString::from(s.to_string()));
-        let kind: SharedString = if self.user.is_favorite(&item.id) {
-            format!("★ {}", item.kind.label()).into()
-        } else {
-            item.kind.label().into()
-        };
-        let glyph = glyph(item.kind);
+        let favorite = self.user.is_favorite(&item.id);
+        let kind = item.kind;
         let item = item.clone();
         let icon = self.icon(&item, cx);
 
         div()
             .id(("result", index))
             .h(px(ROW_HEIGHT))
-            .mx(px(LIST_PADDING))
-            .px_3()
+            .mx(px(ROW_MARGIN))
+            .px(px(INSET - ROW_MARGIN))
             .flex()
             .items_center()
-            .gap_3()
+            .gap(px(ICON_GAP))
             .rounded(px(8.))
             .when(selected, |row| row.bg(theme.selected))
+            .when(!selected, |row| row.hover(|style| style.bg(theme.hover)))
             .when_some(theme.outline, |row, outline| {
                 // Every row gets the border so that rows keep one size.
                 row.border_1().border_color(if selected {
@@ -1017,87 +1025,131 @@ impl Launcher {
                 this.selection.select(index);
                 this.activate_selected(window, cx);
             }))
-            .child(match icon {
-                Some(image) => img(image).size(px(30.)).into_any_element(),
-                None if glyph.is_some() => div()
-                    .size(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.))
-                    .bg(theme.key_background)
-                    .text_size(px(15.))
-                    .children(glyph)
-                    .into_any_element(),
-                None => div().size(px(30.)).into_any_element(),
-            })
+            .child(result_icon(kind, icon))
             .child(
+                // Title, then the folder or detail in quieter text on the
+                // same line; the detail gives way first when space runs out.
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_grow()
-                    .overflow_hidden()
-                    .child(div().text_size(px(14.)).text_color(theme.text).child(title))
-                    .when_some(subtitle, |col, subtitle| {
-                        col.child(
+                    .flex_1()
+                    .min_w(px(0.))
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.75))
+                            .truncate()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .when_some(subtitle, |line, subtitle| {
+                        line.child(
                             div()
-                                .text_size(px(11.5))
-                                .text_color(theme.muted)
+                                .flex_1()
+                                .min_w(px(0.))
                                 .truncate()
+                                .text_size(px(13.))
+                                .text_color(theme.muted)
                                 .child(subtitle),
                         )
                     }),
             )
-            .child(div().text_size(px(12.)).text_color(theme.muted).child(kind))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(theme.placeholder)
+                    .when(favorite, |accessory| {
+                        accessory.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme.favorite)
+                                .child("★"),
+                        )
+                    })
+                    .child(kind.label()),
+            )
             .into_any_element()
+    }
+
+    /// What the list shows, above the first row.
+    fn section_label(&self) -> &'static str {
+        if self.in_clipboard_scope(&self.query) {
+            "Clipboard History"
+        } else if self.query.trim().is_empty() {
+            "Favorites and Recents"
+        } else {
+            "Results"
+        }
+    }
+
+    fn render_section(&self) -> AnyElement {
+        let theme = self.theme;
+        let position = format!(
+            "{} of {}",
+            self.selection.index().map_or(0, |i| i + 1),
+            self.results.len()
+        );
+        div()
+            .h(px(SECTION_HEIGHT))
+            .px(px(INSET))
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(11.))
+            .text_color(theme.placeholder)
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.section_label()),
+            )
+            .child(position)
+            .into_any_element()
+    }
+
+    /// The status at the left of the footer, with the colour of its dot.
+    fn status_line(&self) -> (Hsla, SharedString) {
+        let theme = self.theme;
+        let roots = &self.index_status.roots;
+        if self.app_count == 0 {
+            (theme.accent, "Loading applications…".into())
+        } else if roots
+            .iter()
+            .any(|r| matches!(r.state, sift_files::RootState::Indexing { .. }))
+        {
+            (theme.accent, "Indexing files…".into())
+        } else if roots.iter().any(|r| {
+            matches!(
+                r.state,
+                sift_files::RootState::Unavailable | sift_files::RootState::Failed(_)
+            )
+        }) {
+            (
+                theme.error,
+                "A search folder is unavailable · see Sift Settings".into(),
+            )
+        } else {
+            (
+                theme.success,
+                format!(
+                    "{} apps · {} files and folders",
+                    self.app_count,
+                    thousands(self.file_index.len())
+                )
+                .into(),
+            )
+        }
     }
 
     fn render_footer(&self) -> AnyElement {
         let theme = self.theme;
-        let indexing = self
-            .index_status
-            .roots
-            .iter()
-            .any(|r| matches!(r.state, sift_files::RootState::Indexing { .. }));
-        let left: SharedString = if self.app_count == 0 {
-            "Loading applications…".into()
-        } else if indexing {
-            "Indexing files…".into()
-        } else if self.query.trim().is_empty() && !self.results.is_empty() {
-            "Favorites and recent items".into()
-        } else if self.in_clipboard_scope(&self.query) {
-            format!("Clipboard history · {} kept", self.user.clipboard().len()).into()
-        } else if self.results.is_empty() {
-            format!(
-                "{} apps · {} files and folders",
-                self.app_count,
-                thousands(self.file_index.len())
-            )
-            .into()
-        } else {
-            format!(
-                "{} of {} results",
-                self.selection.index().map_or(0, |i| i + 1),
-                self.results.len()
-            )
-            .into()
-        };
-        let key = |label: &'static str| {
-            div()
-                .px(px(5.))
-                .rounded(px(4.))
-                .bg(theme.key_background)
-                .text_color(theme.text)
-                .child(label)
-        };
-        let hint = |keys: &'static str, label: &'static str| {
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(key(keys))
-                .child(div().text_color(theme.muted).child(label))
-        };
+        let (dot, status) = self.status_line();
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
         let favorite_label = selected
@@ -1114,42 +1166,133 @@ impl Launcher {
             Some(Action::CopyText(_)) => "Copy",
             _ => "Open",
         };
+        let hint = |label: &'static str, keys: &'static [&'static str], primary: bool| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_color(if primary { theme.text } else { theme.muted })
+                        .when(primary, |label| label.font_weight(FontWeight::MEDIUM))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(3.))
+                        .children(keys.iter().map(|k| key_cap(k, &theme))),
+                )
+        };
+        let actions = match selected {
+            Some(_) => div()
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .child(hint(open_label, &["↵"], true))
+                .child(div().w(px(1.)).h(px(14.)).bg(theme.divider))
+                .when(can_reveal, |row| {
+                    row.child(hint("Show in Finder", &["⌘", "↵"], false))
+                        .child(hint("Quick Look", &["⌘", "Y"], false))
+                })
+                .when_some(favorite_label, |row, label| {
+                    row.child(hint(label, &["⌘", "D"], false))
+                })
+                .when(!can_reveal && favorite_label.is_none(), |row| {
+                    row.child(hint("Close", &["esc"], false))
+                }),
+            None => div().child(hint("Close", &["esc"], false)),
+        };
         div()
             .h(px(FOOTER_HEIGHT))
-            .px_4()
+            .pl(px(INSET))
+            .pr(px(10.))
             .flex()
             .items_center()
             .justify_between()
-            .text_size(px(11.5))
-            .child(div().text_color(theme.muted).child(left))
+            .gap(px(16.))
+            .bg(theme.surface)
+            .text_size(px(12.))
             .child(
                 div()
                     .flex()
-                    .gap_4()
-                    .child(hint("↵", open_label))
-                    .when(can_reveal, |row| row.child(hint("⌘↵", "Show in Finder")))
-                    .when(can_reveal, |row| row.child(hint("⌘Y", "Quick Look")))
-                    .when_some(favorite_label, |row, label| row.child(hint("⌘D", label)))
-                    .child(hint("esc", "Close")),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .items_center()
+                    .gap(px(7.))
+                    .text_color(theme.muted)
+                    .child(div().flex_none().size(px(6.)).rounded_full().bg(dot))
+                    .child(div().min_w(px(0.)).truncate().child(status)),
             )
+            .child(actions.flex_none())
             .into_any_element()
     }
+}
+
+/// A keyboard key, as drawn in the footer.
+fn key_cap(label: &'static str, theme: &Theme) -> AnyElement {
+    div()
+        .min_w(px(18.))
+        .h(px(18.))
+        .px(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(theme.key_background)
+        .text_color(theme.key_text)
+        .text_size(px(11.))
+        .font_weight(FontWeight::NORMAL)
+        .child(label)
+        .into_any_element()
+}
+
+/// A result's icon: the file or app icon once rendered, or a coloured tile
+/// with a symbol for results that have no file.
+fn result_icon(kind: ResultKind, icon: Option<Arc<RenderImage>>) -> AnyElement {
+    if let Some(image) = icon {
+        return img(image)
+            .flex_none()
+            .size(px(ICON_SIZE))
+            .into_any_element();
+    }
+    let symbol = match kind {
+        ResultKind::Command => Some("⌘"),
+        ResultKind::Calculator => Some("="),
+        ResultKind::Snippet => Some("¶"),
+        ResultKind::Clipboard => None,
+        // Its icon is still being rendered: keep the space.
+        ResultKind::Application | ResultKind::File | ResultKind::Folder => {
+            return div().flex_none().size(px(ICON_SIZE)).into_any_element();
+        }
+    };
+    let white = gpui::white();
+    div()
+        .flex_none()
+        .size(px(ICON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .bg(tile_color(kind))
+        .text_color(white)
+        .text_size(px(15.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .map(|tile| match symbol {
+            Some(symbol) => tile.child(symbol),
+            None => tile.child(
+                svg()
+                    .path(crate::assets::CLIPBOARD)
+                    .size(px(16.))
+                    .text_color(white),
+            ),
+        })
+        .into_any_element()
 }
 
 /// Emitted when the file index status changes (the settings window
 /// listens).
 pub struct IndexStatusChanged;
-
-/// The symbol drawn in place of an icon for results that have no file.
-fn glyph(kind: ResultKind) -> Option<&'static str> {
-    match kind {
-        ResultKind::Command => Some("⌘"),
-        ResultKind::Calculator => Some("="),
-        ResultKind::Snippet => Some("¶"),
-        ResultKind::Clipboard => Some("”"),
-        ResultKind::Application | ResultKind::File | ResultKind::Folder => None,
-    }
-}
 
 impl gpui::EventEmitter<IndexStatusChanged> for Launcher {}
 
@@ -1232,7 +1375,7 @@ impl Render for Launcher {
             self.announce_changes(cx);
         }
         let theme = self.theme;
-        let divider = || div().h(px(DIVIDER)).w_full().bg(theme.divider);
+        let divider = || div().flex_none().h(px(DIVIDER)).w_full().bg(theme.divider);
         let end = (self.scroll_top + VISIBLE_ROWS).min(self.results.len());
         let rows: Vec<AnyElement> = (self.scroll_top..end)
             .map(|i| self.render_row(i, cx))
@@ -1266,28 +1409,56 @@ impl Render for Launcher {
             .child(
                 div()
                     .h(px(HEADER_HEIGHT))
-                    .px_5()
+                    .px(px(INSET))
                     .flex()
                     .items_center()
-                    .text_size(px(20.))
-                    .line_height(px(26.))
-                    .child(self.input.clone()),
+                    .gap(px(ICON_GAP))
+                    .child(
+                        // Centred over the result icons below it.
+                        div()
+                            .flex_none()
+                            .size(px(ICON_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path(crate::assets::SEARCH)
+                                    .size(px(18.))
+                                    .text_color(theme.placeholder),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(19.))
+                            .line_height(px(24.))
+                            .child(self.input.clone()),
+                    ),
             )
             .when(self.message.is_none() && !rows.is_empty(), |root| {
-                root.child(divider())
-                    .child(div().py(px(LIST_PADDING)).flex().flex_col().children(rows))
+                root.child(divider()).child(
+                    div()
+                        .py(px(LIST_PADDING))
+                        .flex()
+                        .flex_col()
+                        .child(self.render_section())
+                        .children(rows),
+                )
             })
             .when(self.visible_rows() == 0, |root| {
                 root.when_some(message, |root, message| {
                     root.child(divider()).child(
                         div()
                             .h(px(MESSAGE_HEIGHT))
-                            .px_5()
+                            .px(px(INSET))
                             .flex()
                             .items_center()
+                            .justify_center()
                             .text_size(px(13.))
                             .text_color(message_color)
-                            .child(message),
+                            .child(div().text_center().line_clamp(2).child(message)),
                     )
                 })
             })

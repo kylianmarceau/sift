@@ -5,6 +5,7 @@
 //! The process, window and caches stay alive between uses, so showing the
 //! panel is an order-front, not a relaunch.
 
+mod assets;
 mod clipboard;
 mod commands;
 mod icons;
@@ -56,107 +57,109 @@ fn main() {
     logging::init(log_level());
     let (session, unclean_exit) = session::Session::start(&launcher::user_dir());
 
-    Application::new().run(move |cx: &mut App| {
-        // GPUI switches the app to the regular policy while launching;
-        // switch back so sift has no Dock icon even when run unbundled.
-        sift_macos::use_accessory_activation_policy();
-        bind_keys(cx);
+    Application::new()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            // GPUI switches the app to the regular policy while launching;
+            // switch back so sift has no Dock icon even when run unbundled.
+            sift_macos::use_accessory_activation_policy();
+            bind_keys(cx);
 
-        let window = match cx.open_window(window_options(cx), |window, cx| {
-            cx.new(|cx| Launcher::new(launcher::Startup { unclean_exit }, window, cx))
-        }) {
-            Ok(window) => window,
-            Err(error) => {
-                tracing::error!(%error, "cannot open the launcher window");
-                cx.quit();
-                return;
-            }
-        };
+            let window = match cx.open_window(window_options(cx), |window, cx| {
+                cx.new(|cx| Launcher::new(launcher::Startup { unclean_exit }, window, cx))
+            }) {
+                Ok(window) => window,
+                Err(error) => {
+                    tracing::error!(%error, "cannot open the launcher window");
+                    cx.quit();
+                    return;
+                }
+            };
 
-        let attached = window.update(cx, |launcher, window, cx| {
-            let panel = window.window_handle().ok().and_then(|handle| {
-                let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-                    return None;
-                };
-                // SAFETY: the view belongs to the window GPUI just created,
-                // and this closure runs on the main thread.
-                unsafe { Panel::from_ns_view(appkit.ns_view) }
+            let attached = window.update(cx, |launcher, window, cx| {
+                let panel = window.window_handle().ok().and_then(|handle| {
+                    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                        return None;
+                    };
+                    // SAFETY: the view belongs to the window GPUI just created,
+                    // and this closure runs on the main thread.
+                    unsafe { Panel::from_ns_view(appkit.ns_view) }
+                });
+                match panel {
+                    Some(panel) => launcher.attach_panel(panel, cx),
+                    None => tracing::error!("cannot access the native window"),
+                }
+                // Show once at launch so starting the app visibly does something,
+                // unless asked not to (for example when started at login).
+                if std::env::var_os("SIFT_START_HIDDEN").is_none() {
+                    launcher.show(window, cx);
+                }
             });
-            match panel {
-                Some(panel) => launcher.attach_panel(panel, cx),
-                None => tracing::error!("cannot access the native window"),
+            if let Err(error) = attached {
+                tracing::error!(%error, "cannot set up the launcher window");
             }
-            // Show once at launch so starting the app visibly does something,
-            // unless asked not to (for example when started at login).
-            if std::env::var_os("SIFT_START_HIDDEN").is_none() {
-                launcher.show(window, cx);
+
+            // Hotkey events arrive from a Carbon event handler on the main
+            // thread; forward them to a GPUI task through a channel.
+            let (hotkey_tx, mut hotkey_rx) = unbounded::<Instant>();
+            let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
+            match GlobalHotKeyManager::new().and_then(|manager| {
+                manager.register(hotkey)?;
+                Ok(manager)
+            }) {
+                Ok(manager) => {
+                    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+                        if event.id == hotkey.id() && event.state == HotKeyState::Pressed {
+                            let _ = hotkey_tx.unbounded_send(Instant::now());
+                        }
+                    }));
+                    // The registration lasts as long as the manager; keep it for
+                    // the life of the process.
+                    std::mem::forget(manager);
+                    tracing::info!("registered Option+Space");
+                }
+                Err(error) => tracing::error!(%error, "cannot register Option+Space"),
             }
+            cx.spawn(async move |cx| {
+                while let Some(pressed_at) = hotkey_rx.next().await {
+                    let _ = window.update(cx, |launcher, window, cx| {
+                        launcher.toggle(pressed_at, window, cx)
+                    });
+                }
+            })
+            .detach();
+
+            let (failure_tx, mut failure_rx) = unbounded::<LaunchError>();
+            let _ = LAUNCH_FAILURES.set(failure_tx);
+            cx.spawn(async move |cx| {
+                while let Some(error) = failure_rx.next().await {
+                    let _ = window.update(cx, |launcher, window, cx| {
+                        launcher.launch_failed(error, window, cx)
+                    });
+                }
+            })
+            .detach();
+
+            if let Some(rounds) = std::env::var("SIFT_UI_BENCH")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                cx.spawn(async move |cx| uibench::run(window, rounds, cx).await)
+                    .detach();
+            }
+
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            // Quitting normally removes the marker; a crash leaves it behind.
+            cx.on_app_quit(move |_| {
+                session.end();
+                async {}
+            })
+            .detach();
+            tracing::info!(
+                ms = started.elapsed().as_secs_f64() * 1000.,
+                "startup to window ready"
+            );
         });
-        if let Err(error) = attached {
-            tracing::error!(%error, "cannot set up the launcher window");
-        }
-
-        // Hotkey events arrive from a Carbon event handler on the main
-        // thread; forward them to a GPUI task through a channel.
-        let (hotkey_tx, mut hotkey_rx) = unbounded::<Instant>();
-        let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
-        match GlobalHotKeyManager::new().and_then(|manager| {
-            manager.register(hotkey)?;
-            Ok(manager)
-        }) {
-            Ok(manager) => {
-                GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-                    if event.id == hotkey.id() && event.state == HotKeyState::Pressed {
-                        let _ = hotkey_tx.unbounded_send(Instant::now());
-                    }
-                }));
-                // The registration lasts as long as the manager; keep it for
-                // the life of the process.
-                std::mem::forget(manager);
-                tracing::info!("registered Option+Space");
-            }
-            Err(error) => tracing::error!(%error, "cannot register Option+Space"),
-        }
-        cx.spawn(async move |cx| {
-            while let Some(pressed_at) = hotkey_rx.next().await {
-                let _ = window.update(cx, |launcher, window, cx| {
-                    launcher.toggle(pressed_at, window, cx)
-                });
-            }
-        })
-        .detach();
-
-        let (failure_tx, mut failure_rx) = unbounded::<LaunchError>();
-        let _ = LAUNCH_FAILURES.set(failure_tx);
-        cx.spawn(async move |cx| {
-            while let Some(error) = failure_rx.next().await {
-                let _ = window.update(cx, |launcher, window, cx| {
-                    launcher.launch_failed(error, window, cx)
-                });
-            }
-        })
-        .detach();
-
-        if let Some(rounds) = std::env::var("SIFT_UI_BENCH")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-        {
-            cx.spawn(async move |cx| uibench::run(window, rounds, cx).await)
-                .detach();
-        }
-
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        // Quitting normally removes the marker; a crash leaves it behind.
-        cx.on_app_quit(move |_| {
-            session.end();
-            async {}
-        })
-        .detach();
-        tracing::info!(
-            ms = started.elapsed().as_secs_f64() * 1000.,
-            "startup to window ready"
-        );
-    });
 }
 
 fn window_options(cx: &App) -> WindowOptions {
