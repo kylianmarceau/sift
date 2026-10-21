@@ -1,0 +1,27 @@
+[package]
+name = "sift-cli"
+description = "Command-line interface for indexing, searching and benchmarking sift"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sift"
+path = "src/main.rs"
+
+[dependencies]
+sift-store.workspace = true
+sift-indexer.workspace = true
+sift-search.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
