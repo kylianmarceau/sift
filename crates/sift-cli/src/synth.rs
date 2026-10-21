@@ -153,8 +153,9 @@ pub fn generate(count: usize, seed: u64, mut emit: impl FnMut(SynthEntry<'_>)) {
     let mut rng = Rng::new(seed);
     // (index, depth) of every directory so far.
     let mut dirs: Vec<(usize, u32)> = Vec::new();
-    // Hashes of (parent, name) pairs, to keep names unique per directory
-    // without storing every name. Fixed hasher keys keep output stable.
+    // Hashes of (parent, lowercased name) pairs, to keep names unique per
+    // directory without storing every name. Lowercased because APFS is
+    // case-insensitive by default. Fixed hasher keys keep output stable.
     let hasher = BuildHasherDefault::<DefaultHasher>::default();
     let mut taken: HashSet<u64> = HashSet::with_capacity(count);
     let mut name = String::new();
@@ -185,7 +186,7 @@ pub fn generate(count: usize, seed: u64, mut emit: impl FnMut(SynthEntry<'_>)) {
         // On a collision within the directory, disambiguate like Finder.
         let base_len = name.len();
         let mut copy = 1;
-        while !taken.insert(hasher.hash_one((parent_index, name.as_str()))) {
+        while !taken.insert(hasher.hash_one((parent_index, name.to_ascii_lowercase()))) {
             copy += 1;
             name.truncate(base_len);
             name.push_str(&format!(" {copy}"));
@@ -291,7 +292,8 @@ mod tests {
                 assert!(*p < i);
                 assert!(entries[*p].1, "parent must be a directory");
             }
-            assert!(seen.insert((*parent, name.clone())), "duplicate {name}");
+            let key = (*parent, name.to_ascii_lowercase());
+            assert!(seen.insert(key), "duplicate {name}");
         }
         let dirs = entries.iter().filter(|e| e.1).count();
         assert!(dirs > 100 && dirs < 1000, "{dirs} dirs");
