@@ -1,0 +1,25 @@
+[package]
+name = "sift-launcher"
+description = "The sift macOS launcher (GPUI application)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "Sift"
+path = "src/main.rs"
+
+[dependencies]
+sift-core.workspace = true
+sift-apps.workspace = true
+sift-macos.workspace = true
+futures.workspace = true
+global-hotkey.workspace = true
+gpui.workspace = true
+raw-window-handle.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
