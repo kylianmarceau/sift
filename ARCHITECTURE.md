@@ -1,8 +1,9 @@
 # Architecture
 
 This document records the technical decisions behind sift and the
-reasoning for them. It covers what exists today (Phase 0: the indexer and
-search engine); later phases add sections as they land.
+reasoning for them. It covers what exists today: the indexer and search
+engine (Phase 0) and the minimal launcher (Phase 1). Later phases add
+sections as they land.
 
 ## Workspace
 
@@ -12,24 +13,37 @@ sift/
 │   ├── sift-store/    SQLite persistence: schema, root replacement, path resolution
 │   ├── sift-indexer/  parallel filesystem scanner that writes into the store
 │   ├── sift-search/   name folding, memory-mapped snapshot, matching and ranking
-│   └── sift-cli/      `sift` binary: index / search / status / remove / bench
-├── scripts/bench.sh   reproducible benchmark run
+│   ├── sift-cli/      `sift` binary: index / search / status / remove / bench
+│   ├── sift-core/     launcher result types, the Provider trait, query clock, selection
+│   ├── sift-apps/     installed-application discovery and the app provider
+│   ├── sift-macos/    AppKit glue: icons, launching apps, panel placement (objc2)
+│   └── sift-launcher/ GPUI launcher app (binary `sift-launcher`, bundled as Sift.app)
+├── scripts/bench.sh       reproducible file-search benchmark run
+├── scripts/bundle-app.sh  builds target/release/Sift.app
 ├── PLAN.md            roadmap and milestone status
 └── BENCHMARKS.md      measured results
 ```
 
-Dependency direction: `cli → {indexer, search} → store`. The indexer and
-search crates do not know about each other; the CLI (later the launcher)
-composes them. There is deliberately no `core` crate yet: the only shared
-domain types (`EntryKind`, `EntryId`) live in `sift-store`, which every
-other crate already depends on. A `core` crate for launcher providers and
-result types arrives with Phase 1, when there is something real to put in it.
+Dependency directions:
+
+- File search: `cli → {indexer, search} → store`. The indexer and search
+  crates do not know about each other; the CLI composes them.
+- Launcher: `launcher → {core, apps, macos}`, `apps → {core, search}`.
+  `sift-apps` reuses only `sift-search`'s folding and name matcher, so
+  apps and files rank by the same rules.
+
+`sift-core` holds only UI-free types, so it can be unit-tested without a
+window and shared by future providers. All `unsafe` AppKit code lives in
+`sift-macos`; the launcher crate has one `unsafe` call (turning GPUI's
+window handle into a `Panel`).
 
 ## Storage: SQLite as the source of truth
 
 `index.db` (WAL mode) holds:
 
-- `roots`: indexed directories with scan statistics.
+- `roots`: indexed directories with scan statistics and the index options
+  they were scanned with (so `sift index` with no arguments re-indexes
+  every root the same way).
 - `entries`: one row per file, folder or link: `id, root_id, parent_id,
   kind, name (BLOB), size, mtime`.
 - `meta`: a `generation` counter bumped on every committed change.
@@ -56,6 +70,12 @@ Decisions:
   when that feature needs it.
 - **Roots may not nest.** Indexing a folder inside an existing root is
   rejected; indexing a parent of existing roots absorbs them.
+- **Schema versions migrate forward** (`PRAGMA user_version`). Version 2
+  added `roots.options`. Read-only handles on an older database still
+  work, and report no saved options.
+- **Compaction after large deletes.** Replacing or removing a root can
+  leave most pages free. After such a change, the store runs `VACUUM` if
+  at least a quarter of a database of 256+ pages is free.
 - `bundled` SQLite is compiled in for a predictable version with FTS5
   available, instead of depending on the system library's version.
 
@@ -81,6 +101,12 @@ thread, which is the only SQLite writer.
   recorded but not descended, matching how Finder presents them. This is
   an extension list for now. The authoritative check (Launch Services'
   package flag) belongs in the future platform crate.
+- **Dependency and cache folders are skipped by default.** Folders such
+  as `node_modules`, `.git`, `.venv`, `site-packages`, `__pycache__`,
+  `Pods`, `DerivedData` and `.build`, and any folder containing a
+  `CACHEDIR.TAG` file, are recorded but not descended. On a real
+  `~/Documents` this cut the index from 263k to 54k entries and the
+  database from 11.5 to 2.0 MiB. `--include-dependencies` turns it off.
 - **Errors are data.** Unreadable directories and entries (permission
   denied, privacy-protected locations, files vanishing mid-scan) are
   counted and sampled, never fatal.
@@ -107,7 +133,7 @@ header   64 B   magic, version, store generation, counts
 ids      u64×n  entry id per name
 bags     u64×n  character bag per name
 offsets  u32×n+1
-meta     u16×n  kind (2 bits) | depth (14 bits)
+meta     u16×n  kind (2 bits) | noisy (1 bit) | depth (13 bits)
 names    bytes  folded names, NUL-separated, contiguous
 ```
 
@@ -123,6 +149,12 @@ names    bytes  folded names, NUL-separated, contiguous
   modified underneath a reader (the one `unsafe` block, `Mmap::map`,
   relies on this).
 - **Size.** About 23 bytes plus the folded name length per entry.
+- **Noisy entries.** The builder marks everything under folders that
+  usually hold generated or third-party files (`node_modules`, `vendor`,
+  `dist`, `build`, `target`, `cache`, names ending in `-deps` or `_cache`,
+  …) as *noisy*. Noisy entries are still found, but rank below the user's
+  own files in the same tier. This complements the indexer's skip list,
+  which can't cover every naming convention.
 
 ### Folding
 
@@ -157,9 +189,15 @@ into a single `u64` sort key:
 | bits  | meaning |
 |-------|---------|
 | 48–55 | tier: exact (6) > exact stem (5, `report` = `report.pdf`) > prefix (4) > word prefix (3, `q3-report`) > substring (2) > fuzzy (1) |
-| 32–47 | earlier match position (substring tiers) or nucleo score (fuzzy) |
+| 47    | clean: not inside a noisy folder |
+| 46    | whole word: the match ends at a word boundary (`project-story` beats `projection` for `project`) |
+| 32–45 | earlier match position (substring tiers) or nucleo score (fuzzy), saturated to 14 bits |
 | 16–31 | shorter name |
 | 0–15  | shallower path |
+
+The tier always wins. Within a tier, the user's own files come before
+dependency files, and whole-word matches before partial ones. This
+ranking cost about 5–15% in search time at 1M entries (BENCHMARKS.md).
 
 Ties go to the lower snapshot position. Paths and metadata are resolved
 from SQLite only for the final page of results.
@@ -179,6 +217,100 @@ well inside the 20 ms target at 1M entries (BENCHMARKS.md). If much
 larger indexes need it, a trigram posting list can be added as a
 candidate generator in front of the same ranking code.
 
+## Launcher (Phase 1)
+
+`sift-launcher` is a GPUI application that runs in the background with no
+Dock icon (`LSUIElement` in the bundle, plus the Accessory activation
+policy at runtime, because GPUI switches to Regular while launching).
+
+**Window.** One window is created at startup and reused. GPUI's
+`WindowKind::PopUp` gives a non-activating `NSPanel` at pop-up level that
+can still become key, joins every Space and appears over full-screen apps.
+`sift-macos::Panel` then:
+
+- hides the title, title bar and traffic-light buttons, keeping the titled
+  style for macOS's native rounded corners and shadow;
+- centres the panel on the screen under the mouse, with its top edge
+  about 28% down;
+- resizes it to fit the results, keeping the top edge fixed.
+
+The panel is 720 pt wide. Its height is search field + up to 8 rows +
+footer, so it grows and shrinks as you type.
+
+**Show and hide.** Showing is `makeKeyAndOrderFront` on the existing
+window, and hiding is `orderOut`. Nothing is rebuilt, so the process,
+GPUI's text and image caches and the app catalog stay warm. The panel
+hides on Escape, on Cmd-W, when it loses key status (a click elsewhere),
+and when Option+Space is pressed while it is visible. Hiding clears the
+query. Cmd-Q quits.
+
+**Hotkey.** Option+Space is registered with the `global-hotkey` crate,
+which uses Carbon's `RegisterEventHotKey`. That API needs no
+Accessibility or Input Monitoring permission. The press is time-stamped
+in the event handler and sent through a channel to a GPUI task.
+`on_next_frame` then logs the time from key press to the first painted
+frame.
+
+**Text input.** `SearchInput` implements GPUI's `EntityInputHandler`, so
+the panel goes through the macOS text system. Dead keys and input methods
+(marked text) work, and composition doesn't trigger a search until it is
+committed.
+
+**Providers.** `sift-core` defines:
+
+```rust
+trait Provider: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn search(&self, query: &str, limit: usize) -> Vec<ResultItem>;
+}
+```
+
+`Search` fans a query out to every provider and merges the results by
+score. `ResultItem` carries a stable id, a kind, a title and subtitle,
+the score and an `Action` (`OpenApplication`, `OpenPath`). Phase 1 has
+one provider (`sift-apps`). Phase 2 adds files behind the same trait.
+
+**Stale-result protection.** Every keystroke takes a ticket from a
+`QueryClock` (an atomic counter) and runs the search on GPUI's background
+executor. When results come back, they are applied only if the ticket is
+still the latest. A slow provider can therefore never overwrite newer
+results. `Selection` keeps the highlighted row on the same item (by id)
+when results are replaced, or resets it to the top for a new query.
+
+**Applications.** `sift-apps` lists `.app` bundles in:
+
+- `/Applications` and `~/Applications` (plus one level of subfolders);
+- `/System/Applications`;
+- `/System/Library/CoreServices/Applications`;
+- Finder.
+
+It follows top-level symlinks (Safari is a symlink into a cryptex), and
+deduplicates by canonical path and by `CFBundleIdentifier`. The catalog
+and 64 px icons (rendered by `NSWorkspace iconForFile` into PNGs, off the
+main thread) load in the background at startup. They reload when the
+panel is shown, if the catalog is more than a minute old.
+
+**Launching.** `NSWorkspace openApplicationAtURL:configuration:
+completionHandler:` launches the app or brings it forward. The panel hides
+immediately. Failures arrive on a background queue, travel back over a
+channel, and are shown in the panel.
+
+**Packaging.** `scripts/bundle-app.sh` builds `target/release/Sift.app`:
+
+- `Info.plist` with `LSUIElement`, `NSHighResolutionCapable` and
+  bundle id `dev.sift.Sift`;
+- ad-hoc signed, not notarized.
+
+The executable is built as `sift-launcher` and renamed to `Sift` inside
+the bundle. A binary named `Sift` would overwrite the `sift` CLI, because
+APFS file names are case-insensitive.
+
+**GPUI build.** GPUI 0.2.2 from crates.io, with default features off plus
+`font-kit` and `runtime_shaders`. Runtime shaders mean building doesn't
+need full Xcode and its Metal compiler; the shaders compile once on first
+launch, which is why the first start after a build is slower (about
+0.8 s against about 0.1 s).
+
 ## What is deliberately deferred
 
 - Incremental updates via FSEvents (Phase 2). The design for it:
@@ -191,5 +323,8 @@ candidate generator in front of the same ranking code.
 - Path filters, size and date filters, and usage-based ranking (recency,
   favorites).
 - `getattrlistbulk` scanning, and Launch Services package detection.
+- Launcher: a configurable hotkey, launch at login, usage-based ranking,
+  lazy icon loading, and app-folder watching (the catalog currently
+  refreshes by age).
 - Security-scoped bookmarks for sandboxed folder access (Phase 2/5).
 - Full-text content indexing (out of scope for the MVP).
