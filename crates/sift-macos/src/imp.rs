@@ -8,7 +8,8 @@ use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep,
     NSCompositingOperation, NSDeviceRGBColorSpace, NSEvent, NSGraphicsContext,
-    NSRunningApplication, NSScreen, NSView, NSWindow, NSWorkspace, NSWorkspaceOpenConfiguration,
+    NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowTitleVisibility,
+    NSWorkspace, NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -140,6 +141,27 @@ impl Panel {
         let view: &NSView = unsafe { ns_view.cast::<NSView>().as_ref() };
         let window = view.window()?;
         Some(Self { window, mtm })
+    }
+
+    /// Turns GPUI's titled panel into a plain launcher surface: no title,
+    /// no traffic-light buttons, not draggable. The titled style is kept on
+    /// purpose, because it gives the window macOS's native rounded corners
+    /// and shadow.
+    pub fn configure(&self) {
+        let window = &self.window;
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        window.setTitlebarAppearsTransparent(true);
+        for button in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
+            if let Some(button) = window.standardWindowButton(button) {
+                button.setHidden(true);
+            }
+        }
+        window.setMovable(false);
+        window.setHidesOnDeactivate(false);
     }
 
     pub fn is_visible(&self) -> bool {
