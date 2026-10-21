@@ -16,7 +16,7 @@ cargo build --release -p sift-launcher --manifest-path "$ROOT/Cargo.toml"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$ROOT/target/release/Sift" "$APP/Contents/MacOS/Sift"
+cp "$ROOT/target/release/sift-launcher" "$APP/Contents/MacOS/Sift"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

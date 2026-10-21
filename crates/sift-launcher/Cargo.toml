@@ -6,8 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# The binary keeps the package name: "Sift" would collide with the
+# "sift" CLI in target/release on case-insensitive APFS. The .app bundle
+# renames it to Sift.
 [[bin]]
-name = "Sift"
+name = "sift-launcher"
 path = "src/main.rs"
 
 [dependencies]
