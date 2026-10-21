@@ -484,6 +484,8 @@ impl Panel {
     /// and shadow.
     pub fn configure(&self) {
         let window = &self.window;
+        // Not shown, but VoiceOver and the window list use it as the name.
+        window.setTitle(&NSString::from_str("Sift"));
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setTitlebarAppearsTransparent(true);
         for button in [

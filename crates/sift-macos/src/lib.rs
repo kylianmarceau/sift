@@ -63,6 +63,8 @@ pub fn process_is_running(pid: i32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+pub mod a11y;
+#[cfg(target_os = "macos")]
 mod imp;
 #[cfg(target_os = "macos")]
 mod quicklook;

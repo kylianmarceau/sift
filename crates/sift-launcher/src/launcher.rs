@@ -16,12 +16,14 @@ use sift_apps::{AppCatalog, AppProvider, Location};
 use sift_calc::CalculatorProvider;
 use sift_core::{Action, Provider, QueryClock, ResultItem, ResultKind, Search, Selection};
 use sift_files::{FileIndex, FileProvider, FileQuery, IndexService, ServiceConfig, Status};
+use sift_macos::a11y::{Urgency, announce};
 use sift_macos::{LaunchError, Panel, QuickLook};
 
 use crate::clipboard;
 use crate::commands::{self, CommandProvider};
 use crate::icons::{IconCache, IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
+use crate::speech;
 use crate::theme::Theme;
 use crate::user::{Reload, UserData, expand_placeholders};
 
@@ -57,6 +59,9 @@ const CLIPBOARD_POLL: Duration = Duration::from_millis(750);
 /// How long to wait, after losing focus while a preview is open, before
 /// deciding whether the user left the launcher.
 const QUICK_LOOK_SETTLE: Duration = Duration::from_millis(150);
+/// VoiceOver hears the result summary once typing pauses this long, so it
+/// does not talk over every keystroke.
+const SPEECH_PAUSE: Duration = Duration::from_millis(400);
 /// Refresh the application list at most this often, when the launcher opens.
 const CATALOG_MAX_AGE_SECS: u64 = 60;
 
@@ -121,6 +126,11 @@ pub struct Launcher {
     quick_look: Option<Rc<QuickLook>>,
     message: Option<SharedString>,
     theme: Theme,
+    /// VoiceOver was running when the panel was last shown.
+    voice_over: bool,
+    /// The last summary announced to VoiceOver (see `announce_changes`).
+    spoken: Option<String>,
+    speech_task: Option<Task<()>>,
     /// When the hotkey was pressed, until the resulting frame is rendered.
     show_requested_at: Option<Instant>,
     /// Timings for the built-in UI benchmark (`SIFT_UI_BENCH`).
@@ -261,6 +271,9 @@ impl Launcher {
             quick_look: None,
             message: None,
             theme,
+            voice_over: false,
+            spoken: None,
+            speech_task: None,
             show_requested_at: None,
             bench: None,
             search_task: None,
@@ -455,6 +468,17 @@ impl Launcher {
             cx.spawn(async move |_, _| panel.draw_now()).detach();
         }
         window.focus(&self.input.focus_handle(cx));
+        // Accessibility settings can change while the panel is hidden.
+        // SIFT_ANNOUNCE=1 announces as if VoiceOver were on (for testing
+        // with Accessibility Inspector, or the UI bench).
+        self.voice_over = sift_macos::a11y::voice_over_enabled()
+            || std::env::var_os("SIFT_ANNOUNCE").is_some_and(|v| v == "1");
+        self.spoken = None;
+        let theme = Theme::for_appearance(window.appearance());
+        if theme != self.theme {
+            self.theme = theme;
+            self.input.update(cx, |input, _| apply_theme(input, &theme));
+        }
         if let Some(service) = &self.service {
             service.send(sift_files::Command::Refresh);
         }
@@ -475,6 +499,7 @@ impl Launcher {
             panel.hide();
         }
         self.message = None;
+        self.speech_task = None;
         self.input.update(cx, |input, cx| input.clear(cx));
     }
 
@@ -601,6 +626,33 @@ impl Launcher {
         }
     }
 
+    /// What VoiceOver should know about the panel: the message shown, or
+    /// the result count and the highlighted result.
+    fn summary(&self) -> Option<String> {
+        if let Some(message) = &self.message {
+            return Some(message.to_string());
+        }
+        if self.results.is_empty() && !self.query.trim().is_empty() {
+            return Some(self.empty_message());
+        }
+        speech::results(&self.results, self.selection.index())
+    }
+
+    /// Announces the summary when it changed, after typing pauses.
+    fn announce_changes(&mut self, cx: &mut Context<Self>) {
+        let summary = self.summary();
+        if summary == self.spoken {
+            return;
+        }
+        self.spoken = summary.clone();
+        self.speech_task = summary.map(|text| {
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(SPEECH_PAUSE).await;
+                speak(&text, Urgency::Polite);
+            })
+        });
+    }
+
     fn height(&self) -> f32 {
         window_height(self.visible_rows(), self.shows_message())
     }
@@ -661,6 +713,15 @@ impl Launcher {
     fn follow_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(selected) = self.selection.index() {
             self.scroll_top = scroll_to_show(self.scroll_top, selected, VISIBLE_ROWS);
+            if self.voice_over
+                && let Some(item) = self.results.get(selected)
+            {
+                let text = speech::selection(item, selected, self.results.len());
+                // The highlight moved: say so now, and drop a pending summary.
+                self.spoken = self.summary();
+                self.speech_task =
+                    Some(cx.spawn(async move |_, _| speak(&text, Urgency::Interrupt)));
+            }
         }
         self.follow_quick_look(cx);
         cx.notify();
@@ -944,6 +1005,14 @@ impl Launcher {
             .gap_3()
             .rounded(px(8.))
             .when(selected, |row| row.bg(theme.selected))
+            .when_some(theme.outline, |row, outline| {
+                // Every row gets the border so that rows keep one size.
+                row.border_1().border_color(if selected {
+                    outline
+                } else {
+                    gpui::transparent_black()
+                })
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.selection.select(index);
                 this.activate_selected(window, cx);
@@ -1105,6 +1174,11 @@ fn render_icon(
     decode(sift_macos::icon_png(path, ICON_PX)?)
 }
 
+fn speak(text: &str, urgency: Urgency) {
+    tracing::debug!(text, ?urgency, "announce");
+    announce(text, urgency);
+}
+
 /// Removes evicted icons from the windows' texture atlases.
 fn free_textures(images: Vec<Arc<RenderImage>>, cx: &mut App) {
     for image in images {
@@ -1153,6 +1227,9 @@ impl Render for Launcher {
         }
         if let Some(bench) = &mut self.bench {
             bench.frame();
+        }
+        if self.voice_over && self.is_visible() {
+            self.announce_changes(cx);
         }
         let theme = self.theme;
         let divider = || div().h(px(DIVIDER)).w_full().bg(theme.divider);

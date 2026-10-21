@@ -14,6 +14,7 @@ mod logging;
 mod session;
 mod settings;
 mod shell;
+mod speech;
 mod theme;
 mod uibench;
 mod user;
