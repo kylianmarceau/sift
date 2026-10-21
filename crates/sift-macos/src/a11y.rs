@@ -13,7 +13,7 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{
     NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
     NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
-    NSAccessibilityPriorityLevel, NSApplication, NSWorkspace,
+    NSAccessibilityPriorityLevel, NSApplication, NSColor, NSColorSpace, NSWorkspace,
 };
 use objc2_foundation::{NSDictionary, NSNumber, NSString};
 
@@ -40,6 +40,19 @@ pub fn display_options() -> DisplayOptions {
         differentiate_without_color: workspace
             .accessibilityDisplayShouldDifferentiateWithoutColor(),
     }
+}
+
+/// The accent colour chosen in System Settings › Appearance, as sRGB
+/// components in 0–1. Main thread only (`None` elsewhere).
+pub fn accent_color() -> Option<[f32; 3]> {
+    MainThreadMarker::new()?;
+    let color =
+        NSColor::controlAccentColor().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+    Some([
+        color.redComponent() as f32,
+        color.greenComponent() as f32,
+        color.blueComponent() as f32,
+    ])
 }
 
 /// Whether VoiceOver is running. Main thread only (false elsewhere).
@@ -95,6 +108,7 @@ mod tests {
         // Test threads are not the main thread.
         assert_eq!(display_options(), DisplayOptions::default());
         assert!(!voice_over_enabled());
+        assert_eq!(accent_color(), None);
         announce("test", Urgency::Polite);
     }
 }
