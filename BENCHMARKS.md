@@ -125,3 +125,121 @@ The snapshot answers the same query, fully ranked, in 0.44 ms median
 | Idle memory < 50 / 100 MB | **Not measurable yet:** there is no long-running process. The CLI's search footprint is 2.2 MiB at 1M entries. |
 | Hotkey to visible < 50 ms | Not applicable until Phase 1. |
 | Idle CPU ≈ 0 | Not applicable: no background process yet. |
+
+The Phase 1 section below covers the long-running launcher.
+
+## 2026-10-21 — After the ranking and exclusion changes
+
+Same machine and toolchain as above.
+
+### Search at 1,000,001 entries (commit `1aa2a47`)
+
+The whole-word and "own files first" ranking signals (ARCHITECTURE.md,
+"Matching and ranking") add work per match. I re-ran `sift bench search`
+on the same synthetic 1M dataset, 50 timed runs per query.
+
+**Statistic: median over 50 runs.**
+
+| query | before (`189da10`) | after (`1aa2a47`) |
+|-------|-------------------:|------------------:|
+| `report`         | 0.437 ms | 0.51 ms |
+| `prjrpt` (fuzzy) | 0.760 ms | 0.77 ms |
+| `a` (worst case) | 3.168 ms | 3.46 ms |
+
+That is roughly 5–15% slower, still far below the 20 ms target. The other
+queries were not recorded for this run.
+
+### Real data: `~/Documents`
+
+Indexed with the defaults (dependency and cache folders skipped). Single
+runs, warm cache.
+
+| | default options | before dependency skipping |
+|---|---:|---:|
+| entries | 54,206 | 263,000 (approx.) |
+| database | 2.0 MiB | 11.5 MiB |
+| scan time | 215 ms | — |
+
+One-shot `sift search <q> --limit 20 --stats` in a new process (single
+sample each):
+
+| query | matches | open | search | resolve | footprint |
+|-------|--------:|-----:|-------:|--------:|----------:|
+| `project` | 76+    | 0.85 ms | 1.03 ms | 0.39 ms | 2.1 MiB |
+| `report`  | 80+    | 0.73 ms | 0.28 ms | 0.37 ms | 2.1 MiB |
+| `readme`  | 113+   | 0.67 ms | 0.21 ms | 0.40 ms | 2.1 MiB |
+| `prjrpt`  | 22     | 0.64 ms | 0.84 ms | 0.50 ms | 2.3 MiB |
+| `a`       | 27,836+ | 0.60 ms | 0.63 ms | 0.33 ms | 2.0 MiB |
+
+## 2026-10-21 — Phase 1 launcher
+
+Same machine. **Code:** commit `48e7368`, release build, run from
+`target/release/Sift.app`. The catalog had 107 applications.
+
+### Startup
+
+Measured from the `INFO` log lines (`SIFT_LOG=info`, the default).
+
+| run | process start → window ready | app catalog with icons |
+|-----|-----------------------------:|-----------------------:|
+| first launch after a build | 779 ms | 1,613 ms |
+| warm, run 1 | 108 ms | 130 ms |
+| warm, run 2 | 103 ms | 88 ms |
+| warm, run 3 | 101 ms | 88 ms |
+
+The first launch after a build is slower because GPUI compiles its Metal
+shaders at runtime (see ARCHITECTURE.md, "GPUI build") and the icon
+caches are cold. The catalog loads in the background, so the panel can be
+used before it finishes.
+
+### Idle memory and CPU
+
+The launcher was started and left idle with the panel hidden.
+
+| measurement | value | tool |
+|-------------|------:|------|
+| physical footprint after 10 s | 26 MB | `footprint <pid>` |
+| peak physical footprint | 34 MB | `footprint <pid>` |
+| resident size (RSS) | 63–64 MB | `ps -o rss` |
+| CPU time used between 10 s and 70 s | 0.00 s | `ps -o cputime` (0:00.18 at both points) |
+
+RSS includes shared system frameworks (AppKit, Metal) and is larger than
+the footprint for that reason. The footprint is the number that matches
+Activity Monitor's "Memory" column.
+
+### Application search
+
+`cargo run --release -p sift-apps --example bench_apps` runs each query
+200 times against the 107 discovered apps. This is the provider alone,
+without rendering. Discovery itself took 54.75 ms in that run, without
+icons.
+
+| query | median | p99 | top results |
+|-------|-------:|----:|-------------|
+| `s`               | 5.5 µs | 11.1 µs | Siri, Safari, Stocks |
+| `te`              | 5.3 µs | 11.2 µs | Terminal, TextEdit, Notes |
+| `term`            | 2.0 µs | 3.2 µs  | Terminal, System Information |
+| `cal`             | 2.2 µs | 3.5 µs  | Calendar, Calculator, … |
+| `vsc`             | 2.0 µs | 3.5 µs  | Visual Studio Code |
+| `system settings` | 1.7 µs | 2.8 µs  | System Settings |
+| `xyzzy` (miss)    | 1.7 µs | 2.5 µs  | — |
+| `act mon`         | 2.0 µs | 3.2 µs  | Activity Monitor |
+
+### Not measured yet
+
+- **Hotkey to visible.** The launcher logs `hotkey to first frame` with
+  the latency on every Option+Space press. That needs a real key press,
+  which I couldn't send in this session. Run the app from a terminal
+  (`target/release/Sift.app/Contents/MacOS/Sift`), press Option+Space a
+  few times, and read the log.
+- **Keystroke to rendered results** (search plus layout plus paint), and
+  memory after long use with many queries.
+
+### Against the Phase 1 targets
+
+| target | status |
+|--------|--------|
+| Idle memory < 50 MB | **Met:** 26 MB footprint idle, 34 MB peak. |
+| Hotkey to visible < 50 ms | **Not yet measured** (see above). Showing the panel reuses an existing window, with no process start or window creation. |
+| Search < 20 ms | **Met** for the app provider: ≤ 11 µs p99. Rendering time was not measured separately. |
+| Idle CPU ≈ 0 | **Met:** no CPU time used in 60 s idle. |
