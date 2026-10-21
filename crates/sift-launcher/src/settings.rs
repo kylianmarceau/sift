@@ -69,7 +69,7 @@ pub fn open(launcher: Entity<Launcher>, cx: &mut App) {
         focus: true,
         show: true,
         is_resizable: true,
-        app_id: Some("dev.sift.Sift".into()),
+        app_id: Some("io.github.kylianmarceau.sift".into()),
         ..Default::default()
     };
     match cx.open_window(options, |window, cx| {

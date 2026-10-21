@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Sift</string>
+    <key>CFBundleDisplayName</key>
+    <string>Sift</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.kylianmarceau.sift</string>
+    <key>CFBundleExecutable</key>
+    <string>Sift</string>
+    <key>CFBundleIconFile</key>
+    <string>Sift</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@BUILD@</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Kylian Dabancourt. MIT License.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <!-- SMAppService (Open at Login) needs macOS 13; so does the build. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Background utility: no Dock icon, no menu bar. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>

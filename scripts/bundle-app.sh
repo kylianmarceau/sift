@@ -1,57 +1,37 @@
 #!/usr/bin/env bash
-# Builds a local development bundle: target/release/Sift.app
+# Builds target/release/Sift.app.
 #
-#   scripts/bundle-app.sh            # build and bundle
+#   scripts/bundle-app.sh            # build and bundle (ad-hoc signed)
 #   scripts/bundle-app.sh --install  # also copy to ~/Applications
 #
-# The bundle is ad-hoc signed (required to run on Apple Silicon). It is
-# not notarized and not meant for distribution.
+# The bundle is ad-hoc signed, which Apple Silicon requires to run it, with
+# the hardened runtime that notarization asks for. scripts/release.sh signs
+# it with a Developer ID, notarizes it and packages it for distribution.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/target/release/Sift.app"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+# The build number is the commit count, so every commit bundles a higher one.
+BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 
-cargo build --release -p sift-launcher --manifest-path "$ROOT/Cargo.toml"
+# Match LSMinimumSystemVersion in packaging/Info.plist.
+export MACOSX_DEPLOYMENT_TARGET=13.0
+cargo build --release --locked -p sift-launcher --manifest-path "$ROOT/Cargo.toml"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/release/sift-launcher" "$APP/Contents/MacOS/Sift"
+sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" \
+    "$ROOT/packaging/Info.plist" > "$APP/Contents/Info.plist"
+plutil -lint -s "$APP/Contents/Info.plist"
+cp "$ROOT/packaging/Sift.icns" "$APP/Contents/Resources/Sift.icns"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+python3 "$ROOT/scripts/third-party-licenses.py" \
+    "$APP/Contents/Resources/THIRD_PARTY_LICENSES.txt" >/dev/null
 
-cat > "$APP/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>Sift</string>
-    <key>CFBundleDisplayName</key>
-    <string>Sift</string>
-    <key>CFBundleIdentifier</key>
-    <string>dev.sift.Sift</string>
-    <key>CFBundleExecutable</key>
-    <string>Sift</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <!-- Background utility: no Dock icon, no menu bar. -->
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
-</dict>
-</plist>
-PLIST
-
-codesign --force --sign - "$APP" >/dev/null
-echo "Built $APP"
+codesign --force --options runtime --sign - "$APP" >/dev/null
+echo "Built $APP ($VERSION, build $BUILD)"
 
 if [[ "${1:-}" == "--install" ]]; then
     mkdir -p "$HOME/Applications"

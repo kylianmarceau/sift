@@ -194,7 +194,7 @@ fn window_options(cx: &App) -> WindowOptions {
         is_resizable: false,
         is_minimizable: false,
         window_background: WindowBackgroundAppearance::Opaque,
-        app_id: Some("dev.sift.Sift".into()),
+        app_id: Some("io.github.kylianmarceau.sift".into()),
         ..Default::default()
     }
 }
