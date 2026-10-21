@@ -262,3 +262,43 @@ fn short_queries_return_no_files() {
     assert!(h.titles("a").is_empty());
     assert_eq!(h.titles("a.txt"), ["a.txt"]);
 }
+
+#[test]
+fn filters_narrow_file_results() {
+    let h = harness(|root| {
+        touch(&root.join("docs/report.pdf"));
+        touch(&root.join("docs/report.txt"));
+        touch(&root.join("photos/report.jpg"));
+        std::fs::write(
+            root.join("photos/big-report.png"),
+            vec![0u8; 2 * 1024 * 1024],
+        )
+        .expect("write big file");
+        touch(&root.join("archive/old-report.pdf"));
+        let old = std::time::SystemTime::now() - Duration::from_secs(400 * 24 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("archive/old-report.pdf"))
+            .and_then(|f| f.set_modified(old))
+            .expect("age file");
+    });
+    let sorted = |query: &str| {
+        let mut titles = h.titles(query);
+        titles.sort();
+        titles
+    };
+    assert_eq!(sorted("report ext:pdf"), ["old-report.pdf", "report.pdf"]);
+    assert_eq!(sorted("ext:pdf"), ["old-report.pdf", "report.pdf"]);
+    assert_eq!(
+        sorted("report type:image"),
+        ["big-report.png", "report.jpg"]
+    );
+    assert_eq!(sorted("report in:docs"), ["report.pdf", "report.txt"]);
+    assert_eq!(sorted("report size:>1mb"), ["big-report.png"]);
+    assert_eq!(sorted("report ext:pdf modified:>1y"), ["old-report.pdf"]);
+    assert_eq!(sorted("report ext:pdf modified:<7d"), ["report.pdf"]);
+    assert_eq!(sorted("docs type:folder"), ["docs"]);
+    // Nothing to search for, or a value that is not understood.
+    assert!(h.titles("in:docs").is_empty());
+    assert!(h.titles("report size:huge").is_empty());
+}

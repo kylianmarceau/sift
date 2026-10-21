@@ -84,8 +84,9 @@ pub struct Query {
     /// Maximum number of results.
     pub limit: usize,
     pub kind: Option<KindFilter>,
-    /// Only names ending in `.<extension>` (case-insensitive).
-    pub extension: Option<String>,
+    /// Only names ending in `.<extension>` for one of these extensions
+    /// (case-insensitive). Empty means any name.
+    pub extensions: Vec<String>,
     /// Allow approximate matches when exact/substring matches are scarce.
     pub fuzzy: bool,
 }
@@ -96,7 +97,7 @@ impl Query {
             text: text.into(),
             limit: 20,
             kind: None,
-            extension: None,
+            extensions: Vec::new(),
             fuzzy: true,
         }
     }

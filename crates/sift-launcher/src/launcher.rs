@@ -14,7 +14,7 @@ use gpui::{
 use sift_apps::{AppCatalog, AppProvider, Location};
 use sift_calc::CalculatorProvider;
 use sift_core::{Action, Provider, QueryClock, ResultItem, ResultKind, Search, Selection};
-use sift_files::{FileIndex, FileProvider, IndexService, ServiceConfig, Status};
+use sift_files::{FileIndex, FileProvider, FileQuery, IndexService, ServiceConfig, Status};
 use sift_macos::{LaunchError, Panel};
 
 use crate::commands::{self, CommandProvider};
@@ -80,6 +80,8 @@ pub struct Launcher {
     focus_handle: FocusHandle,
     input: Entity<SearchInput>,
     search: Search,
+    /// Files only, for queries with filters (`ext:pdf`, `in:projects`).
+    file_search: Search,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -176,6 +178,7 @@ impl Launcher {
             focus_handle: cx.focus_handle(),
             input,
             search: Search::default(),
+            file_search: Search::default(),
             apps: None,
             files,
             file_index,
@@ -218,6 +221,8 @@ impl Launcher {
         providers.push(self.user.snippets());
         providers.push(self.files.clone());
         self.search = Search::new(providers).with_boosts(self.user.boosts());
+        self.file_search = Search::new(vec![self.files.clone() as Arc<dyn Provider>])
+            .with_boosts(self.user.boosts());
     }
 
     /// Picks up edits to config.toml (one `stat` when nothing changed).
@@ -378,7 +383,11 @@ impl Launcher {
             self.set_results(home, same_query, cx);
             return;
         }
-        let search = self.search.clone();
+        let search = if FileQuery::parse(&query) == Ok(None) {
+            self.search.clone()
+        } else {
+            self.file_search.clone()
+        };
         let task = cx.background_spawn(async move { search.search(&query, RESULT_LIMIT) });
         self.search_task = Some(cx.spawn(async move |this, cx| {
             let results = task.await;
@@ -834,8 +843,11 @@ impl Render for Launcher {
             .map(|i| self.render_row(i, cx))
             .collect();
         let message: Option<SharedString> = self.message.clone().or_else(|| {
-            self.shows_message()
-                .then(|| format!("No results for “{}”", self.query.trim()).into())
+            self.shows_message().then(|| {
+                FileQuery::problem(&self.query)
+                    .unwrap_or_else(|| format!("No results for “{}”", self.query.trim()))
+                    .into()
+            })
         });
         let message_color = if self.message.is_some() {
             theme.error

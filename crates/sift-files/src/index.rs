@@ -66,18 +66,40 @@ impl FileIndex {
 
     /// Ranked results for `text`, resolved to paths.
     pub fn search(&self, text: &str, limit: usize) -> Vec<SearchResult> {
+        self.search_query(&Query::new(text).limit(limit), limit, |_| true)
+    }
+
+    /// Runs `query` and returns up to `limit` results that `keep` accepts,
+    /// best first. Hits are resolved (one database lookup each) in small
+    /// batches, stopping as soon as `limit` results are kept, so a
+    /// selective `keep` over a large `query.limit` stays cheap.
+    pub fn search_query(
+        &self,
+        query: &Query,
+        limit: usize,
+        keep: impl Fn(&SearchResult) -> bool,
+    ) -> Vec<SearchResult> {
+        const BATCH: usize = 100;
         let guard = self.lock();
         let Some(index) = guard.as_ref() else {
             return Vec::new();
         };
-        let outcome = index.search(&Query::new(text).limit(limit));
-        match index.resolve(&outcome.hits) {
-            Ok(results) => results,
-            Err(error) => {
-                tracing::warn!(%error, "cannot resolve file results");
-                Vec::new()
+        let outcome = index.search(query);
+        let mut kept = Vec::new();
+        for hits in outcome.hits.chunks(BATCH) {
+            match index.resolve(hits) {
+                Ok(results) => kept.extend(results.into_iter().filter(&keep)),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot resolve file results");
+                    break;
+                }
+            }
+            if kept.len() >= limit {
+                break;
             }
         }
+        kept.truncate(limit);
+        kept
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<SearchIndex>> {

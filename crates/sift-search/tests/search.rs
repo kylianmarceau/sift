@@ -205,12 +205,20 @@ fn filters_by_kind_and_extension() {
     assert_eq!(f.search(&files).len(), 4);
 
     let pdf = Query {
-        extension: Some(".pdf".into()),
+        extensions: vec![".pdf".into()],
         ..Query::new("report")
     };
     let mut names: Vec<_> = f.search(&pdf).into_iter().map(|(p, _)| p).collect();
     names.sort();
     assert_eq!(names, ["q3-report.PDF", "report.pdf"]);
+
+    let either = Query {
+        extensions: vec!["txt".into(), "PDF".into()],
+        ..Query::new("report")
+    };
+    let mut names: Vec<_> = f.search(&either).into_iter().map(|(p, _)| p).collect();
+    names.sort();
+    assert_eq!(names, ["q3-report.PDF", "report.pdf", "report.txt"]);
 }
 
 #[test]

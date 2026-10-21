@@ -50,7 +50,8 @@ pub(crate) struct Prepared {
     bag: u64,
     multi_word: bool,
     fuzzy: Option<Pattern>,
-    ext_suffix: Option<Vec<u8>>,
+    /// `.ext` suffixes, folded; a name must end in one of them.
+    ext_suffixes: Vec<Vec<u8>>,
     kind: Option<KindFilter>,
     limit: usize,
 }
@@ -84,23 +85,24 @@ impl Prepared {
                 AtomKind::Fuzzy,
             )
         });
-        let ext_suffix = query
-            .extension
-            .as_deref()
+        let ext_suffixes = query
+            .extensions
+            .iter()
             .map(|ext| ext.trim_start_matches('.'))
             .filter(|ext| !ext.is_empty())
             .map(|ext| {
                 let mut suffix = vec![b'.'];
                 suffix.extend(fold(ext.as_bytes()));
                 suffix
-            });
+            })
+            .collect();
         Some(Self {
             finder: memmem::Finder::new(&needle).into_owned(),
             needle,
             bag,
             multi_word,
             fuzzy,
-            ext_suffix,
+            ext_suffixes,
             kind: query.kind,
             limit: query.limit,
         })
@@ -113,10 +115,11 @@ impl Prepared {
                 return false;
             }
         }
-        match &self.ext_suffix {
-            Some(suffix) => name.ends_with(suffix) && name.len() > suffix.len(),
-            None => true,
-        }
+        self.ext_suffixes.is_empty()
+            || self
+                .ext_suffixes
+                .iter()
+                .any(|suffix| name.ends_with(suffix) && name.len() > suffix.len())
     }
 }
 

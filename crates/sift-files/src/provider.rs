@@ -6,6 +6,7 @@ use sift_search::SearchResult;
 use sift_store::EntryKind;
 
 use crate::FileIndex;
+use crate::filter::FileQuery;
 
 /// Queries shorter than this return no files. One character matches a
 /// large part of any index and would bury the applications.
@@ -50,17 +51,26 @@ impl FileProvider {
     }
 }
 
+impl FileProvider {
+    fn search_filtered(&self, filters: &FileQuery, limit: usize) -> Vec<SearchResult> {
+        filters.run(&self.index, limit)
+    }
+}
+
 impl Provider for FileProvider {
     fn name(&self) -> &'static str {
         "files"
     }
 
     fn search(&self, query: &str, limit: usize) -> Vec<ResultItem> {
-        if query.trim().chars().count() < MIN_QUERY_CHARS {
-            return Vec::new();
-        }
-        self.index
-            .search(query, limit)
+        let results = match FileQuery::parse(query) {
+            Ok(None) if query.trim().chars().count() >= MIN_QUERY_CHARS => {
+                self.index.search(query, limit)
+            }
+            Ok(Some(filters)) => self.search_filtered(&filters, limit),
+            Ok(None) | Err(_) => return Vec::new(),
+        };
+        results
             .into_iter()
             // The index can trail the filesystem by a moment (the watcher
             // batches events). Never offer something that is already gone:

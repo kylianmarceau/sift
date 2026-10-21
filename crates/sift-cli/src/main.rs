@@ -100,9 +100,10 @@ struct SearchArgs {
     /// Only folders.
     #[arg(long)]
     dirs: bool,
-    /// Only names with this extension, e.g. `--ext pdf`.
-    #[arg(long, value_name = "EXT")]
-    ext: Option<String>,
+    /// Only names with this extension, e.g. `--ext pdf`. Repeat or
+    /// separate with commas for several: `--ext jpg,png`.
+    #[arg(long, value_name = "EXT", value_delimiter = ',')]
+    ext: Vec<String>,
     /// Disable approximate (fuzzy) matches.
     #[arg(long)]
     no_fuzzy: bool,
@@ -343,7 +344,7 @@ fn cmd_search(index_dir: &Path, args: SearchArgs) -> Result<()> {
         } else {
             None
         },
-        extension: args.ext,
+        extensions: args.ext,
         fuzzy: !args.no_fuzzy,
     };
     let outcome = index.search(&query);

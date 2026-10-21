@@ -8,10 +8,12 @@
 //!   watches every indexed root with FSEvents, applies changes, and runs
 //!   the indexing commands from the settings UI.
 
+mod filter;
 mod index;
 mod provider;
 mod service;
 
+pub use filter::{Bound, FileQuery};
 pub use index::FileIndex;
 pub use provider::{FileProvider, MIN_QUERY_CHARS, abbreviate_home};
 pub use service::{
