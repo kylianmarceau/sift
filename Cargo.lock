@@ -4740,6 +4740,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-state"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "sift-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "sift-store"
 version = "0.1.0"
 dependencies = [
