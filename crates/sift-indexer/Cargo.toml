@@ -1,0 +1,18 @@
+[package]
+name = "sift-indexer"
+description = "Filesystem discovery for the sift file index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sift-store.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
