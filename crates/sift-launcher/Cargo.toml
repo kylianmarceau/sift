@@ -21,6 +21,7 @@ sift-macos.workspace = true
 sift-files.workspace = true
 sift-indexer.workspace = true
 sift-search.workspace = true
+sift-state.workspace = true
 futures.workspace = true
 global-hotkey.workspace = true
 gpui.workspace = true

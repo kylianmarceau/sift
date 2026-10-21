@@ -4,7 +4,11 @@ use sift_core::{Action, Provider, ResultItem, ResultKind};
 use sift_search::{NameMatcher, fold};
 
 pub const SETTINGS: &str = "settings";
+pub const EDIT_CONFIG: &str = "edit-config";
 pub const QUIT: &str = "quit";
+
+/// Every built-in command id (stored recents may only name these).
+pub const ALL: &[&str] = &[SETTINGS, EDIT_CONFIG, QUIT];
 
 struct Spec {
     id: &'static str,
@@ -20,6 +24,12 @@ const COMMANDS: &[Spec] = &[
         title: "Sift Settings",
         subtitle: "Choose which folders Sift searches",
         aliases: &["preferences", "index folders", "file search"],
+    },
+    Spec {
+        id: EDIT_CONFIG,
+        title: "Edit Sift Configuration",
+        subtitle: "Snippets, custom commands and clipboard history (config.toml)",
+        aliases: &["snippets", "custom commands", "config"],
     },
     Spec {
         id: QUIT,

@@ -13,7 +13,7 @@ mod provider;
 mod service;
 
 pub use index::FileIndex;
-pub use provider::{FileProvider, MIN_QUERY_CHARS};
+pub use provider::{FileProvider, MIN_QUERY_CHARS, abbreviate_home};
 pub use service::{
     Command, IndexService, RootState, RootStatus, ServiceConfig, Status, UpdateInfo,
 };

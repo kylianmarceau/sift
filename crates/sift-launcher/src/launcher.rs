@@ -21,10 +21,19 @@ use crate::commands::{self, CommandProvider};
 use crate::icons::{IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
 use crate::theme::Theme;
+use crate::user::{Reload, UserData, expand_placeholders};
 
 actions!(
     launcher,
-    [SelectNext, SelectPrevious, Confirm, RevealSelected, Dismiss]
+    [
+        SelectNext,
+        SelectPrevious,
+        Confirm,
+        RevealSelected,
+        ToggleFavorite,
+        ForgetSelected,
+        Dismiss
+    ]
 );
 
 pub const WIDTH: f32 = 720.;
@@ -77,6 +86,8 @@ pub struct Launcher {
     /// Keeps the file index current; `None` if it could not start.
     service: Option<Arc<IndexService>>,
     index_status: Status,
+    /// Config file, recents and favorites.
+    user: UserData,
     app_count: usize,
     catalog_loaded_at: Option<Instant>,
     catalog_task: Option<Task<()>>,
@@ -154,6 +165,13 @@ impl Launcher {
         })
         .detach();
 
+        // SIFT_CONFIG_DIR overrides where config.toml and state.db live.
+        let user_dir = std::env::var_os("SIFT_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(sift_state::support_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let user = UserData::open(&user_dir);
+
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             input,
@@ -163,6 +181,7 @@ impl Launcher {
             file_index,
             service,
             index_status: Status::default(),
+            user,
             app_count: 0,
             catalog_loaded_at: None,
             catalog_task: None,
@@ -182,19 +201,38 @@ impl Launcher {
         };
         this.rebuild_search();
         this.refresh_catalog(cx);
+        this.run_query(String::new(), cx);
         this
     }
 
     /// Providers in priority order: within a match tier, apps first, then
-    /// commands, then files.
+    /// built-in and custom commands, snippets, then files. Usage boosts
+    /// (favorites, frequent and recent use) order results within a tier.
     fn rebuild_search(&mut self) {
         let mut providers: Vec<Arc<dyn Provider>> = vec![Arc::new(CalculatorProvider)];
         if let Some(apps) = &self.apps {
             providers.push(apps.clone());
         }
         providers.push(Arc::new(CommandProvider));
+        providers.push(self.user.custom_commands());
+        providers.push(self.user.snippets());
         providers.push(self.files.clone());
-        self.search = Search::new(providers);
+        self.search = Search::new(providers).with_boosts(self.user.boosts());
+    }
+
+    /// Picks up edits to config.toml (one `stat` when nothing changed).
+    fn reload_config(&mut self, cx: &mut Context<Self>) {
+        if let Reload::Reloaded(problems) = self.user.reload_config() {
+            self.rebuild_search();
+            if let Some(first) = problems.first() {
+                let more = match problems.len() {
+                    1 => String::new(),
+                    n => format!(" (and {} more)", n - 1),
+                };
+                self.message = Some(format!("{first}{more}").into());
+            }
+            self.run_query(self.query.clone(), cx);
+        }
     }
 
     pub fn index_status(&self) -> &Status {
@@ -241,6 +279,7 @@ impl Launcher {
     }
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_config(cx);
         self.resize(cx);
         if let Some(panel) = self.panel.clone() {
             panel.show();
@@ -332,6 +371,13 @@ impl Launcher {
         let ticket = self.clock.next();
         let same_query = query == self.query;
         self.query = query.clone();
+        if query.trim().is_empty() {
+            // Favorites and recents: a few rows from SQLite, read in place.
+            self.search_task = None;
+            let home = self.user.home();
+            self.set_results(home, same_query, cx);
+            return;
+        }
         let search = self.search.clone();
         let task = cx.background_spawn(async move { search.search(&query, RESULT_LIMIT) });
         self.search_task = Some(cx.spawn(async move |this, cx| {
@@ -362,7 +408,16 @@ impl Launcher {
     }
 
     fn height(&self) -> f32 {
-        window_height(self.results.len(), self.shows_message())
+        window_height(self.visible_rows(), self.shows_message())
+    }
+
+    /// Result rows on screen: none while a message is shown.
+    fn visible_rows(&self) -> usize {
+        if self.message.is_some() {
+            0
+        } else {
+            self.results.len()
+        }
     }
 
     fn shows_message(&self) -> bool {
@@ -430,8 +485,25 @@ impl Launcher {
     }
 
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(action) = self.selected().map(|item| item.action.clone()) else {
+        if self.message.take().is_some() {
+            // Enter dismisses an error first; the list is hidden under it.
+            self.resize(cx);
+            cx.notify();
             return;
+        }
+        let Some(item) = self.selected().cloned() else {
+            return;
+        };
+        let action = match (&item.kind, &item.action) {
+            (ResultKind::Snippet, Action::CopyText(text)) => Action::CopyText(
+                expand_placeholders(
+                    text,
+                    &sift_macos::format_local_now("yyyy-MM-dd"),
+                    &sift_macos::format_local_now("HH:mm"),
+                )
+                .into(),
+            ),
+            (_, action) => action.clone(),
         };
         let started = Instant::now();
         let failures = crate::launch_failures();
@@ -445,6 +517,7 @@ impl Launcher {
             Action::CopyText(text) => sift_macos::copy_text(text),
             Action::Shell(command) => crate::shell::spawn(command),
             Action::Run(command) => {
+                self.record_use(&item);
                 self.run_command(command, window, cx);
                 return;
             }
@@ -456,14 +529,61 @@ impl Launcher {
                     ms = started.elapsed().as_secs_f64() * 1000.,
                     "open requested"
                 );
+                self.record_use(&item);
                 self.hide(cx);
             }
             Err(error) => self.show_error(error, cx),
         }
     }
 
+    fn record_use(&mut self, item: &ResultItem) {
+        self.user.record_use(item);
+        self.rebuild_search();
+    }
+
+    fn toggle_favorite(&mut self, _: &ToggleFavorite, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.selected().cloned() else {
+            return;
+        };
+        if self.user.toggle_favorite(&item).is_some() {
+            self.rebuild_search();
+            // Re-rank; the selection stays on the same item.
+            self.run_query(self.query.clone(), cx);
+        }
+    }
+
+    /// Removes the selected item from recents and favorites.
+    fn forget_selected(&mut self, _: &ForgetSelected, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected().map(|item| item.id.clone()) else {
+            return;
+        };
+        self.user.forget(&id);
+        self.rebuild_search();
+        self.run_query(self.query.clone(), cx);
+    }
+
+    fn edit_config(&mut self, cx: &mut Context<Self>) {
+        let path = self.user.config_path().to_path_buf();
+        let failures = crate::launch_failures();
+        let result = sift_state::Config::ensure_exists(&path)
+            .map_err(|e| LaunchError::Failed {
+                path: path.clone(),
+                reason: e.to_string(),
+            })
+            .and_then(|()| {
+                sift_macos::open_text_file(&path, move |error| {
+                    let _ = failures.unbounded_send(error);
+                })
+            });
+        match result {
+            Ok(()) => self.hide(cx),
+            Err(error) => self.show_error(error, cx),
+        }
+    }
+
     fn run_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         match command {
+            commands::EDIT_CONFIG => self.edit_config(cx),
             commands::SETTINGS => {
                 self.hide(cx);
                 crate::settings::open(cx.entity(), window, cx);
@@ -511,7 +631,11 @@ impl Launcher {
             .subtitle
             .as_ref()
             .map(|s| SharedString::from(s.to_string()));
-        let kind = item.kind.label();
+        let kind: SharedString = if self.user.is_favorite(&item.id) {
+            format!("★ {}", item.kind.label()).into()
+        } else {
+            item.kind.label().into()
+        };
         let glyph = glyph(item.kind);
         let item = item.clone();
         let icon = self.icon(&item, cx);
@@ -576,6 +700,8 @@ impl Launcher {
             "Loading applications…".into()
         } else if indexing {
             "Indexing files…".into()
+        } else if self.query.trim().is_empty() && !self.results.is_empty() {
+            "Favorites and recent items".into()
         } else if self.results.is_empty() {
             format!(
                 "{} apps · {} files and folders",
@@ -609,6 +735,15 @@ impl Launcher {
         };
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
+        let favorite_label = selected
+            .filter(|i| !matches!(i.kind, ResultKind::Calculator | ResultKind::Clipboard))
+            .map(|i| {
+                if self.user.is_favorite(&i.id) {
+                    "Unfavorite"
+                } else {
+                    "Favorite"
+                }
+            });
         let open_label = match selected.map(|i| &i.action) {
             Some(Action::Run(_) | Action::Shell(_)) => "Run",
             Some(Action::CopyText(_)) => "Copy",
@@ -626,9 +761,9 @@ impl Launcher {
                 div()
                     .flex()
                     .gap_4()
-                    .child(hint("↑↓", "Navigate"))
                     .child(hint("↵", open_label))
                     .when(can_reveal, |row| row.child(hint("⌘↵", "Show in Finder")))
+                    .when_some(favorite_label, |row, label| row.child(hint("⌘D", label)))
                     .child(hint("esc", "Close")),
             )
             .into_any_element()
@@ -715,6 +850,8 @@ impl Render for Launcher {
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::reveal))
+            .on_action(cx.listener(Self::toggle_favorite))
+            .on_action(cx.listener(Self::forget_selected))
             .on_action(cx.listener(Self::dismiss))
             .size_full()
             .flex()
@@ -731,11 +868,11 @@ impl Render for Launcher {
                     .line_height(px(26.))
                     .child(self.input.clone()),
             )
-            .when(!rows.is_empty(), |root| {
+            .when(self.message.is_none() && !rows.is_empty(), |root| {
                 root.child(divider())
                     .child(div().py(px(LIST_PADDING)).flex().flex_col().children(rows))
             })
-            .when(self.results.is_empty(), |root| {
+            .when(self.visible_rows() == 0, |root| {
                 root.when_some(message, |root, message| {
                     root.child(divider()).child(
                         div()

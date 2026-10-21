@@ -72,7 +72,7 @@ impl Provider for FileProvider {
 }
 
 /// `/Users/me/Documents/x` → `~/Documents/x`.
-fn abbreviate_home(path: &Path, home: Option<&Path>) -> String {
+pub fn abbreviate_home(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
         Some(rest) => format!("~/{}", rest.display()),

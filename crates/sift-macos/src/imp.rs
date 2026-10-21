@@ -12,7 +12,10 @@ use objc2_app_kit::{
     NSOpenPanel, NSPasteboard, NSPasteboardTypeString, NSRunningApplication, NSScreen, NSView,
     NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{
+    NSArray, NSDate, NSDateFormatter, NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString,
+    NSURL,
+};
 
 use crate::{LaunchError, validate_app_bundle};
 
@@ -119,6 +122,42 @@ pub fn open_path(
     Ok(())
 }
 
+/// Opens a text file in its default editor, or in TextEdit if no
+/// application is registered for its type (as for `.toml` on a fresh
+/// system).
+pub fn open_text_file(
+    path: &Path,
+    on_failure: impl Fn(LaunchError) + Send + Sync + 'static,
+) -> Result<(), LaunchError> {
+    let url = file_url(path)?;
+    let workspace = NSWorkspace::sharedWorkspace();
+    if workspace.URLForApplicationToOpenURL(&url).is_some() {
+        open_with_default_app(&url, path.to_path_buf(), on_failure);
+        return Ok(());
+    }
+    let text_edit = file_url(Path::new(TEXT_EDIT))?;
+    let configuration = NSWorkspaceOpenConfiguration::configuration();
+    configuration.setActivates(true);
+    let completion = failure_block(path.to_path_buf(), on_failure);
+    workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+        &NSArray::from_retained_slice(&[url]),
+        &text_edit,
+        &configuration,
+        Some(&completion),
+    );
+    Ok(())
+}
+
+const TEXT_EDIT: &str = "/System/Applications/TextEdit.app";
+
+/// The current local date and time formatted with a Unicode date pattern
+/// (`yyyy-MM-dd`, `HH:mm`, ...).
+pub fn format_local_now(pattern: &str) -> String {
+    let formatter = NSDateFormatter::new();
+    formatter.setDateFormat(Some(&NSString::from_str(pattern)));
+    formatter.stringFromDate(&NSDate::now()).to_string()
+}
+
 /// Opens a URL (`https:`, `mailto:`, `x-apple.systempreferences:`, ...)
 /// with its default handler. Only URLs with a scheme are accepted; text
 /// that does not parse fails immediately.
@@ -142,7 +181,20 @@ fn open_with_default_app(
 ) {
     let configuration = NSWorkspaceOpenConfiguration::configuration();
     configuration.setActivates(true);
-    let completion = RcBlock::new(
+    let completion = failure_block(label, on_failure);
+    NSWorkspace::sharedWorkspace().openURL_configuration_completionHandler(
+        url,
+        &configuration,
+        Some(&completion),
+    );
+}
+
+/// A completion handler that reports AppKit's error, if any.
+fn failure_block(
+    label: PathBuf,
+    on_failure: impl Fn(LaunchError) + Send + Sync + 'static,
+) -> RcBlock<dyn Fn(*mut NSRunningApplication, *mut NSError)> {
+    RcBlock::new(
         move |_app: *mut NSRunningApplication, error: *mut NSError| {
             // SAFETY: AppKit passes either null or a valid NSError for the
             // duration of the callback.
@@ -155,12 +207,7 @@ fn open_with_default_app(
                 });
             }
         },
-    );
-    NSWorkspace::sharedWorkspace().openURL_configuration_completionHandler(
-        url,
-        &configuration,
-        Some(&completion),
-    );
+    )
 }
 
 /// Replaces the clipboard contents with `text` (plain text only).

@@ -12,6 +12,7 @@ mod launcher;
 mod settings;
 mod shell;
 mod theme;
+mod user;
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -28,7 +29,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sift_macos::{LaunchError, Panel};
 
 use crate::input as text;
-use crate::launcher::{Confirm, Dismiss, Launcher, RevealSelected, SelectNext, SelectPrevious};
+use crate::launcher::{
+    Confirm, Dismiss, ForgetSelected, Launcher, RevealSelected, SelectNext, SelectPrevious,
+    ToggleFavorite,
+};
 
 actions!(sift, [Quit]);
 
@@ -170,6 +174,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", SelectPrevious, Some("Launcher")),
         KeyBinding::new("enter", Confirm, Some("Launcher")),
         KeyBinding::new("cmd-enter", RevealSelected, Some("Launcher")),
+        KeyBinding::new("cmd-d", ToggleFavorite, Some("Launcher")),
+        KeyBinding::new("ctrl-x", ForgetSelected, Some("Launcher")),
         KeyBinding::new("cmd-w", settings::CloseSettings, Some("Settings")),
         KeyBinding::new("escape", Dismiss, Some("Launcher")),
         KeyBinding::new("cmd-w", Dismiss, Some("Launcher")),

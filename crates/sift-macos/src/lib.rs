@@ -52,8 +52,8 @@ mod imp;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    Panel, activate_app, choose_folder, copy_text, icon_png, open_application, open_path, open_url,
-    reveal_in_finder, use_accessory_activation_policy,
+    Panel, activate_app, choose_folder, copy_text, format_local_now, icon_png, open_application,
+    open_path, open_text_file, open_url, reveal_in_finder, use_accessory_activation_policy,
 };
 
 #[cfg(test)]
@@ -107,6 +107,27 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_urls_are_refused_before_appkit() {
+        assert_eq!(
+            open_url("not a url", |_| {}),
+            Err(LaunchError::BadUrl("not a url".into()))
+        );
+        assert_eq!(
+            open_url("no-scheme.example", |_| {}),
+            Err(LaunchError::BadUrl("no-scheme.example".into()))
+        );
+    }
+
+    #[test]
+    fn formats_the_local_date() {
+        let date = format_local_now("yyyy-MM-dd");
+        let parts: Vec<&str> = date.split('-').collect();
+        assert_eq!(parts.len(), 3, "{date}");
+        assert!(parts[0].parse::<u32>().expect("year") >= 2024);
+        assert_eq!(format_local_now("HH:mm").len(), 5);
+    }
+
     #[test]
     fn renders_document_and_folder_icons() {
         let dir = tempfile::tempdir().unwrap();
