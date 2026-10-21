@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Measures Option+Space → first painted frame with the real hotkey.
 #
-#   scripts/measure-hotkey.sh [samples]     # default 20
+#   scripts/measure-hotkey.sh [samples]     # default 20 (quits a running Sift)
 #
 # Starts target/release/Sift.app with logging, then you press Option+Space
 # repeatedly (each press alternately shows and hides the panel). Every show
@@ -15,9 +15,12 @@ BIN="$ROOT/target/release/Sift.app/Contents/MacOS/Sift"
 SAMPLES="${1:-20}"
 LOG="$(mktemp -t sift-hotkey)"
 
+# Only one process can own Option+Space, so stop a running copy first.
 if pgrep -x Sift >/dev/null || pgrep -x sift-launcher >/dev/null; then
-    echo "Sift is already running and owns Option+Space. Quit it first (Cmd-Q while the panel is open)." >&2
-    exit 1
+    echo "Quitting the running Sift so this measurement can register Option+Space."
+    pkill -x Sift || true
+    pkill -x sift-launcher || true
+    sleep 0.5
 fi
 [[ -x "$BIN" ]] || "$ROOT/scripts/bundle-app.sh"
 
