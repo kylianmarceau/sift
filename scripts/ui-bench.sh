@@ -36,6 +36,23 @@ fi
 # Bring the source's name snapshot up to date (a no-op when it is), so the
 # launcher starts the way it does for a user, without a one-off rebuild.
 "$ROOT/target/release/sift" --index-dir "$SOURCE" search sift-ui-bench-warmup >/dev/null 2>&1
+# An index built by the `sift` CLI has no file-system event position, so
+# the launcher would rescan it on every run, in the middle of the typing.
+# Let the launcher record a position in the source once.
+if [[ ! -f "$SOURCE/.launcher-event-position" ]]; then
+    rm -rf "$WORK"
+    mkdir -p "$WORK/config"
+    SIFT_START_HIDDEN=1 SIFT_INDEX_DIR="$SOURCE" SIFT_CONFIG_DIR="$WORK/config" \
+        SIFT_LOG_DIR="$WORK/logs" "$LAUNCHER" >"$WORK/warmup.log" 2>&1 &
+    WARM=$!
+    for _ in $(seq 1 240); do
+        grep -q "watching for changes" "$WORK/warmup.log" && break
+        sleep 0.5
+    done
+    kill "$WARM" 2>/dev/null || true
+    wait "$WARM" 2>/dev/null || true
+    touch "$SOURCE/.launcher-event-position"
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK/config"
 cp -R "$SOURCE" "$WORK/index"
@@ -55,6 +72,8 @@ done
 sed -n '/== ui bench/,/ui bench done/p' "$LOG"
 
 cputime() { ps -o time= -p "$1" | awk -F'[:.]' '{ if (NF==3) print $1*60+$2+$3/100; else print $1*3600+$2*60+$3+$4/100 }'; }
+# Startup, catalog and index loading, and every keystroke and frame.
+echo "== CPU time from launch to the end of the run: $(cputime "$PID") s"
 sleep 5
 echo "== memory after the run (panel hidden)"
 footprint "$PID" 2>/dev/null | grep -E "Footprint|phys_footprint" | head -3 || true
