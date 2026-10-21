@@ -1,22 +1,30 @@
 //! The launcher view: search field, result list and footer.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::StreamExt;
+use futures::channel::mpsc::unbounded;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, SharedString,
     Subscription, Task, Window, actions, div, img, prelude::*, px,
 };
 use sift_apps::{AppCatalog, AppProvider, Location};
-use sift_core::{Action, QueryClock, ResultItem, Search, Selection};
+use sift_core::{Action, Provider, QueryClock, ResultItem, ResultKind, Search, Selection};
+use sift_files::{FileIndex, FileProvider, IndexService, ServiceConfig, Status};
 use sift_macos::{LaunchError, Panel};
 
+use crate::commands::{self, CommandProvider};
+use crate::icons::{IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
 use crate::theme::Theme;
 
-actions!(launcher, [SelectNext, SelectPrevious, Confirm, Dismiss]);
+actions!(
+    launcher,
+    [SelectNext, SelectPrevious, Confirm, RevealSelected, Dismiss]
+);
 
 pub const WIDTH: f32 = 720.;
 const HEADER_HEIGHT: f32 = 58.;
@@ -62,6 +70,12 @@ pub struct Launcher {
     focus_handle: FocusHandle,
     input: Entity<SearchInput>,
     search: Search,
+    apps: Option<Arc<AppProvider>>,
+    files: Arc<FileProvider>,
+    file_index: Arc<FileIndex>,
+    /// Keeps the file index current; `None` if it could not start.
+    service: Option<Arc<IndexService>>,
+    index_status: Status,
     app_count: usize,
     catalog_loaded_at: Option<Instant>,
     catalog_task: Option<Task<()>>,
@@ -70,7 +84,9 @@ pub struct Launcher {
     results: Vec<ResultItem>,
     selection: Selection,
     scroll_top: usize,
-    icons: HashMap<PathBuf, Option<Arc<Image>>>,
+    icons: HashMap<IconKey, Option<Arc<Image>>>,
+    /// Icons being rendered in the background.
+    icon_jobs: HashSet<IconKey>,
     panel: Option<Panel>,
     message: Option<SharedString>,
     theme: Theme,
@@ -84,7 +100,7 @@ impl Launcher {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme = Theme::for_appearance(window.appearance());
         let input = cx.new(|cx| {
-            let mut input = SearchInput::new("Search applications…", cx);
+            let mut input = SearchInput::new("Search apps and files…", cx);
             apply_theme(&mut input, &theme);
             input
         });
@@ -109,10 +125,43 @@ impl Launcher {
                 cx.notify();
             }),
         ];
+        // SIFT_INDEX_DIR overrides the location (development and tests).
+        let index_dir = std::env::var_os("SIFT_INDEX_DIR")
+            .map(PathBuf::from)
+            .or_else(sift_search::default_index_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let file_index = Arc::new(FileIndex::open(&index_dir));
+        let files = Arc::new(FileProvider::new(file_index.clone()));
+        let (status_tx, mut status_rx) = unbounded::<Status>();
+        let service = IndexService::start(ServiceConfig::new(&index_dir), file_index.clone(), {
+            move |status: &Status| {
+                let _ = status_tx.unbounded_send(status.clone());
+            }
+        })
+        .map_err(|error| tracing::error!(%error, "cannot start the file index service"))
+        .ok()
+        .map(Arc::new);
+        cx.spawn(async move |this, cx| {
+            while let Some(status) = status_rx.next().await {
+                if this
+                    .update(cx, |this, cx| this.set_index_status(status, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             input,
             search: Search::default(),
+            apps: None,
+            files,
+            file_index,
+            service,
+            index_status: Status::default(),
             app_count: 0,
             catalog_loaded_at: None,
             catalog_task: None,
@@ -122,6 +171,7 @@ impl Launcher {
             selection: Selection::default(),
             scroll_top: 0,
             icons: HashMap::new(),
+            icon_jobs: HashSet::new(),
             panel: None,
             message: None,
             theme,
@@ -129,8 +179,42 @@ impl Launcher {
             search_task: None,
             _subscriptions: subscriptions,
         };
+        this.rebuild_search();
         this.refresh_catalog(cx);
         this
+    }
+
+    /// Providers in priority order: within a match tier, apps first, then
+    /// commands, then files.
+    fn rebuild_search(&mut self) {
+        let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+        if let Some(apps) = &self.apps {
+            providers.push(apps.clone());
+        }
+        providers.push(Arc::new(CommandProvider));
+        providers.push(self.files.clone());
+        self.search = Search::new(providers);
+    }
+
+    pub fn index_status(&self) -> &Status {
+        &self.index_status
+    }
+
+    pub fn index_service(&self) -> Option<Arc<IndexService>> {
+        self.service.clone()
+    }
+
+    fn set_index_status(&mut self, status: Status, cx: &mut Context<Self>) {
+        let changed = status.last_update.map(|u| u.at)
+            != self.index_status.last_update.map(|u| u.at)
+            || status.roots.len() != self.index_status.roots.len();
+        self.index_status = status;
+        // New files may match the current query.
+        if changed && !self.query.trim().is_empty() {
+            self.run_query(self.query.clone(), cx);
+        }
+        cx.emit(IndexStatusChanged);
+        cx.notify();
     }
 
     /// Connects the native window once GPUI has created it.
@@ -164,6 +248,9 @@ impl Launcher {
             cx.spawn(async move |_, _| panel.draw_now()).detach();
         }
         window.focus(&self.input.focus_handle(cx));
+        if let Some(service) = &self.service {
+            service.send(sift_files::Command::Refresh);
+        }
         let stale = self
             .catalog_loaded_at
             .is_none_or(|t| t.elapsed().as_secs() >= CATALOG_MAX_AGE_SECS);
@@ -204,12 +291,7 @@ impl Launcher {
             let icons: Vec<(PathBuf, Option<Vec<u8>>)> = catalog
                 .apps()
                 .iter()
-                .map(|app| {
-                    (
-                        app.path.clone(),
-                        sift_macos::app_icon_png(&app.path, ICON_PX),
-                    )
-                })
+                .map(|app| (app.path.clone(), sift_macos::icon_png(&app.path, ICON_PX)))
                 .collect();
             (catalog, icons)
         });
@@ -222,11 +304,10 @@ impl Launcher {
                     "application catalog loaded (with icons)"
                 );
                 this.app_count = catalog.len();
-                this.search = Search::new(vec![Arc::new(AppProvider::new(catalog))]);
+                this.apps = Some(Arc::new(AppProvider::new(catalog)));
+                this.rebuild_search();
                 for (path, png) in icons {
-                    let image =
-                        png.map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
-                    this.icons.insert(path, image);
+                    this.icons.insert(IconKey::Path(path), png.map(png_image));
                 }
                 this.catalog_loaded_at = Some(Instant::now());
                 this.catalog_task = None;
@@ -329,47 +410,92 @@ impl Launcher {
         self.hide(cx);
     }
 
-    fn activate_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.selection.index().and_then(|i| self.results.get(i)) else {
+    fn reveal(&mut self, _: &RevealSelected, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .selected()
+            .and_then(|item| item.action.path())
+            .map(|p| p.to_path_buf())
+        else {
             return;
         };
-        match &item.action {
-            Action::OpenApplication(path) => {
-                let started = Instant::now();
-                let failures = crate::launch_failures();
-                match sift_macos::open_application(path, move |error| {
-                    let _ = failures.unbounded_send(error);
-                }) {
-                    Ok(()) => {
-                        tracing::info!(
-                            app = %path.display(),
-                            ms = started.elapsed().as_secs_f64() * 1000.,
-                            "launch requested"
-                        );
-                        self.hide(cx);
-                    }
-                    Err(error) => {
-                        self.message = Some(error.to_string().into());
-                        self.resize(cx);
-                        cx.notify();
-                    }
-                }
-            }
-            Action::OpenPath(_) => {
-                // File results arrive with the file provider in Phase 2.
-            }
+        match sift_macos::reveal_in_finder(&path) {
+            Ok(()) => self.hide(cx),
+            Err(error) => self.show_error(error, cx),
         }
     }
 
-    fn icon(&mut self, path: &Path) -> Option<Arc<Image>> {
-        if let Some(icon) = self.icons.get(path) {
+    fn selected(&self) -> Option<&ResultItem> {
+        self.selection.index().and_then(|i| self.results.get(i))
+    }
+
+    fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self.selected().map(|item| item.action.clone()) else {
+            return;
+        };
+        let started = Instant::now();
+        let failures = crate::launch_failures();
+        let report = move |error| {
+            let _ = failures.unbounded_send(error);
+        };
+        let result = match &action {
+            Action::OpenApplication(path) => sift_macos::open_application(path, report),
+            Action::OpenPath(path) => sift_macos::open_path(path, report),
+            Action::Run(command) => {
+                self.run_command(command, window, cx);
+                return;
+            }
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    path = %action.path().map(|p| p.display().to_string()).unwrap_or_default(),
+                    ms = started.elapsed().as_secs_f64() * 1000.,
+                    "open requested"
+                );
+                self.hide(cx);
+            }
+            Err(error) => self.show_error(error, cx),
+        }
+    }
+
+    fn run_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            commands::SETTINGS => {
+                self.hide(cx);
+                crate::settings::open(cx.entity(), window, cx);
+            }
+            commands::QUIT => cx.quit(),
+            other => tracing::warn!(command = other, "unknown command"),
+        }
+    }
+
+    fn show_error(&mut self, error: LaunchError, cx: &mut Context<Self>) {
+        self.message = Some(error.to_string().into());
+        self.resize(cx);
+        cx.notify();
+    }
+
+    /// The icon for `item`, if rendered. Missing icons are rendered on the
+    /// background executor and the view refreshes when they arrive.
+    fn icon(&mut self, item: &ResultItem, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+        let (key, path) = icon_for(item)?;
+        if let Some(icon) = self.icons.get(&key) {
             return icon.clone();
         }
-        // Not prefetched (catalog still loading): render now, once.
-        let image = sift_macos::app_icon_png(path, ICON_PX)
-            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
-        self.icons.insert(path.to_path_buf(), image.clone());
-        image
+        if self.icon_jobs.insert(key.clone()) {
+            let render = cx.background_spawn(async move { sift_macos::icon_png(&path, ICON_PX) });
+            cx.spawn(async move |this, cx| {
+                let png = render.await;
+                this.update(cx, |this, cx| {
+                    this.icon_jobs.remove(&key);
+                    this.icons.insert(key, png.map(png_image));
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        None
     }
 
     fn render_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -382,10 +508,9 @@ impl Launcher {
             .as_ref()
             .map(|s| SharedString::from(s.to_string()));
         let kind = item.kind.label();
-        let icon_path = match &item.action {
-            Action::OpenApplication(p) | Action::OpenPath(p) => p.clone(),
-        };
-        let icon = self.icon(&icon_path);
+        let is_command = item.kind == ResultKind::Command;
+        let item = item.clone();
+        let icon = self.icon(&item, cx);
 
         div()
             .id(("result", index))
@@ -403,6 +528,16 @@ impl Launcher {
             }))
             .child(match icon {
                 Some(image) => img(image).size(px(30.)).into_any_element(),
+                None if is_command => div()
+                    .size(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .bg(theme.key_background)
+                    .text_size(px(15.))
+                    .child("⌘")
+                    .into_any_element(),
                 None => div().size(px(30.)).into_any_element(),
             })
             .child(
@@ -428,10 +563,22 @@ impl Launcher {
 
     fn render_footer(&self) -> AnyElement {
         let theme = self.theme;
+        let indexing = self
+            .index_status
+            .roots
+            .iter()
+            .any(|r| matches!(r.state, sift_files::RootState::Indexing { .. }));
         let left: SharedString = if self.app_count == 0 {
             "Loading applications…".into()
+        } else if indexing {
+            "Indexing files…".into()
         } else if self.results.is_empty() {
-            format!("{} applications", self.app_count).into()
+            format!(
+                "{} apps · {} files and folders",
+                self.app_count,
+                thousands(self.file_index.len())
+            )
+            .into()
         } else {
             format!(
                 "{} of {} results",
@@ -456,6 +603,12 @@ impl Launcher {
                 .child(key(keys))
                 .child(div().text_color(theme.muted).child(label))
         };
+        let selected = self.selected();
+        let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
+        let open_label = match selected.map(|i| &i.action) {
+            Some(Action::Run(_)) => "Run",
+            _ => "Open",
+        };
         div()
             .h(px(FOOTER_HEIGHT))
             .px_4()
@@ -469,11 +622,34 @@ impl Launcher {
                     .flex()
                     .gap_4()
                     .child(hint("↑↓", "Navigate"))
-                    .child(hint("↵", "Open"))
+                    .child(hint("↵", open_label))
+                    .when(can_reveal, |row| row.child(hint("⌘↵", "Show in Finder")))
                     .child(hint("esc", "Close")),
             )
             .into_any_element()
     }
+}
+
+/// Emitted when the file index status changes (the settings window
+/// listens).
+pub struct IndexStatusChanged;
+
+impl gpui::EventEmitter<IndexStatusChanged> for Launcher {}
+
+fn png_image(bytes: Vec<u8>) -> Arc<Image> {
+    Arc::new(Image::from_bytes(ImageFormat::Png, bytes))
+}
+
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn apply_theme(input: &mut SearchInput, theme: &Theme) {
@@ -508,7 +684,7 @@ impl Render for Launcher {
             .collect();
         let message: Option<SharedString> = self.message.clone().or_else(|| {
             self.shows_message()
-                .then(|| format!("No applications match “{}”", self.query.trim()).into())
+                .then(|| format!("No results for “{}”", self.query.trim()).into())
         });
         let message_color = if self.message.is_some() {
             theme.error
@@ -522,6 +698,7 @@ impl Render for Launcher {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::reveal))
             .on_action(cx.listener(Self::dismiss))
             .size_full()
             .flex()
@@ -576,6 +753,14 @@ mod tests {
         assert_eq!(window_height(40, false), eight);
         // Results take precedence over a message.
         assert_eq!(window_height(3, true), window_height(3, false));
+    }
+
+    #[test]
+    fn formats_counts_with_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(54_206), "54,206");
+        assert_eq!(thousands(1_000_000), "1,000,000");
     }
 
     #[test]

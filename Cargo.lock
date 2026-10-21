@@ -4700,7 +4700,10 @@ dependencies = [
  "raw-window-handle",
  "sift-apps",
  "sift-core",
+ "sift-files",
+ "sift-indexer",
  "sift-macos",
+ "sift-search",
  "tracing",
  "tracing-subscriber",
 ]

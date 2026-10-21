@@ -5,8 +5,11 @@
 //! The process, window and caches stay alive between uses, so showing the
 //! panel is an order-front, not a relaunch.
 
+mod commands;
+mod icons;
 mod input;
 mod launcher;
+mod settings;
 mod theme;
 
 use std::sync::OnceLock;
@@ -24,7 +27,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sift_macos::{LaunchError, Panel};
 
 use crate::input as text;
-use crate::launcher::{Confirm, Dismiss, Launcher, SelectNext, SelectPrevious};
+use crate::launcher::{Confirm, Dismiss, Launcher, RevealSelected, SelectNext, SelectPrevious};
 
 actions!(sift, [Quit]);
 
@@ -76,8 +79,11 @@ fn main() {
                 Some(panel) => launcher.attach_panel(panel, cx),
                 None => tracing::error!("cannot access the native window"),
             }
-            // Show once at launch so starting the app visibly does something.
-            launcher.show(window, cx);
+            // Show once at launch so starting the app visibly does something,
+            // unless asked not to (for example when started at login).
+            if std::env::var_os("SIFT_START_HIDDEN").is_none() {
+                launcher.show(window, cx);
+            }
         });
         if let Err(error) = attached {
             tracing::error!(%error, "cannot set up the launcher window");
@@ -162,6 +168,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SelectPrevious, Some("Launcher")),
         KeyBinding::new("ctrl-p", SelectPrevious, Some("Launcher")),
         KeyBinding::new("enter", Confirm, Some("Launcher")),
+        KeyBinding::new("cmd-enter", RevealSelected, Some("Launcher")),
+        KeyBinding::new("cmd-w", settings::CloseSettings, Some("Settings")),
         KeyBinding::new("escape", Dismiss, Some("Launcher")),
         KeyBinding::new("cmd-w", Dismiss, Some("Launcher")),
         KeyBinding::new("cmd-q", Quit, None),
