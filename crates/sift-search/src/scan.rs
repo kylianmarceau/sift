@@ -29,7 +29,7 @@ use rayon::prelude::*;
 use sift_store::EntryKind;
 
 use crate::fold::{char_bag, fold};
-use crate::snapshot::{Snapshot, depth_of, kind_of};
+use crate::snapshot::{Snapshot, depth_of, is_noisy, kind_of};
 use crate::{KindFilter, MatchTier, Query};
 
 /// Names per parallel work unit. Large enough to amortise task overhead,
@@ -120,6 +120,57 @@ impl Prepared {
     }
 }
 
+/// Scores individual folded names against a query with exactly the same
+/// tiers and signals as an index scan. For small in-memory lists such as
+/// installed applications, where a snapshot would be overkill.
+pub struct NameMatcher {
+    prepared: Prepared,
+}
+
+impl NameMatcher {
+    /// Returns `None` when the query is blank.
+    pub fn new(text: &str) -> Option<Self> {
+        let query = Query::new(text);
+        Prepared::new(&query).map(|prepared| Self { prepared })
+    }
+
+    /// Ranks `folded` (a name passed through [`crate::fold`]), returning its
+    /// tier and sort key (higher is better), or `None` if it does not match.
+    pub fn score(&self, folded: &[u8]) -> Option<(MatchTier, u64)> {
+        let prepared = &self.prepared;
+        let best = prepared
+            .finder
+            .find_iter(folded)
+            .map(|at| substring_key(prepared, folded, at, 0, true))
+            .max();
+        if let Some(key) = best {
+            return Some((tier_of(key), key));
+        }
+        let pattern = prepared.fuzzy.as_ref()?;
+        if char_bag(folded) & prepared.bag != prepared.bag
+            || (!prepared.multi_word && !is_subsequence(&prepared.needle, folded))
+        {
+            return None;
+        }
+        let text = std::str::from_utf8(folded).ok()?;
+        let mut chars = Vec::new();
+        let score =
+            MATCHER.with_borrow_mut(|m| pattern.score(Utf32Str::new(text, &mut chars), m))?;
+        let signals = Signals {
+            clean: true,
+            whole_word: false,
+        };
+        let key = rank_key(
+            MatchTier::Fuzzy,
+            signals,
+            u16::try_from(score).unwrap_or(u16::MAX),
+            folded.len(),
+            0,
+        );
+        Some((MatchTier::Fuzzy, key))
+    }
+}
+
 /// One ranked candidate: snapshot position plus its sort key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Ranked {
@@ -128,16 +179,44 @@ pub(crate) struct Ranked {
     pub pos: Reverse<u32>,
 }
 
-/// Packs a ranking into one integer so comparisons are a single `cmp`:
-/// tier, then a tier-specific score (match position or fuzzy score), then
-/// shorter names, then shallower paths.
-pub(crate) fn rank_key(tier: MatchTier, score: u16, name_len: usize, depth: u16) -> u64 {
+/// Secondary ranking signals that decide between matches of the same tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Signals {
+    /// Not inside a dependency, build or cache tree (see
+    /// `snapshot::is_noise_dir`).
+    pub clean: bool,
+    /// The match ends where a word ends: `project` in `project-story`, not
+    /// in `projection`.
+    pub whole_word: bool,
+}
+
+/// Packs a ranking into one integer so comparisons are a single `cmp`.
+///
+/// | bits  | meaning |
+/// |-------|---------|
+/// | 48–55 | tier |
+/// | 47    | clean (not under a dependency/build/cache folder) |
+/// | 46    | whole-word match |
+/// | 32–45 | tier-specific score: earlier match position, or fuzzy score |
+/// | 16–31 | shorter name |
+/// | 0–15  | shallower path |
+pub(crate) fn rank_key(
+    tier: MatchTier,
+    signals: Signals,
+    score: u16,
+    name_len: usize,
+    depth: u16,
+) -> u64 {
     let len = u16::try_from(name_len).unwrap_or(u16::MAX);
     ((tier as u64) << 48)
-        | ((score as u64) << 32)
+        | ((signals.clean as u64) << 47)
+        | ((signals.whole_word as u64) << 46)
+        | ((score.min(SCORE_MASK) as u64) << 32)
         | (((u16::MAX - len) as u64) << 16)
         | ((u16::MAX - depth) as u64)
 }
+
+const SCORE_MASK: u16 = 0x3FFF;
 
 pub(crate) fn tier_of(key: u64) -> MatchTier {
     MatchTier::from_u8((key >> 48) as u8)
@@ -299,7 +378,13 @@ fn substring_chunk(snapshot: &Snapshot, prepared: &Prepared, range: Range<usize>
         if !prepared.passes_filters(meta[pos], name) {
             continue;
         }
-        let key = substring_key(prepared, name, at - start, depth_of(meta[pos]));
+        let key = substring_key(
+            prepared,
+            name,
+            at - start,
+            depth_of(meta[pos]),
+            !is_noisy(meta[pos]),
+        );
         match &mut pending {
             Some((p, best)) if *p == pos => *best = (*best).max(key),
             _ => {
@@ -316,7 +401,7 @@ fn substring_chunk(snapshot: &Snapshot, prepared: &Prepared, range: Range<usize>
     hits
 }
 
-fn substring_key(prepared: &Prepared, name: &[u8], at: usize, depth: u16) -> u64 {
+fn substring_key(prepared: &Prepared, name: &[u8], at: usize, depth: u16, clean: bool) -> u64 {
     let needle_len = prepared.needle.len();
     let tier = if at == 0 && name.len() == needle_len {
         MatchTier::Exact
@@ -329,8 +414,22 @@ fn substring_key(prepared: &Prepared, name: &[u8], at: usize, depth: u16) -> u64
     } else {
         MatchTier::Substring
     };
-    let at = u16::try_from(at).unwrap_or(u16::MAX);
-    rank_key(tier, u16::MAX - at, name.len(), depth)
+    let signals = Signals {
+        clean,
+        whole_word: ends_word(name, at + needle_len),
+    };
+    let at = u16::try_from(at).unwrap_or(SCORE_MASK).min(SCORE_MASK);
+    rank_key(tier, signals, SCORE_MASK - at, name.len(), depth)
+}
+
+/// Whether a match ending at byte `end` finishes a word: the name ends there
+/// or the next character is punctuation or a space. Non-ASCII bytes count as
+/// letters.
+fn ends_word(name: &[u8], end: usize) -> bool {
+    match name.get(end) {
+        None => true,
+        Some(&b) => b < 0x80 && !b.is_ascii_alphanumeric(),
+    }
 }
 
 /// Whether `name[..len]` is the name without its final extension, as in
@@ -378,8 +477,18 @@ fn fuzzy_chunk(
             let Some(score) = pattern.score(Utf32Str::new(text, &mut chars), matcher) else {
                 continue;
             };
+            let signals = Signals {
+                clean: !is_noisy(meta[pos]),
+                whole_word: false,
+            };
             let score = u16::try_from(score).unwrap_or(u16::MAX);
-            let key = rank_key(MatchTier::Fuzzy, score, name.len(), depth_of(meta[pos]));
+            let key = rank_key(
+                MatchTier::Fuzzy,
+                signals,
+                score,
+                name.len(),
+                depth_of(meta[pos]),
+            );
             hits.record(key, pos);
         }
     });
@@ -403,15 +512,80 @@ fn is_subsequence(needle: &[u8], haystack: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    const PLAIN: Signals = Signals {
+        clean: true,
+        whole_word: false,
+    };
+
     #[test]
     fn rank_keys_order_by_tier_then_score_then_length_then_depth() {
-        let exact = rank_key(MatchTier::Exact, 0, 50, 9);
-        let prefix = rank_key(MatchTier::Prefix, u16::MAX, 1, 0);
+        let exact = rank_key(MatchTier::Exact, PLAIN, 0, 50, 9);
+        let prefix = rank_key(MatchTier::Prefix, PLAIN, u16::MAX, 1, 0);
         assert!(exact > prefix);
-        assert!(rank_key(MatchTier::Fuzzy, 10, 5, 0) > rank_key(MatchTier::Fuzzy, 9, 1, 0));
-        assert!(rank_key(MatchTier::Prefix, 5, 4, 9) > rank_key(MatchTier::Prefix, 5, 5, 0));
-        assert!(rank_key(MatchTier::Prefix, 5, 4, 1) > rank_key(MatchTier::Prefix, 5, 4, 2));
+        assert!(
+            rank_key(MatchTier::Fuzzy, PLAIN, 10, 5, 0)
+                > rank_key(MatchTier::Fuzzy, PLAIN, 9, 1, 0)
+        );
+        assert!(
+            rank_key(MatchTier::Prefix, PLAIN, 5, 4, 9)
+                > rank_key(MatchTier::Prefix, PLAIN, 5, 5, 0)
+        );
+        assert!(
+            rank_key(MatchTier::Prefix, PLAIN, 5, 4, 1)
+                > rank_key(MatchTier::Prefix, PLAIN, 5, 4, 2)
+        );
         assert_eq!(tier_of(prefix), MatchTier::Prefix);
+        // Oversized fuzzy scores saturate instead of spilling into the flags.
+        let huge = rank_key(MatchTier::Fuzzy, PLAIN, u16::MAX, 1, 0);
+        assert_eq!(huge >> 46 & 0b11, 0b10);
+    }
+
+    #[test]
+    fn clean_beats_whole_word_beats_score_within_a_tier() {
+        let noisy = Signals {
+            clean: false,
+            whole_word: true,
+        };
+        let word = Signals {
+            clean: true,
+            whole_word: true,
+        };
+        let clean = rank_key(MatchTier::Prefix, PLAIN, 0, 99, 9);
+        assert!(clean > rank_key(MatchTier::Prefix, noisy, SCORE_MASK, 1, 0));
+        assert!(
+            rank_key(MatchTier::Prefix, word, 0, 99, 9)
+                > rank_key(MatchTier::Prefix, PLAIN, SCORE_MASK, 1, 0)
+        );
+        // But never across tiers.
+        assert!(
+            rank_key(MatchTier::Prefix, PLAIN, 0, 99, 9)
+                > rank_key(MatchTier::WordPrefix, word, SCORE_MASK, 1, 0)
+        );
+    }
+
+    #[test]
+    fn word_endings() {
+        assert!(ends_word(b"project-story", 7));
+        assert!(ends_word(b"project", 7));
+        assert!(!ends_word(b"projection", 7));
+        assert!(!ends_word("projecté".as_bytes(), 7));
+    }
+
+    #[test]
+    fn name_matcher_uses_index_ranking() {
+        let m = NameMatcher::new("Safari").unwrap();
+        assert_eq!(m.score(b"safari").unwrap().0, MatchTier::Exact);
+        let code = NameMatcher::new("vsc").unwrap();
+        assert_eq!(
+            code.score(b"visual studio code").unwrap().0,
+            MatchTier::Fuzzy
+        );
+        assert!(code.score(b"calendar").is_none());
+        let term = NameMatcher::new("term").unwrap();
+        let (_, terminal) = term.score(b"terminal").unwrap();
+        let (_, iterm) = term.score(b"iterm").unwrap();
+        assert!(terminal > iterm);
+        assert!(NameMatcher::new("  ").is_none());
     }
 
     #[test]

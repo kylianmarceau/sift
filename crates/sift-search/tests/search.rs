@@ -350,3 +350,27 @@ fn large_index_matches_brute_force() {
         }
     }
 }
+
+/// The ordering problem seen on a real ~/Documents index: `projection/`
+/// outranked `project-story/`, and vendored copies outranked own files.
+#[test]
+fn whole_words_and_own_files_rank_first_within_a_tier() {
+    let f = Fixture::new(&[
+        "a/projection/",
+        "b/project-story/",
+        "c/dist/project-root.js",
+        "d/review-deps/plotly/projector.h",
+    ]);
+    let results = f.search(&Query::new("project"));
+    assert!(results.iter().all(|(_, tier)| *tier == MatchTier::Prefix));
+    let names: Vec<_> = results.into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        names,
+        [
+            "b/project-story",                  // own folder, whole word
+            "a/projection",                     // own folder, partial word
+            "c/dist/project-root.js",           // build output, whole word
+            "d/review-deps/plotly/projector.h", // vendored, partial word
+        ]
+    );
+}

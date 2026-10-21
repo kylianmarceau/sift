@@ -20,7 +20,7 @@
 //! ids      u64 × n     entry id of each name
 //! bags     u64 × n     character bag (see `fold::char_bag`)
 //! offsets  u32 × n+1   start of each name in `names`
-//! meta     u16 × n     kind (top 2 bits) | depth (low 14 bits)
+//! meta     u16 × n     kind (bits 14–15) | noisy (bit 13) | depth (bits 0–12)
 //! names    bytes       folded names, each followed by a NUL separator
 //! ```
 
@@ -38,9 +38,12 @@ use crate::fold::{char_bag, fold_into};
 compile_error!("the snapshot format assumes a little-endian host");
 
 const MAGIC: [u8; 8] = *b"SIFTSNAP";
-const VERSION: u32 = 1;
+/// 2: meta gained the "noisy" bit. Older snapshots fail validation and are
+/// rebuilt automatically.
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 64;
-const DEPTH_MASK: u16 = 0x3FFF;
+const DEPTH_MASK: u16 = 0x1FFF;
+const NOISY_BIT: u16 = 1 << 13;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -243,6 +246,52 @@ pub(crate) fn depth_of(meta: u16) -> u16 {
     meta & DEPTH_MASK
 }
 
+/// Whether the entry lives somewhere below a dependency, build or cache
+/// folder (see [`is_noise_dir`]). Such results rank below the user's own
+/// files of the same match tier.
+pub(crate) fn is_noisy(meta: u16) -> bool {
+    meta & NOISY_BIT != 0
+}
+
+/// Folder names (folded) whose contents are usually generated or third-party
+/// code: everything below them is ranked as "noisy". This complements the
+/// indexer's skip list: it also covers folders that are indexed by default
+/// (build output, vendored code, caches) or named unpredictably.
+const NOISE_DIRS: &[&[u8]] = &[
+    b"node_modules",
+    b"bower_components",
+    b"site-packages",
+    b"dist-packages",
+    b".venv",
+    b"venv",
+    b".git",
+    b"__pycache__",
+    b"vendor",
+    b"third_party",
+    b"third-party",
+    b"deps",
+    b"dist",
+    b"build",
+    b"target",
+    b"obj",
+    b".build",
+    b"deriveddata",
+    b"pods",
+    b"cache",
+    b"caches",
+    b".cache",
+    b"archive-v0",
+];
+
+/// Suffixes that mark the same kinds of folders under project-specific
+/// names, such as `review-deps` or `test_venv`.
+const NOISE_SUFFIXES: &[&[u8]] = &[b"-deps", b"_deps", b"-venv", b"_venv", b"-cache", b"_cache"];
+
+/// Whether a folded directory name marks a dependency, build or cache tree.
+pub(crate) fn is_noise_dir(folded: &[u8]) -> bool {
+    NOISE_DIRS.contains(&folded) || NOISE_SUFFIXES.iter().any(|s| folded.ends_with(s))
+}
+
 /// Summary of a snapshot build.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildStats {
@@ -267,20 +316,18 @@ pub fn build(store: &Store, path: &Path) -> Result<BuildStats, SnapshotError> {
     let mut offsets = Vec::with_capacity(capacity + 1);
     let mut meta = Vec::with_capacity(capacity);
     let mut names = Vec::with_capacity(capacity * 16);
-    // Depth of each directory seen so far. Parents precede children in id
-    // order, so a child's parent depth is always known.
-    let mut dir_depths: HashMap<EntryId, u16> = HashMap::new();
+    // Per directory seen so far: its depth, and whether its children are
+    // noisy. Parents precede children in id order, so a child's parent is
+    // always known.
+    let mut dirs: HashMap<EntryId, (u16, bool)> = HashMap::new();
 
     store.for_each_entry(|row| {
-        let depth = match row.parent_id {
-            None => 0,
-            Some(parent) => dir_depths
+        let (depth, noisy) = match row.parent_id {
+            None => (0, false),
+            Some(parent) => dirs
                 .get(&parent)
-                .map_or(DEPTH_MASK, |d| (d + 1).min(DEPTH_MASK)),
+                .map_or((DEPTH_MASK, false), |&(d, n)| ((d + 1).min(DEPTH_MASK), n)),
         };
-        if row.kind == EntryKind::Dir {
-            dir_depths.insert(row.id, depth);
-        }
         // Root entries store their full path; search their last component.
         let name = match row.parent_id {
             None => row
@@ -294,10 +341,15 @@ pub fn build(store: &Store, path: &Path) -> Result<BuildStats, SnapshotError> {
         offsets.push(names.len() as u32);
         let start = names.len();
         fold_into(name, &mut names);
-        bags.push(char_bag(&names[start..]));
+        let folded = &names[start..];
+        if row.kind == EntryKind::Dir {
+            dirs.insert(row.id, (depth, noisy || is_noise_dir(folded)));
+        }
+        bags.push(char_bag(folded));
         names.push(0);
         ids.push(row.id as u64);
-        meta.push(((row.kind.as_u8() as u16) << 14) | depth);
+        let noisy_bit = if noisy { NOISY_BIT } else { 0 };
+        meta.push(((row.kind.as_u8() as u16) << 14) | noisy_bit | depth);
     })?;
     offsets.push(names.len() as u32);
     if u32::try_from(names.len()).is_err() {

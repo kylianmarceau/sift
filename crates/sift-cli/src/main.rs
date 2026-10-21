@@ -254,8 +254,10 @@ fn cmd_index(index_dir: &Path, args: IndexArgs) -> Result<()> {
         if let Some(threads) = args.threads {
             options.threads = threads.max(1);
         }
-        // Never index our own database churn.
+        // Never index our own database churn (only relevant, and only
+        // saved, when the index lives inside this root).
         if let Ok(dir) = index_dir.canonicalize()
+            && dir.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
             && !options.exclude_paths.contains(&dir)
         {
             options.exclude_paths.push(dir);

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use sift_store::{EntryId, EntryKind, Store, StoreError};
 
 pub use fold::fold;
+pub use scan::NameMatcher;
 pub use snapshot::{BuildStats, Snapshot, SnapshotError};
 
 /// File name of the database inside an index directory.
