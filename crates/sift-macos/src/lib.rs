@@ -72,9 +72,9 @@ pub use quicklook::QuickLook;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    ClipboardText, Panel, activate_app, choose_folder, clipboard_change_count, clipboard_text,
-    copy_text, format_local_now, icon_png, open_application, open_path, open_text_file, open_url,
-    reveal_in_finder, use_accessory_activation_policy,
+    ClipboardText, ClipboardWatcher, Panel, activate_app, choose_folder, clipboard_change_count,
+    clipboard_text, copy_text, format_local_now, icon_png, open_application, open_path,
+    open_text_file, open_url, reveal_in_finder, use_accessory_activation_policy,
 };
 
 #[cfg(test)]

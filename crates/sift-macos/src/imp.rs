@@ -225,6 +225,65 @@ pub fn clipboard_change_count() -> isize {
     NSPasteboard::generalPasteboard().changeCount()
 }
 
+/// Watches the clipboard's change counter on a background thread, so the
+/// UI is woken only when something was copied.
+///
+/// The thread runs at background quality of service: macOS may run it on
+/// efficiency cores and coalesce its timer with other wakeups. Dropping the
+/// watcher stops the thread.
+pub struct ClipboardWatcher {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ClipboardWatcher {
+    /// Checks every `interval`; calls `on_change` (on the watcher thread)
+    /// after each change. Changes made before starting are not reported.
+    pub fn start(
+        interval: std::time::Duration,
+        on_change: impl Fn() + Send + 'static,
+    ) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("sift-clipboard".into())
+            .spawn(move || {
+                // SAFETY: sets this thread's own QoS class; no other
+                // preconditions.
+                unsafe {
+                    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+                }
+                let mut last = clipboard_change_count();
+                while !stopped.load(Ordering::Relaxed) {
+                    std::thread::park_timeout(interval);
+                    if stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let count = clipboard_change_count();
+                    if count != last {
+                        last = count;
+                        on_change();
+                    }
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for ClipboardWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
+
 /// What [`clipboard_text`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardText {

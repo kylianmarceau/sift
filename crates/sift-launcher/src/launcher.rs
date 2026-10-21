@@ -94,7 +94,7 @@ pub struct Launcher {
     /// Clipboard history only, for `clip …` queries.
     clip_search: Search,
     /// Watches the clipboard while clipboard history is enabled.
-    clipboard_task: Option<Task<()>>,
+    clipboard_task: Option<(sift_macos::ClipboardWatcher, Task<()>)>,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -387,8 +387,9 @@ impl Launcher {
     }
 
     /// Starts or stops watching the clipboard to match the config. While
-    /// on, the change counter is read every `CLIPBOARD_POLL`; the contents
-    /// are read only after a change. What was on the clipboard before
+    /// on, a background thread reads the change counter every
+    /// `CLIPBOARD_POLL`; the UI wakes and reads the contents only after a
+    /// change. What was on the clipboard before
     /// watching started is not recorded.
     fn watch_clipboard(&mut self, cx: &mut Context<Self>) {
         if !self.user.clipboard_enabled() {
@@ -400,16 +401,21 @@ impl Launcher {
         if self.clipboard_task.is_some() {
             return;
         }
+        let (tx, mut rx) = unbounded::<()>();
+        let watcher = match sift_macos::ClipboardWatcher::start(CLIPBOARD_POLL, move || {
+            let _ = tx.unbounded_send(());
+        }) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                tracing::error!(%error, "cannot watch the clipboard");
+                return;
+            }
+        };
         tracing::info!("clipboard history on");
-        self.clipboard_task = Some(cx.spawn(async move |this, cx| {
-            let mut last = sift_macos::clipboard_change_count();
-            loop {
-                cx.background_executor().timer(CLIPBOARD_POLL).await;
-                let count = sift_macos::clipboard_change_count();
-                if count == last {
-                    continue;
-                }
-                last = count;
+        // Woken only when something was copied; reads the text on the main
+        // thread.
+        let task = cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
                 let text = sift_macos::clipboard_text();
                 if this
                     .update(cx, |this, cx| this.clipboard_changed(text, cx))
@@ -418,7 +424,8 @@ impl Launcher {
                     break;
                 }
             }
-        }));
+        });
+        self.clipboard_task = Some((watcher, task));
     }
 
     fn clipboard_changed(&mut self, text: sift_macos::ClipboardText, cx: &mut Context<Self>) {
