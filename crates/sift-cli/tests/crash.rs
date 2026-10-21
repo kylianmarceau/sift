@@ -1,5 +1,6 @@
 //! Kills `sift index` with SIGKILL part-way through a scan and checks the
-//! index database afterwards: it must pass SQLite's integrity check, and
+//! index database afterwards: it must pass SQLite's integrity check and
+//! sift's structural checks, and
 //! the root must be either absent or complete (a scan is one transaction).
 
 use std::path::Path;
@@ -57,6 +58,11 @@ fn a_killed_scan_leaves_a_consistent_index() {
         assert_eq!(
             store.quick_check().expect("check"),
             None,
+            "killed after {after} ms"
+        );
+        assert_eq!(
+            store.verify().expect("verify"),
+            Vec::<String>::new(),
             "killed after {after} ms"
         );
         match store.roots().expect("roots").as_slice() {

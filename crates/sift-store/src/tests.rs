@@ -528,3 +528,43 @@ fn move_aside_keeps_the_database_and_its_journal() {
     // A fresh store can be created in its place.
     assert_eq!(Store::open(&path).unwrap().entry_count().unwrap(), 0);
 }
+
+#[test]
+fn verify_accepts_a_sound_index() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    write_tree(&mut store, Path::new("/data/other"), 100);
+    assert_eq!(store.verify().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn verify_reports_broken_invariants() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    // Damage the tree directly, as a bug in an update could.
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO entries (id, root_id, parent_id, kind, name) VALUES (50, 1, 999, 0, x'6f72706861');
+             INSERT INTO entries (id, root_id, parent_id, kind, name) VALUES (51, 1, 2, 0, x'61');
+             INSERT INTO entries (id, root_id, parent_id, kind, name) VALUES (52, 1, 1, 0, x'612e747874');",
+        )
+        .unwrap();
+    let problems = store.verify().unwrap().join("\n");
+    assert!(
+        problems.contains("1 entries whose parent does not exist"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("1 entries whose parent is not a folder"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("1 names that appear twice in one folder"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("1 roots whose entry count is wrong"),
+        "{problems}"
+    );
+}

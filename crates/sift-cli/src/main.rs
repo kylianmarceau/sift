@@ -43,6 +43,13 @@ enum Command {
     Search(SearchArgs),
     /// Show indexed roots and index size.
     Status,
+    /// Check the index: database integrity, internal consistency and,
+    /// unless --quick, whether it matches the files on disk.
+    Verify {
+        /// Skip rescanning the roots to compare with the disk.
+        #[arg(long)]
+        quick: bool,
+    },
     /// Remove a root and its entries from the index.
     Remove {
         /// Root directory to remove, as shown by `sift status`.
@@ -173,6 +180,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Index(args) => cmd_index(&index_dir, args),
         Command::Search(args) => cmd_search(&index_dir, args),
         Command::Status => cmd_status(&index_dir),
+        Command::Verify { quick } => cmd_verify(&index_dir, quick),
         Command::Remove { path } => cmd_remove(&index_dir, &path),
         Command::Bench(command) => cmd_bench(&index_dir, command),
     }
@@ -398,6 +406,92 @@ fn cmd_search(index_dir: &Path, args: SearchArgs) -> Result<()> {
             bytes(index.snapshot().byte_len() as u64)
         );
         eprintln!("memory: {}", mem::describe());
+    }
+    Ok(())
+}
+
+fn cmd_verify(index_dir: &Path, quick: bool) -> Result<()> {
+    let db = index_dir.join(DB_FILE);
+    if !db.exists() {
+        anyhow::bail!("no index at {}", index_dir.display());
+    }
+    let store = Store::open_read_only(&db)?;
+    let mut sound = true;
+
+    let started = Instant::now();
+    let integrity = store.quick_check()?;
+    println!(
+        "Database   {} ({} ms)",
+        integrity.as_deref().unwrap_or("intact"),
+        started.elapsed().as_millis()
+    );
+    sound &= integrity.is_none();
+
+    let started = Instant::now();
+    let problems = store.verify()?;
+    if problems.is_empty() {
+        println!(
+            "Structure  consistent ({} ms)",
+            started.elapsed().as_millis()
+        );
+    } else {
+        sound = false;
+        for problem in &problems {
+            println!("Structure  {problem}");
+        }
+    }
+
+    if !quick {
+        let scratch_dir = std::env::temp_dir();
+        for root in store.roots()? {
+            let options = IndexOptions::decode_saved(&root.options).unwrap_or_default();
+            let scratch =
+                scratch_dir.join(format!("sift-verify-{}-{}.db", std::process::id(), root.id));
+            let started = Instant::now();
+            match sift_indexer::compare_with_disk(&store, &root, &options, &scratch) {
+                Ok(diff) => {
+                    let ms = started.elapsed().as_millis();
+                    if diff.is_empty() {
+                        println!(
+                            "Root       {}: matches the disk ({} entries, {ms} ms)",
+                            root.path.display(),
+                            thousands(diff.on_disk as u64)
+                        );
+                    } else {
+                        sound = false;
+                        println!(
+                            "Root       {}: {} missing, {} no longer on disk, {} changed ({ms} ms)",
+                            root.path.display(),
+                            diff.missing.len(),
+                            diff.extra.len(),
+                            diff.changed.len()
+                        );
+                        let show = |label: &str, paths: &[Vec<u8>]| {
+                            for path in paths.iter().take(5) {
+                                println!("             {label} {}", String::from_utf8_lossy(path));
+                            }
+                        };
+                        show("missing", &diff.missing);
+                        show("extra  ", &diff.extra);
+                        show("changed", &diff.changed);
+                    }
+                }
+                Err(error) => {
+                    sound = false;
+                    println!(
+                        "Root       {}: cannot compare: {error}",
+                        root.path.display()
+                    );
+                }
+            }
+        }
+        println!(
+            "Note       files that change while this runs are reported as differences; run it again \
+             if they look like recent edits."
+        );
+    }
+    if !sound {
+        anyhow::bail!("the index has problems; `sift index` with no arguments rebuilds it");
     }
     Ok(())
 }

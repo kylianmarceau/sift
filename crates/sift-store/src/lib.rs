@@ -402,6 +402,31 @@ impl Store {
         Ok(())
     }
 
+    /// Streams one root's entries with their metadata, in id order (so a
+    /// folder always comes before its contents).
+    pub fn for_each_root_entry(
+        &self,
+        root_id: RootId,
+        mut visit: impl FnMut(&EntryRow<'_>, Option<u64>, Option<i64>),
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, kind, name, size, mtime FROM entries
+             WHERE root_id = ?1 ORDER BY id",
+        )?;
+        let mut rows = stmt.query([root_id])?;
+        while let Some(row) = rows.next()? {
+            let entry = EntryRow {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                kind: EntryKind::from_u8(row.get(2)?),
+                name: row.get_ref(3)?.as_blob().map_err(rusqlite::Error::from)?,
+            };
+            let size: Option<i64> = row.get(4)?;
+            visit(&entry, size.map(|s| s as u64), row.get(5)?);
+        }
+        Ok(())
+    }
+
     /// Returns a resolver that turns entry ids into absolute paths, caching
     /// directory paths for the duration of one query.
     pub fn path_resolver(&self) -> PathResolver<'_> {
@@ -424,6 +449,85 @@ impl Store {
         let _ = self
             .conn
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
+
+    /// Checks the invariants the rest of sift relies on, and returns one
+    /// line per kind of violation found (empty when the index is sound):
+    ///
+    /// - every entry's parent exists, is a folder, belongs to the same root
+    ///   and has a smaller id (the snapshot builder depends on that order);
+    /// - no folder holds two entries with the same name;
+    /// - each root's entry exists, has no parent and belongs to that root,
+    ///   and no other entry lacks a parent;
+    /// - every entry belongs to a root, and each root's stored entry count
+    ///   matches its entries.
+    pub fn verify(&self) -> Result<Vec<String>> {
+        let dir = EntryKind::Dir as i64;
+        let checks: [(&str, String); 9] = [
+            (
+                "entries whose parent does not exist",
+                "SELECT COUNT(*) FROM entries e LEFT JOIN entries p ON p.id = e.parent_id
+                 WHERE e.parent_id IS NOT NULL AND p.id IS NULL"
+                    .into(),
+            ),
+            (
+                "entries whose parent is not a folder",
+                format!(
+                    "SELECT COUNT(*) FROM entries e JOIN entries p ON p.id = e.parent_id
+                     WHERE p.kind != {dir}"
+                ),
+            ),
+            (
+                "entries whose parent is in another root",
+                "SELECT COUNT(*) FROM entries e JOIN entries p ON p.id = e.parent_id
+                 WHERE p.root_id != e.root_id"
+                    .into(),
+            ),
+            (
+                "entries numbered below their parent",
+                "SELECT COUNT(*) FROM entries e JOIN entries p ON p.id = e.parent_id
+                 WHERE e.id <= p.id"
+                    .into(),
+            ),
+            (
+                "names that appear twice in one folder",
+                "SELECT COUNT(*) FROM (SELECT 1 FROM entries WHERE parent_id IS NOT NULL
+                 GROUP BY parent_id, name HAVING COUNT(*) > 1)"
+                    .into(),
+            ),
+            (
+                "roots whose top entry is missing or wrong",
+                "SELECT COUNT(*) FROM roots r LEFT JOIN entries e ON e.id = r.entry_id
+                 WHERE e.id IS NULL OR e.parent_id IS NOT NULL OR e.root_id != r.id"
+                    .into(),
+            ),
+            (
+                "entries without a parent that are not a root's top entry",
+                "SELECT COUNT(*) FROM entries e WHERE e.parent_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM roots r WHERE r.entry_id = e.id)"
+                    .into(),
+            ),
+            (
+                "entries that belong to no root",
+                "SELECT COUNT(*) FROM entries e
+                 WHERE NOT EXISTS (SELECT 1 FROM roots r WHERE r.id = e.root_id)"
+                    .into(),
+            ),
+            (
+                "roots whose entry count is wrong",
+                "SELECT COUNT(*) FROM roots r
+                 WHERE r.entry_count != (SELECT COUNT(*) FROM entries e WHERE e.root_id = r.id)"
+                    .into(),
+            ),
+        ];
+        let mut problems = Vec::new();
+        for (label, sql) in checks {
+            let count: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+            if count > 0 {
+                problems.push(format!("{count} {label}"));
+            }
+        }
+        Ok(problems)
     }
 
     /// Runs SQLite's `quick_check`: `Ok(None)` when the database is

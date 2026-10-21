@@ -16,6 +16,7 @@
 //! cycles. Directories on other devices (mount points) and macOS package
 //! bundles such as `.app` are recorded without descending into them.
 
+mod compare;
 mod update;
 mod walk;
 
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use sift_store::{EventMark, Store, StoreError};
 
+pub use compare::{Difference, Listed, compare_with_disk, difference, listing};
 pub use update::{Change, UpdateReport, apply_changes, is_watched};
 pub use walk::ScanError;
 
