@@ -40,6 +40,19 @@ pub enum Action {
     OpenApplication(PathBuf),
     /// Open a file or folder with its default application.
     OpenPath(PathBuf),
+    /// Run one of the launcher's built-in commands, by id.
+    Run(&'static str),
+}
+
+impl Action {
+    /// The file or bundle this action opens, if any (for icons and
+    /// "Show in Finder").
+    pub fn path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::OpenApplication(path) | Self::OpenPath(path) => Some(path),
+            Self::Run(_) => None,
+        }
+    }
 }
 
 /// A single search result, independent of which provider produced it.

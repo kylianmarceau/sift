@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
 use block2::RcBlock;
@@ -8,11 +8,11 @@ use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadMarker, Message, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep,
-    NSCompositingOperation, NSDeviceRGBColorSpace, NSEvent, NSGraphicsContext,
-    NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowTitleVisibility,
-    NSWorkspace, NSWorkspaceOpenConfiguration,
+    NSCompositingOperation, NSDeviceRGBColorSpace, NSEvent, NSGraphicsContext, NSModalResponse,
+    NSOpenPanel, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowButton,
+    NSWindowTitleVisibility, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
-use objc2_foundation::{NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
 
 use crate::{LaunchError, validate_app_bundle};
 
@@ -22,7 +22,7 @@ use crate::{LaunchError, validate_app_bundle};
 /// Drawing into a fixed-size bitmap makes AppKit pick the best
 /// representation for that size, instead of encoding the 1024 px master
 /// image. A 64 px icon is a few kilobytes.
-pub fn app_icon_png(path: &Path, px: u32) -> Option<Vec<u8>> {
+pub fn icon_png(path: &Path, px: u32) -> Option<Vec<u8>> {
     let path = NSString::from_str(path.to_str()?);
     let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
     let side = px as isize;
@@ -104,6 +104,109 @@ pub fn open_application(
         Some(&completion),
     );
     Ok(())
+}
+
+/// Opens a file or folder with its default application, as a double-click
+/// in Finder would. Missing paths fail immediately; failures AppKit reports
+/// later (no application for the file type, for example) go to
+/// `on_failure` on a background queue.
+pub fn open_path(
+    path: &Path,
+    on_failure: impl Fn(LaunchError) + Send + Sync + 'static,
+) -> Result<(), LaunchError> {
+    let url = file_url(path)?;
+    let configuration = NSWorkspaceOpenConfiguration::configuration();
+    configuration.setActivates(true);
+    let owned = path.to_path_buf();
+    let completion = RcBlock::new(
+        move |_app: *mut NSRunningApplication, error: *mut NSError| {
+            // SAFETY: AppKit passes either null or a valid NSError for the
+            // duration of the callback.
+            if let Some(error) = unsafe { error.as_ref() } {
+                let reason = error.localizedDescription().to_string();
+                tracing::warn!(path = %owned.display(), %reason, "open failed");
+                on_failure(LaunchError::Failed {
+                    path: owned.clone(),
+                    reason,
+                });
+            }
+        },
+    );
+    NSWorkspace::sharedWorkspace().openURL_configuration_completionHandler(
+        &url,
+        &configuration,
+        Some(&completion),
+    );
+    Ok(())
+}
+
+/// Opens a Finder window with `path` selected.
+pub fn reveal_in_finder(path: &Path) -> Result<(), LaunchError> {
+    let url = file_url(path)?;
+    let urls = NSArray::from_retained_slice(&[url]);
+    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
+    Ok(())
+}
+
+fn file_url(path: &Path) -> Result<Retained<NSURL>, LaunchError> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Err(LaunchError::NotFound(path.to_path_buf()));
+    }
+    // APFS and HFS+ names are always UTF-8; other volumes rarely differ.
+    let text = path.to_str().ok_or_else(|| LaunchError::Failed {
+        path: path.to_path_buf(),
+        reason: "the path is not valid UTF-8".into(),
+    })?;
+    Ok(NSURL::fileURLWithPath(&NSString::from_str(text)))
+}
+
+/// Shows the standard folder picker (non-modal) and calls `on_done` on the
+/// main thread with the chosen folder, or `None` if cancelled. Returns false
+/// if not called on the main thread.
+///
+/// Folders chosen here are also how macOS grants access to protected
+/// locations, so picking `~/Documents` counts as the user's permission.
+pub fn choose_folder(
+    prompt: &str,
+    message: &str,
+    start_in: Option<&Path>,
+    on_done: impl Fn(Option<PathBuf>) + 'static,
+) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    panel.setMessage(Some(&NSString::from_str(message)));
+    if let Some(dir) = start_in.and_then(|d| d.to_str()) {
+        panel.setDirectoryURL(Some(&NSURL::fileURLWithPath(&NSString::from_str(dir))));
+    }
+    // An accessory app is not frontmost; bring the panel to the user.
+    activate_app();
+    let chosen = panel.clone();
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        // NSModalResponseOK is 1; Cancel is 0.
+        let path = (response == 1)
+            .then(|| chosen.URL())
+            .flatten()
+            .and_then(|url| url.path())
+            .map(|path| PathBuf::from(path.to_string()));
+        on_done(path);
+    });
+    panel.beginWithCompletionHandler(&handler);
+    true
+}
+
+/// Makes Sift the active application, so a normal window (settings) comes
+/// to the front even though Sift has no Dock icon. Main thread only.
+pub fn activate_app() {
+    if let Some(mtm) = MainThreadMarker::new() {
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
 }
 
 /// Runs the app as an accessory: no Dock icon and no menu bar, like

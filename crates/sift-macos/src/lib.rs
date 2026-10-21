@@ -1,9 +1,13 @@
 //! Native macOS integration for the sift launcher, through `objc2` bindings
 //! to AppKit:
 //!
-//! - [`app_icon_png`]: an application's Finder icon as PNG bytes.
+//! - [`icon_png`]: the Finder icon of any file, folder or app as PNG bytes.
 //! - [`open_application`]: launch or activate an app with `NSWorkspace`.
-//! - [`use_accessory_activation_policy`]: run without a Dock icon.
+//! - [`open_path`] / [`reveal_in_finder`]: open a file with its default
+//!   application, or show it in Finder.
+//! - [`choose_folder`]: the standard folder picker, non-modal.
+//! - [`use_accessory_activation_policy`] / [`activate_app`]: run without a
+//!   Dock icon, and come to the front for the settings window.
 //! - [`Panel`]: show, hide, position and resize the launcher window.
 //!
 //! Everything here uses public, documented AppKit APIs and needs no special
@@ -40,7 +44,10 @@ pub fn validate_app_bundle(path: &Path) -> Result<(), LaunchError> {
 mod imp;
 
 #[cfg(target_os = "macos")]
-pub use imp::{Panel, app_icon_png, open_application, use_accessory_activation_policy};
+pub use imp::{
+    Panel, activate_app, choose_folder, icon_png, open_application, open_path, reveal_in_finder,
+    use_accessory_activation_policy,
+};
 
 #[cfg(test)]
 mod tests {
@@ -80,12 +87,38 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn opening_or_revealing_a_missing_path_fails_immediately() {
+        let missing = Path::new("/nonexistent/report.pdf");
+        assert!(matches!(
+            open_path(missing, |_| {}),
+            Err(LaunchError::NotFound(_))
+        ));
+        assert!(matches!(
+            reveal_in_finder(missing),
+            Err(LaunchError::NotFound(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renders_document_and_folder_icons() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, b"x").unwrap();
+        for path in [file.as_path(), dir.path()] {
+            let png = icon_png(path, 32).expect("icon");
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn renders_a_real_app_icon_as_png() {
         let finder = Path::new("/System/Library/CoreServices/Finder.app");
         if !finder.exists() {
             return;
         }
-        let png = app_icon_png(finder, 64).expect("icon");
+        let png = icon_png(finder, 64).expect("icon");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         // IHDR width and height.
         assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 64);
