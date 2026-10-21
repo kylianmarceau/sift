@@ -252,8 +252,11 @@ well under a millisecond).
 Layout, paint and GPU presentation follow `render`. The frame reaches the
 display at the next screen refresh, up to one refresh interval later.
 
-**Real hotkey, after the fix:** to be recorded with
-`scripts/measure-hotkey.sh`.
+**Real hotkey, after the fix** (`scripts/measure-hotkey.sh`, commit
+`a712c1b`, 21 presses by hand, clock stops inside the first `render`):
+min 3.39 ms, **median 4.87 ms**, p90 10.64 ms, max 11.58 ms. That is
+about 10× faster than before, and every sample is well under the 50 ms
+target.
 
 ### Not measured yet
 
@@ -265,6 +268,6 @@ display at the next screen refresh, up to one refresh interval later.
 | target | status |
 |--------|--------|
 | Idle memory < 50 MB | **Met:** 26 MB footprint idle, 34 MB peak. |
-| Hotkey to visible < 50 ms | **Show path met:** 5.3 ms median to the first render, after the display-link fix. Before the fix, a real-hotkey run gave a 48.2 ms median. A real-hotkey run after the fix is pending. |
+| Hotkey to visible < 50 ms | **Met:** with the real hotkey, 4.87 ms median and 11.58 ms max to the first render (48.22 ms median before the display-link fix). |
 | Search < 20 ms | **Met** for the app provider: ≤ 11 µs p99. Rendering time was not measured separately. |
 | Idle CPU ≈ 0 | **Met:** no CPU time used in 60 s idle. |

@@ -72,8 +72,8 @@ Still open in Phase 1:
 1. **Manual GUI check** (needs you, see README "Trying the launcher"):
    look, typing, arrows, Enter, Esc, Option+Space, dark/light switch,
    multiple displays, full-screen apps.
-2. **Hotkey-to-visible latency**: run `scripts/measure-hotkey.sh` and
-   record the result in BENCHMARKS.md.
+2. ~~Hotkey-to-visible latency~~: done. Median 4.87 ms with the real
+   hotkey, after fixing a 45 ms wait for GPUI's display link.
 3. Fix whatever the manual check finds.
 
 Fixed after the first manual try: a black area under the results (GPUI
