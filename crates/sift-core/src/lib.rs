@@ -4,9 +4,10 @@
 //!
 //! The crate has no dependencies and knows nothing about the UI, AppKit or
 //! the file index, so providers and their ranking can be tested headlessly.
-//! Phase 1 has one provider (installed applications); the file index joins
-//! as a second provider in Phase 2.
+//! Providers: installed applications (`sift-apps`) and the file index
+//! (`sift-files`).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,6 +74,12 @@ pub trait Provider: Send + Sync {
     fn search(&self, query: &str, limit: usize) -> Vec<ResultItem>;
 }
 
+/// The match tier encoded in a score (bits 48–55 of a `sift_search` rank
+/// key): exact, exact stem, prefix, word prefix, substring, fuzzy.
+pub fn tier_of(score: u64) -> u8 {
+    (score >> 48) as u8
+}
+
 /// Queries every provider and merges their results into one ranked list.
 #[derive(Clone, Default)]
 pub struct Search {
@@ -80,21 +87,58 @@ pub struct Search {
 }
 
 impl Search {
+    /// `providers` in priority order: within the same match tier, results
+    /// of earlier providers come first (applications before files).
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
         Self { providers }
     }
 
+    /// Runs all providers in parallel and merges their results:
+    ///
+    /// 1. match tier, so an exact file name beats a fuzzy application match;
+    /// 2. provider priority, so `Notes` the app precedes `notes.txt`;
+    /// 3. the provider's score, then the title for a stable order.
+    ///
+    /// Results with the same id (an app that is also in the file index)
+    /// are kept once, from the higher-priority provider.
     pub fn search(&self, query: &str, limit: usize) -> Vec<ResultItem> {
-        let mut results: Vec<ResultItem> = self
-            .providers
-            .iter()
-            .flat_map(|p| p.search(query, limit))
+        let per_provider: Vec<Vec<ResultItem>> = if self.providers.len() < 2 {
+            self.providers
+                .iter()
+                .map(|p| p.search(query, limit))
+                .collect()
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = self
+                    .providers
+                    .iter()
+                    .map(|p| scope.spawn(move || p.search(query, limit)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_default())
+                    .collect()
+            })
+        };
+        let mut results: Vec<(usize, ResultItem)> = per_provider
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, items)| items.into_iter().map(move |item| (i, item)))
             .collect();
-        // Stable tie-break on title so equal scores do not reorder between
-        // keystrokes.
-        results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
-        results.truncate(limit);
+        results.sort_by(|(pa, a), (pb, b)| {
+            tier_of(b.score)
+                .cmp(&tier_of(a.score))
+                .then(pa.cmp(pb))
+                .then(b.score.cmp(&a.score))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        let mut seen = HashSet::new();
         results
+            .into_iter()
+            .filter(|(_, item)| seen.insert(item.id.clone()))
+            .map(|(_, item)| item)
+            .take(limit)
+            .collect()
     }
 }
 
@@ -210,17 +254,62 @@ mod tests {
         }
     }
 
+    fn key(tier: u64, rest: u64) -> u64 {
+        (tier << 48) | rest
+    }
+
+    fn titles(results: &[ResultItem]) -> Vec<String> {
+        results.iter().map(|r| r.title.to_string()).collect()
+    }
+
+    #[test]
+    fn merges_by_tier_then_provider_then_score() {
+        // Tiers: 6 exact, 4 prefix, 1 fuzzy.
+        let apps = Fixed(
+            "apps",
+            vec![item("notes", key(6, 1)), item("nota fuzzy", key(1, 99))],
+        );
+        let files = Fixed(
+            "files",
+            vec![
+                item("notes.txt", key(6, 50)),
+                item("notebook", key(4, 9)),
+                item("not exact", key(1, 500)),
+            ],
+        );
+        let search = Search::new(vec![Arc::new(apps), Arc::new(files)]);
+        assert_eq!(
+            titles(&search.search("not", 10)),
+            // Same tier: the app first even with a lower score. Different
+            // tiers: the better match first, whatever the provider.
+            ["notes", "notes.txt", "notebook", "nota fuzzy", "not exact"]
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_are_kept_once_from_the_first_provider() {
+        let mut from_files = item("Safari", key(6, 1));
+        from_files.kind = ResultKind::Folder;
+        let search = Search::new(vec![
+            Arc::new(Fixed("apps", vec![item("Safari", key(6, 1))])),
+            Arc::new(Fixed("files", vec![from_files])),
+        ]);
+        let results = search.search("Safari", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].kind, ResultKind::Application);
+    }
+
     #[test]
     fn merges_providers_by_score_with_stable_ties() {
         let a = Fixed("a", vec![item("alpha", 5), item("beta", 9)]);
-        let b = Fixed("b", vec![item("gamma", 7), item("aardvark", 5)]);
+        let b = Fixed("b", vec![item("gamma", 9), item("aardvark", 5)]);
         let search = Search::new(vec![Arc::new(a), Arc::new(b)]);
-        let titles: Vec<_> = search
-            .search("a", 10)
-            .iter()
-            .map(|r| r.title.to_string())
-            .collect();
-        assert_eq!(titles, ["beta", "gamma", "aardvark", "alpha"]);
+        // All in tier 0: provider order, then score.
+        assert_eq!(
+            titles(&search.search("a", 10)),
+            ["beta", "alpha", "gamma", "aardvark"]
+        );
+        assert_eq!(titles(&search.search("a", 3)).len(), 3);
         assert_eq!(search.search("a", 2).len(), 2);
         assert!(Search::default().search("a", 5).is_empty());
     }
