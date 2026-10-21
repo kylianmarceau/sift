@@ -19,6 +19,7 @@ sift-macos = { path = "crates/sift-macos" }
 sift-watch = { path = "crates/sift-watch" }
 sift-files = { path = "crates/sift-files" }
 sift-state = { path = "crates/sift-state" }
+sift-calc = { path = "crates/sift-calc" }
 
 anyhow = "1.0.104"
 bytemuck = "1.25"

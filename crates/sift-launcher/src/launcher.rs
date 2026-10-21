@@ -12,6 +12,7 @@ use gpui::{
     Subscription, Task, Window, actions, div, img, prelude::*, px,
 };
 use sift_apps::{AppCatalog, AppProvider, Location};
+use sift_calc::CalculatorProvider;
 use sift_core::{Action, Provider, QueryClock, ResultItem, ResultKind, Search, Selection};
 use sift_files::{FileIndex, FileProvider, IndexService, ServiceConfig, Status};
 use sift_macos::{LaunchError, Panel};
@@ -187,7 +188,7 @@ impl Launcher {
     /// Providers in priority order: within a match tier, apps first, then
     /// commands, then files.
     fn rebuild_search(&mut self) {
-        let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+        let mut providers: Vec<Arc<dyn Provider>> = vec![Arc::new(CalculatorProvider)];
         if let Some(apps) = &self.apps {
             providers.push(apps.clone());
         }
@@ -511,7 +512,7 @@ impl Launcher {
             .as_ref()
             .map(|s| SharedString::from(s.to_string()));
         let kind = item.kind.label();
-        let is_command = item.kind == ResultKind::Command;
+        let glyph = glyph(item.kind);
         let item = item.clone();
         let icon = self.icon(&item, cx);
 
@@ -531,7 +532,7 @@ impl Launcher {
             }))
             .child(match icon {
                 Some(image) => img(image).size(px(30.)).into_any_element(),
-                None if is_command => div()
+                None if glyph.is_some() => div()
                     .size(px(30.))
                     .flex()
                     .items_center()
@@ -539,7 +540,7 @@ impl Launcher {
                     .rounded(px(7.))
                     .bg(theme.key_background)
                     .text_size(px(15.))
-                    .child("⌘")
+                    .children(glyph)
                     .into_any_element(),
                 None => div().size(px(30.)).into_any_element(),
             })
@@ -609,7 +610,8 @@ impl Launcher {
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
         let open_label = match selected.map(|i| &i.action) {
-            Some(Action::Run(_)) => "Run",
+            Some(Action::Run(_) | Action::Shell(_)) => "Run",
+            Some(Action::CopyText(_)) => "Copy",
             _ => "Open",
         };
         div()
@@ -636,6 +638,17 @@ impl Launcher {
 /// Emitted when the file index status changes (the settings window
 /// listens).
 pub struct IndexStatusChanged;
+
+/// The symbol drawn in place of an icon for results that have no file.
+fn glyph(kind: ResultKind) -> Option<&'static str> {
+    match kind {
+        ResultKind::Command => Some("⌘"),
+        ResultKind::Calculator => Some("="),
+        ResultKind::Snippet => Some("¶"),
+        ResultKind::Clipboard => Some("”"),
+        ResultKind::Application | ResultKind::File | ResultKind::Folder => None,
+    }
+}
 
 impl gpui::EventEmitter<IndexStatusChanged> for Launcher {}
 

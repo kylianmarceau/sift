@@ -4647,6 +4647,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-calc"
+version = "0.1.0"
+dependencies = [
+ "sift-core",
+]
+
+[[package]]
 name = "sift-cli"
 version = "0.1.0"
 dependencies = [
@@ -4699,6 +4706,7 @@ dependencies = [
  "gpui",
  "raw-window-handle",
  "sift-apps",
+ "sift-calc",
  "sift-core",
  "sift-files",
  "sift-indexer",
