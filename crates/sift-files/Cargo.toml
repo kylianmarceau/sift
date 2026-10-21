@@ -1,0 +1,22 @@
+[package]
+name = "sift-files"
+description = "File search provider and live index maintenance for the sift launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sift-core.workspace = true
+sift-indexer.workspace = true
+sift-search.workspace = true
+sift-store.workspace = true
+sift-watch.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

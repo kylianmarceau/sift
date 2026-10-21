@@ -4656,6 +4656,7 @@ dependencies = [
  "sift-indexer",
  "sift-search",
  "sift-store",
+ "sift-watch",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -4664,6 +4665,20 @@ dependencies = [
 [[package]]
 name = "sift-core"
 version = "0.1.0"
+
+[[package]]
+name = "sift-files"
+version = "0.1.0"
+dependencies = [
+ "sift-core",
+ "sift-indexer",
+ "sift-search",
+ "sift-store",
+ "sift-watch",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "sift-indexer"

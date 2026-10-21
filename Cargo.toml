@@ -17,6 +17,7 @@ sift-core = { path = "crates/sift-core" }
 sift-apps = { path = "crates/sift-apps" }
 sift-macos = { path = "crates/sift-macos" }
 sift-watch = { path = "crates/sift-watch" }
+sift-files = { path = "crates/sift-files" }
 
 anyhow = "1.0.104"
 bytemuck = "1.25"
