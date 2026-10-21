@@ -81,6 +81,42 @@ pub struct RootInfo {
     /// Indexing options saved with the root (opaque to the store; empty if
     /// none were saved).
     pub options: Vec<u8>,
+    /// How far filesystem events have been applied, if a watcher recorded
+    /// it.
+    pub event: Option<EventMark>,
+}
+
+/// A position in the macOS FSEvents history: an event id, and the UUID of
+/// the volume's event store it belongs to. If the store is reset (the UUID
+/// changes), the id is meaningless and the root must be rescanned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventMark {
+    pub id: u64,
+    pub uuid: String,
+}
+
+/// A directory's child, as listed by [`crate::Updater::children`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildEntry {
+    pub id: EntryId,
+    pub kind: EntryKind,
+    pub name: Vec<u8>,
+    pub size: Option<u64>,
+    pub mtime: Option<i64>,
+}
+
+/// What an incremental update changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpdateSummary {
+    pub inserted: u64,
+    pub removed: u64,
+    pub updated: u64,
+}
+
+impl UpdateSummary {
+    pub fn changed(&self) -> bool {
+        self.inserted + self.removed + self.updated > 0
+    }
 }
 
 /// Summary of a finished scan, stored with the root.

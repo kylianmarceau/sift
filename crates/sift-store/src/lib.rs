@@ -3,8 +3,8 @@
 //! SQLite is the durable source of truth. Every indexed filesystem object is
 //! one row in `entries`, linked to its parent directory by id; full paths are
 //! reconstructed on demand. Storing parent links instead of full paths keeps
-//! the database compact and makes a directory rename a single-row update once
-//! incremental updates exist.
+//! the database compact. Whole roots are written by [`RootWriter`];
+//! filesystem changes are applied incrementally through an [`Updater`].
 //!
 //! Search does not query this table row by row. The search crate builds a
 //! compact, memory-mapped name snapshot from it (see `sift-search`), tagged
@@ -21,14 +21,18 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub use paths::PathResolver;
 pub use types::{
-    EntryId, EntryKind, EntryRecord, EntryRow, NewEntry, RootId, RootInfo, ScanSummary,
+    ChildEntry, EntryId, EntryKind, EntryRecord, EntryRow, EventMark, NewEntry, RootId, RootInfo,
+    ScanSummary, UpdateSummary,
 };
 
 /// Current on-disk schema version, stored in `PRAGMA user_version`.
 ///
 /// - 1: initial schema.
 /// - 2: `roots.options` stores the indexing options used for each root.
-const SCHEMA_VERSION: i64 = 2;
+/// - 3: `roots.event_id` / `roots.event_uuid` record how far filesystem
+///   events have been applied, and `entries_parent` indexes children by
+///   parent for incremental updates.
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (
@@ -45,13 +49,19 @@ CREATE TABLE roots (
     indexed_at  INTEGER NOT NULL DEFAULT 0,
     scan_millis INTEGER NOT NULL DEFAULT 0,
     -- Opaque, encoded by the indexer: what was included or excluded.
-    options     BLOB
+    options     BLOB,
+    -- Last FSEvents event id reflected in this root, and the UUID of the
+    -- volume's event store it belongs to (ids from another store are
+    -- meaningless). NULL until a watcher has recorded one.
+    event_id    INTEGER,
+    event_uuid  TEXT
 );
 
 -- One row per filesystem object. The root directory of each indexed tree
 -- has parent_id NULL and stores its full absolute path in `name`.
--- No secondary indexes yet: search uses the name snapshot, and the only
--- other access paths are rowid lookups and whole-root deletes.
+-- Search never queries names here (it uses the name snapshot). The only
+-- secondary index serves incremental updates, which list a directory's
+-- children and delete subtrees.
 CREATE TABLE entries (
     id        INTEGER PRIMARY KEY,
     root_id   INTEGER NOT NULL,
@@ -61,6 +71,7 @@ CREATE TABLE entries (
     size      INTEGER,
     mtime     INTEGER
 );
+CREATE INDEX entries_parent ON entries (parent_id);
 
 INSERT INTO meta (key, value) VALUES ('generation', 0);
 ";
@@ -93,7 +104,15 @@ pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
 /// Upgrades from older schema versions, applied in order inside one
 /// transaction when a database is opened for writing.
-const MIGRATIONS: &[(i64, &str)] = &[(2, "ALTER TABLE roots ADD COLUMN options BLOB;")];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (2, "ALTER TABLE roots ADD COLUMN options BLOB;"),
+    (
+        3,
+        "ALTER TABLE roots ADD COLUMN event_id INTEGER;
+         ALTER TABLE roots ADD COLUMN event_uuid TEXT;
+         CREATE INDEX entries_parent ON entries (parent_id);",
+    ),
+];
 
 /// Handle to an index database.
 pub struct Store {
@@ -214,8 +233,14 @@ impl Store {
 
     pub fn roots(&self) -> Result<Vec<RootInfo>> {
         let options = if self.version >= 2 { "options" } else { "NULL" };
+        let events = if self.version >= 3 {
+            "event_id, event_uuid"
+        } else {
+            "NULL, NULL"
+        };
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, path, entry_id, entry_count, error_count, indexed_at, scan_millis, {options}
+            "SELECT id, path, entry_id, entry_count, error_count, indexed_at, scan_millis, {options},
+                    {events}
              FROM roots ORDER BY path"
         ))?;
         let rows = stmt.query_map([], |row| {
@@ -228,9 +253,50 @@ impl Store {
                 indexed_at: row.get(5)?,
                 scan_millis: row.get::<_, i64>(6)? as u64,
                 options: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
+                event: match (
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                ) {
+                    (Some(id), Some(uuid)) => Some(EventMark {
+                        id: id as u64,
+                        uuid,
+                    }),
+                    _ => None,
+                },
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The root stored at exactly `path`, if any.
+    pub fn root(&self, path: &Path) -> Result<Option<RootInfo>> {
+        Ok(self.roots()?.into_iter().find(|r| r.path == path))
+    }
+
+    /// Records how far filesystem events have been applied to a root.
+    /// Does not change the index contents, so the generation stays.
+    pub fn set_root_event(&self, root_id: RootId, event: &EventMark) -> Result<()> {
+        self.conn.execute(
+            "UPDATE roots SET event_id = ?1, event_uuid = ?2 WHERE id = ?3",
+            params![event.id as i64, event.uuid, root_id],
+        )?;
+        Ok(())
+    }
+
+    /// Starts an incremental update of one root. Everything happens in one
+    /// transaction; readers see the previous index until
+    /// [`Updater::commit`].
+    pub fn begin_update(&mut self, root_id: RootId) -> Result<Updater<'_>> {
+        let next_id = self.next_entry_id()?;
+        let tx = self.conn.transaction()?;
+        Ok(Updater {
+            tx,
+            root_id,
+            next_id,
+            inserted: 0,
+            removed: 0,
+            updated: 0,
+        })
     }
 
     /// Starts replacing the contents of the root at `root` (an absolute,
@@ -426,6 +492,151 @@ impl RootWriter<'_> {
         self.tx.commit()?;
         Ok(self.root_id)
     }
+}
+
+/// Applies filesystem changes to one root inside a single transaction.
+///
+/// New entries take ids above every existing id ([`Updater::alloc_id`]), so
+/// a child's id is still always larger than its parent's.
+pub struct Updater<'conn> {
+    tx: Transaction<'conn>,
+    root_id: RootId,
+    next_id: EntryId,
+    inserted: u64,
+    removed: u64,
+    updated: u64,
+}
+
+impl Updater<'_> {
+    pub fn root_id(&self) -> RootId {
+        self.root_id
+    }
+
+    /// Allocates one entry id.
+    pub fn alloc_id(&mut self) -> EntryId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// The next id [`Updater::alloc_id`] would return. A bulk writer that
+    /// allocates ids itself starts here and reports back through
+    /// [`Updater::set_next_id`].
+    pub fn next_id(&self) -> EntryId {
+        self.next_id
+    }
+
+    pub fn set_next_id(&mut self, next: EntryId) {
+        self.next_id = self.next_id.max(next);
+    }
+
+    /// The direct children of a directory entry.
+    pub fn children(&self, parent: EntryId) -> Result<Vec<ChildEntry>> {
+        let mut stmt = self.tx.prepare_cached(
+            "SELECT id, kind, name, size, mtime FROM entries WHERE parent_id = ?1",
+        )?;
+        let rows = stmt.query_map([parent], child_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The child of `parent` named exactly `name` (byte comparison).
+    pub fn child(&self, parent: EntryId, name: &[u8]) -> Result<Option<ChildEntry>> {
+        let mut stmt = self.tx.prepare_cached(
+            "SELECT id, kind, name, size, mtime FROM entries WHERE parent_id = ?1 AND name = ?2",
+        )?;
+        Ok(stmt
+            .query_row(params![parent, name], child_from_row)
+            .optional()?)
+    }
+
+    pub fn insert(&mut self, entry: &NewEntry<'_>) -> Result<()> {
+        let mut stmt = self.tx.prepare_cached(
+            "INSERT INTO entries (id, root_id, parent_id, kind, name, size, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        stmt.execute(params![
+            entry.id,
+            self.root_id,
+            entry.parent_id,
+            entry.kind.as_u8(),
+            entry.name,
+            entry.size.map(|s| s as i64),
+            entry.mtime,
+        ])?;
+        self.next_id = self.next_id.max(entry.id + 1);
+        self.inserted += 1;
+        Ok(())
+    }
+
+    /// Updates the size and modification time of an existing entry.
+    pub fn update_meta(
+        &mut self,
+        id: EntryId,
+        size: Option<u64>,
+        mtime: Option<i64>,
+    ) -> Result<()> {
+        self.tx
+            .prepare_cached("UPDATE entries SET size = ?1, mtime = ?2 WHERE id = ?3")?
+            .execute(params![size.map(|s| s as i64), mtime, id])?;
+        self.updated += 1;
+        Ok(())
+    }
+
+    /// Deletes an entry and everything below it. Returns the number of
+    /// entries removed.
+    pub fn remove_subtree(&mut self, id: EntryId) -> Result<u64> {
+        let removed = self
+            .tx
+            .prepare_cached(
+                "DELETE FROM entries WHERE id IN (
+                     WITH RECURSIVE sub(id) AS (
+                         SELECT ?1
+                         UNION ALL
+                         SELECT e.id FROM entries e JOIN sub ON e.parent_id = sub.id
+                     )
+                     SELECT id FROM sub
+                 )",
+            )?
+            .execute([id])? as u64;
+        self.removed += removed;
+        Ok(removed)
+    }
+
+    /// Commits the changes. The generation is bumped only if something
+    /// changed, so derived data is rebuilt only when needed. `event`, if
+    /// given, is recorded in the same transaction as the changes it covers.
+    pub fn commit(self, event: Option<&EventMark>) -> Result<UpdateSummary> {
+        let summary = UpdateSummary {
+            inserted: self.inserted,
+            removed: self.removed,
+            updated: self.updated,
+        };
+        if summary.changed() {
+            self.tx.execute(
+                "UPDATE roots SET entry_count = max(0, entry_count + ?1) WHERE id = ?2",
+                params![self.inserted as i64 - self.removed as i64, self.root_id],
+            )?;
+            bump_generation(&self.tx)?;
+        }
+        if let Some(event) = event {
+            self.tx.execute(
+                "UPDATE roots SET event_id = ?1, event_uuid = ?2 WHERE id = ?3",
+                params![event.id as i64, event.uuid, self.root_id],
+            )?;
+        }
+        self.tx.commit()?;
+        Ok(summary)
+    }
+}
+
+fn child_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChildEntry> {
+    Ok(ChildEntry {
+        id: row.get(0)?,
+        kind: EntryKind::from_u8(row.get(1)?),
+        name: row.get(2)?,
+        size: row.get::<_, Option<i64>>(3)?.map(|s| s as u64),
+        mtime: row.get(4)?,
+    })
 }
 
 fn delete_root(tx: &Transaction<'_>, root_id: RootId) -> rusqlite::Result<()> {

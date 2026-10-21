@@ -270,7 +270,7 @@ fn migrates_version_1_databases() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, SCHEMA_VERSION);
 }
 
 #[test]
@@ -307,4 +307,156 @@ fn compacts_after_large_shrink() {
         .unwrap()
         .len();
     assert!(after * 4 < before, "{after} not much smaller than {before}");
+}
+
+fn root_id(store: &Store) -> RootId {
+    store.roots().unwrap()[0].id
+}
+
+fn names(children: &[ChildEntry]) -> Vec<String> {
+    let mut names: Vec<String> = children
+        .iter()
+        .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn updater_lists_inserts_and_removes_subtrees() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    let root = root_id(&store);
+
+    let mut update = store.begin_update(root).unwrap();
+    assert_eq!(names(&update.children(1).unwrap()), ["a.txt", "sub"]);
+    assert_eq!(update.child(1, b"sub").unwrap().unwrap().id, 3);
+    assert!(update.child(1, b"missing").unwrap().is_none());
+
+    // New ids continue above every existing id.
+    let id = update.alloc_id();
+    assert_eq!(id, 5);
+    update
+        .insert(&NewEntry {
+            id,
+            parent_id: 1,
+            kind: EntryKind::File,
+            name: b"new.md",
+            size: Some(1),
+            mtime: Some(1),
+        })
+        .unwrap();
+    // Removing `sub` also removes `sub/b.rs`.
+    assert_eq!(update.remove_subtree(3).unwrap(), 2);
+    update.update_meta(2, Some(99), Some(5)).unwrap();
+    let summary = update.commit(None).unwrap();
+    assert_eq!(
+        summary,
+        UpdateSummary {
+            inserted: 1,
+            removed: 2,
+            updated: 1
+        }
+    );
+
+    assert_eq!(store.generation().unwrap(), 2);
+    assert_eq!(store.entry_count().unwrap(), 3);
+    assert_eq!(store.roots().unwrap()[0].entry_count, 3);
+    assert_eq!(store.entry(2).unwrap().size, Some(99));
+    assert!(matches!(store.entry(4), Err(StoreError::MissingEntry(4))));
+    assert_eq!(
+        store.path_resolver().resolve(5).unwrap(),
+        PathBuf::from("/data/root/new.md")
+    );
+}
+
+#[test]
+fn update_without_changes_keeps_generation_but_records_event() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    let root = root_id(&store);
+    let mark = EventMark {
+        id: 42,
+        uuid: "VOLUME-UUID".into(),
+    };
+
+    let summary = store
+        .begin_update(root)
+        .unwrap()
+        .commit(Some(&mark))
+        .unwrap();
+    assert!(!summary.changed());
+    assert_eq!(store.generation().unwrap(), 1);
+    assert_eq!(store.roots().unwrap()[0].event, Some(mark));
+
+    let later = EventMark {
+        id: 50,
+        uuid: "VOLUME-UUID".into(),
+    };
+    store.set_root_event(root, &later).unwrap();
+    assert_eq!(
+        store.root(Path::new("/data/root")).unwrap().unwrap().event,
+        Some(later)
+    );
+}
+
+#[test]
+fn rolled_back_update_changes_nothing() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    let root = root_id(&store);
+    {
+        let mut update = store.begin_update(root).unwrap();
+        update.remove_subtree(1).unwrap();
+        // Dropped without commit.
+    }
+    assert_eq!(store.entry_count().unwrap(), 4);
+    assert_eq!(store.generation().unwrap(), 1);
+}
+
+#[test]
+fn migrates_version_2_databases_and_keeps_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
+             CREATE TABLE roots (id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE,
+                 entry_id INTEGER NOT NULL, entry_count INTEGER NOT NULL DEFAULT 0,
+                 error_count INTEGER NOT NULL DEFAULT 0, indexed_at INTEGER NOT NULL DEFAULT 0,
+                 scan_millis INTEGER NOT NULL DEFAULT 0, options BLOB);
+             CREATE TABLE entries (id INTEGER PRIMARY KEY, root_id INTEGER NOT NULL,
+                 parent_id INTEGER, kind INTEGER NOT NULL, name BLOB NOT NULL,
+                 size INTEGER, mtime INTEGER);
+             INSERT INTO meta VALUES ('generation', 7);
+             INSERT INTO roots (path, entry_id, entry_count) VALUES (CAST('/v2' AS BLOB), 1, 2);
+             INSERT INTO entries (id, root_id, kind, name) VALUES (1, 1, 1, CAST('/v2' AS BLOB));
+             INSERT INTO entries (id, root_id, parent_id, kind, name)
+                 VALUES (2, 1, 1, 0, CAST('kept.txt' AS BLOB));
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+
+    // Read-only handles on the old layout report no event mark.
+    let old = Store::open_read_only(&db).unwrap();
+    assert_eq!(old.roots().unwrap()[0].event, None);
+    drop(old);
+
+    let mut store = Store::open(&db).unwrap();
+    assert_eq!(store.generation().unwrap(), 7);
+    let root = root_id(&store);
+    let update = store.begin_update(root).unwrap();
+    assert_eq!(names(&update.children(1).unwrap()), ["kept.txt"]);
+    drop(update);
+    let indexes: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'entries_parent'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexes, 1);
 }
