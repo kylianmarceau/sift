@@ -5,7 +5,7 @@
 //! are passed in, so tests control the clock.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -73,6 +73,45 @@ impl StateDb {
             std::fs::create_dir_all(parent)?;
         }
         Self::init(Connection::open(path)?)
+    }
+
+    /// Opens the database at `path`; if it is damaged (cannot be opened,
+    /// or fails `quick_check`), moves it aside as
+    /// `state.db.damaged-<unix time>` (with its journal files) and starts a
+    /// new one. Returns where the damaged copy went, if anywhere. A schema
+    /// from a newer version is not damage and is returned as an error.
+    pub fn open_recovering(path: &Path) -> Result<(Self, Option<PathBuf>), StateError> {
+        let problem = match Self::open(path) {
+            Ok(db) => match db.quick_check() {
+                Ok(true) => return Ok((db, None)),
+                Ok(false) => "quick_check failed".to_owned(),
+                Err(error) => error.to_string(),
+            },
+            Err(StateError::Sqlite(error)) if is_corruption(&error) => error.to_string(),
+            Err(error) => return Err(error),
+        };
+        tracing::error!(%problem, path = %path.display(), "state.db is damaged; starting a new one");
+        let stamp = crate::now();
+        let mut moved = path.as_os_str().to_owned();
+        moved.push(format!(".damaged-{stamp}"));
+        let moved = PathBuf::from(moved);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut from = path.as_os_str().to_owned();
+            from.push(suffix);
+            let mut to = moved.as_os_str().to_owned();
+            to.push(suffix);
+            if Path::new(&from).exists() {
+                std::fs::rename(&from, &to)?;
+            }
+        }
+        Ok((Self::open(path)?, Some(moved)))
+    }
+
+    fn quick_check(&self) -> Result<bool, StateError> {
+        let result: String = self
+            .conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        Ok(result == "ok")
     }
 
     pub fn open_in_memory() -> Result<Self, StateError> {
@@ -308,6 +347,13 @@ impl StateDb {
     }
 }
 
+fn is_corruption(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+    )
+}
+
 fn is_recordable(item: &ResultItem) -> bool {
     !matches!(item.kind, ResultKind::Calculator | ResultKind::Clipboard)
 }
@@ -484,6 +530,25 @@ mod tests {
             StateDb::open(&path).unwrap().recent(10, &[]).unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn a_damaged_database_is_moved_aside_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        std::fs::write(&path, vec![0x42; 8192]).unwrap();
+        let (db, moved) = StateDb::open_recovering(&path).unwrap();
+        let moved = moved.expect("moved aside");
+        assert!(moved.exists());
+        assert_eq!(std::fs::read(&moved).unwrap(), vec![0x42; 8192]);
+        db.record_use(&app("a"), 1).unwrap();
+        assert_eq!(db.recent(10, &[]).unwrap().len(), 1);
+
+        // An intact database is opened as it is.
+        drop(db);
+        let (db, moved) = StateDb::open_recovering(&path).unwrap();
+        assert_eq!(moved, None);
+        assert_eq!(db.recent(10, &[]).unwrap().len(), 1);
     }
 
     #[test]
