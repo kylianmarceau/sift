@@ -129,8 +129,23 @@ pub struct Launcher {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Where `config.toml`, `state.db` and the session marker live:
+/// `~/Library/Application Support/sift`, or `SIFT_CONFIG_DIR`.
+pub fn user_dir() -> PathBuf {
+    std::env::var_os("SIFT_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(sift_state::support_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// What `main` knows at startup.
+pub struct Startup {
+    /// The previous run crashed or was killed.
+    pub unclean_exit: bool,
+}
+
 impl Launcher {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme = Theme::for_appearance(window.appearance());
         let input = cx.new(|cx| {
             let mut input = SearchInput::new("Search apps and files…", cx);
@@ -182,7 +197,12 @@ impl Launcher {
         let file_index = Arc::new(FileIndex::open(&index_dir));
         let files = Arc::new(FileProvider::new(file_index.clone()));
         let (status_tx, mut status_rx) = unbounded::<Status>();
-        let service = IndexService::start(ServiceConfig::new(&index_dir), file_index.clone(), {
+        // After a crash, check the index page by page before using it.
+        let service_config = ServiceConfig {
+            verify: startup.unclean_exit,
+            ..ServiceConfig::new(&index_dir)
+        };
+        let service = IndexService::start(service_config, file_index.clone(), {
             move |status: &Status| {
                 let _ = status_tx.unbounded_send(status.clone());
             }
@@ -202,12 +222,17 @@ impl Launcher {
         })
         .detach();
 
-        // SIFT_CONFIG_DIR overrides where config.toml and state.db live.
-        let user_dir = std::env::var_os("SIFT_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(sift_state::support_dir)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let user = UserData::open(&user_dir);
+        let mut user = UserData::open(&user_dir());
+        let mut notices: Vec<String> = Vec::new();
+        if startup.unclean_exit {
+            let log = crate::logging::log_path()
+                .map(|p| sift_files::abbreviate_home(&p, std::env::home_dir().as_deref()))
+                .unwrap_or_else(|| "the log".into());
+            notices.push(format!(
+                "Sift quit unexpectedly last time. Details are in {log}."
+            ));
+        }
+        notices.extend(user.take_notice());
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -241,6 +266,9 @@ impl Launcher {
             search_task: None,
             _subscriptions: subscriptions,
         };
+        if !notices.is_empty() {
+            this.message = Some(notices.join(" ").into());
+        }
         this.rebuild_search();
         this.watch_clipboard(cx);
         this.refresh_catalog(cx);
@@ -313,6 +341,16 @@ impl Launcher {
     }
 
     fn set_index_status(&mut self, status: Status, cx: &mut Context<Self>) {
+        // A notice from the index service that the user did not ask for
+        // (a damaged index rebuilt, an internal error recovered): show it
+        // in the panel, unless the settings window is where it came from.
+        if status.message.is_some()
+            && status.message != self.index_status.message
+            && !crate::settings::is_open(cx)
+        {
+            self.message = status.message.clone().map(Into::into);
+            self.resize(cx);
+        }
         let changed = status.last_update.map(|u| u.at)
             != self.index_status.last_update.map(|u| u.at)
             || status.roots.len() != self.index_status.roots.len();

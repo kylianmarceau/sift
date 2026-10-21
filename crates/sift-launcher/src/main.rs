@@ -10,6 +10,8 @@ mod commands;
 mod icons;
 mod input;
 mod launcher;
+mod logging;
+mod session;
 mod settings;
 mod shell;
 mod theme;
@@ -50,11 +52,8 @@ pub fn launch_failures() -> UnboundedSender<LaunchError> {
 
 fn main() {
     let started = Instant::now();
-    tracing_subscriber::fmt()
-        .with_max_level(log_level())
-        .with_writer(std::io::stderr)
-        .without_time()
-        .init();
+    logging::init(log_level());
+    let (session, unclean_exit) = session::Session::start(&launcher::user_dir());
 
     Application::new().run(move |cx: &mut App| {
         // GPUI switches the app to the regular policy while launching;
@@ -63,7 +62,7 @@ fn main() {
         bind_keys(cx);
 
         let window = match cx.open_window(window_options(cx), |window, cx| {
-            cx.new(|cx| Launcher::new(window, cx))
+            cx.new(|cx| Launcher::new(launcher::Startup { unclean_exit }, window, cx))
         }) {
             Ok(window) => window,
             Err(error) => {
@@ -146,6 +145,12 @@ fn main() {
         }
 
         cx.on_action(|_: &Quit, cx| cx.quit());
+        // Quitting normally removes the marker; a crash leaves it behind.
+        cx.on_app_quit(move |_| {
+            session.end();
+            async {}
+        })
+        .detach();
         tracing::info!(
             ms = started.elapsed().as_secs_f64() * 1000.,
             "startup to window ready"

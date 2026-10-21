@@ -50,6 +50,18 @@ pub fn validate_app_bundle(path: &Path) -> Result<(), LaunchError> {
     Ok(())
 }
 
+/// Whether a process with this id is running (it may belong to another
+/// user). Used to tell a stale "Sift is running" marker from a live one.
+pub fn process_is_running(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 only checks that the process exists and
+    // may be signalled; it sends nothing.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 #[cfg(target_os = "macos")]
 mod imp;
 #[cfg(target_os = "macos")]
@@ -116,6 +128,20 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn tells_running_processes_from_gone_ones() {
+        assert!(process_is_running(std::process::id() as i32));
+        // launchd always runs, as root.
+        assert!(process_is_running(1));
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        child.wait().expect("wait");
+        assert!(!process_is_running(pid));
+        assert!(!process_is_running(0));
+    }
+
     #[test]
     fn invalid_urls_are_refused_before_appkit() {
         assert_eq!(

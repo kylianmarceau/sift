@@ -24,6 +24,8 @@ const SNIPPET_PREFIX: &str = "snippet:";
 const CUSTOM_PREFIX: &str = "custom:";
 
 pub struct UserData {
+    /// Something the user should be told once (a damaged file replaced).
+    notice: Option<String>,
     config_path: PathBuf,
     /// Modification time of the loaded config; `None` if there was none.
     config_stamp: Option<SystemTime>,
@@ -49,10 +51,25 @@ impl UserData {
     /// Opens `dir/config.toml` and `dir/state.db`. A database that cannot
     /// be opened only disables recents and favorites.
     pub fn open(dir: &Path) -> Self {
-        let db = StateDb::open(&dir.join("state.db"))
-            .map_err(|error| tracing::error!(%error, "cannot open state.db"))
-            .ok();
+        let mut notice = None;
+        let db = match StateDb::open_recovering(&dir.join("state.db")) {
+            Ok((db, moved)) => {
+                if let Some(moved) = moved {
+                    notice = Some(format!(
+                        "Recent items and favorites were damaged and have been reset. \
+                         The old file is {}.",
+                        moved.display()
+                    ));
+                }
+                Some(db)
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot open state.db");
+                None
+            }
+        };
         let mut this = Self {
+            notice,
             config_path: dir.join("config.toml"),
             config_stamp: None,
             loaded: false,
@@ -71,6 +88,11 @@ impl UserData {
         }
         this.refresh_usage();
         this
+    }
+
+    /// A message for the user, given once.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     pub fn config_path(&self) -> &Path {

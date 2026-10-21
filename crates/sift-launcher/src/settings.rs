@@ -29,6 +29,14 @@ struct OpenSettings(WindowHandle<Settings>);
 
 impl Global for OpenSettings {}
 
+/// Whether the settings window is open.
+pub fn is_open(cx: &App) -> bool {
+    cx.try_global::<OpenSettings>().is_some_and(|open| {
+        let id = open.0.window_id();
+        cx.windows().iter().any(|w| w.window_id() == id)
+    })
+}
+
 /// Opens the settings window, or brings the open one to the front.
 pub fn open(launcher: Entity<Launcher>, _window: &mut Window, cx: &mut App) {
     // Activation re-enters GPUI through AppKit callbacks, so it runs after
