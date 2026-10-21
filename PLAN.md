@@ -86,44 +86,43 @@ Before Phase 2 (small, optional):
 - A configurable hotkey and launch at login (`SMAppService`).
 - Recency boost for recently launched apps.
 
-## Phase 2: unified file search (in progress)
+## Phase 2: unified file search ✅ built, manual check pending
 
-Done (tested, committed):
+Done:
 
 - [x] Store schema v3: parent index, saved FSEvents position per root,
-      transactional `Updater` (children, insert, delete subtree)
-- [x] `sift_indexer::apply_changes`: directory-level incremental updates
-      checked against fresh full scans (renames, deletions, moved-in
-      folders, kind changes, permission errors, missing roots, 60 random
-      edits)
-- [x] `sift-watch`: FSEvents stream with replay from a saved event id,
-      root-changed / dropped / wrapped flags, event-store UUID check
-- [x] `sift-files`: `FileIndex`, `FileProvider` (≥ 2 characters, skips
-      files already gone), `IndexService` (startup recovery, one watched
-      stream, batching, snapshot swap, add/remove/re-index/options
-      commands, unavailable roots). End-to-end tests: a new file was
-      searchable about 110 ms after creation with test batching settings
-- [x] Provider merge: match tier, then provider priority, deduplicated
-- [x] `sift index` records the FSEvents position, so the launcher can
-      resume without rescanning
+      transactional incremental `Updater`
+- [x] Incremental updates (`apply_changes`) checked against fresh full
+      scans: renames, deletions, moved-in folders, kind changes,
+      permission errors, missing roots, 60 random edits
+- [x] `sift-watch`: FSEvents with replay from a saved id, root-changed,
+      dropped and wrapped flags, event-store UUID check
+- [x] `sift-files`: shared `FileIndex`, `FileProvider`, background
+      `IndexService` (startup recovery, batching, snapshot swap, settings
+      commands, unavailable roots)
+- [x] Launcher: apps, commands and files in one search, ranked by match
+      tier then provider. Enter opens, ⌘Enter shows in Finder. File icons
+      are cached per type
+- [x] Commands: *Sift Settings*, *Quit Sift*
+- [x] Settings window: folders with state and counts, Add Folder (macOS
+      picker), Re-index, Remove, Exclude Folder, dependency toggle. Home
+      folder and startup disk refused
+- [x] Measured: change to searchable ≈ 180 ms (10k) / 205 ms (100k)
+      median; hidden idle 0.00 s CPU per minute, 25 MB (BENCHMARKS.md)
 
-Next:
+Still open in Phase 2:
 
-1. Launcher: start `FileIndex` + `IndexService`, add `FileProvider`
-   after apps, Enter opens files (NSWorkspace), ⌘Enter reveals in
-   Finder, file-type icons cached by extension, "Refresh" on show,
-   placeholder "Search apps and files…".
-2. Commands provider: "Index Settings…", "Quit Sift".
-3. Settings window: list roots with state and counts, Add Folder
-   (NSOpenPanel), Remove, Re-index, dependency-folder toggle,
-   exclusions. Broad roots (/ and ~) refused with an explanation.
-4. Measure: event-to-searchable latency with default settings, idle CPU
-   while watching, memory with the file index open; update
-   ARCHITECTURE.md and BENCHMARKS.md.
+1. **Manual GUI check** (needs you): add a folder in Settings, search
+   files, Enter / ⌘Enter, exclude a folder, remove a folder, and accept
+   the macOS permission prompt for Documents.
+2. Your existing `~/Documents` index predates event positions, so the
+   launcher rescans it once on first start (about 0.2 s).
 
-Note: macOS asks once for access to Documents/Desktop/Downloads when the
-launcher first reads them. Ad-hoc signed builds may ask again after each
-rebuild.
+Next small milestones:
+
+- Snapshot delta overlay for indexes near a million entries.
+- `ext:` / `f:` / `d:` filters in the launcher query.
+- Quick Look on the selected file (Phase 3 list).
 
 ## Phase 3: productivity features
 

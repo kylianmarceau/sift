@@ -270,4 +270,69 @@ target.
 | Idle memory < 50 MB | **Met:** 26 MB footprint idle, 34 MB peak. |
 | Hotkey to visible < 50 ms | **Met:** with the real hotkey, 4.87 ms median and 11.58 ms max to the first render (48.22 ms median before the display-link fix). |
 | Search < 20 ms | **Met** for the app provider: ≤ 11 µs p99. Rendering time was not measured separately. |
-| Idle CPU ≈ 0 | **Met:** no CPU time used in 60 s idle. |
+| Idle CPU ≈ 0 | **Met with the panel hidden** (see the correction in the Phase 2 section). |
+
+## 2026-10-21 — Phase 2: live file search
+
+Same machine. **Code:** commit `5e4da4c`, release build.
+
+### Change to searchable
+
+`cargo run --release -p sift-files --example live_latency [files]` indexes
+a temporary tree through the index service (default settings: FSEvents
+latency 300 ms with NoDefer, 150 ms quiet period). It then creates,
+renames and deletes a file 20 times each, timing from the filesystem call
+until search reflects it. For deletes the clock stops when the index
+drops the file; the launcher already hides deleted files immediately by
+checking each result.
+
+**Statistics: median, p90, min and max over 20 rounds.**
+
+| tree | operation | median | p90 | min | max |
+|-----:|-----------|-------:|----:|----:|----:|
+| 10,801 entries  | create | 179 ms | 180 ms | 170 ms | 180 ms |
+| 10,801 entries  | rename | 179 ms | 181 ms | 174 ms | 181 ms |
+| 10,801 entries  | delete | 168 ms | 170 ms | 164 ms | 170 ms |
+| 100,801 entries | create | 205 ms | 221 ms | 200 ms | 224 ms |
+| 100,801 entries | rename | 206 ms | 208 ms | 196 ms | 209 ms |
+| 100,801 entries | delete | 168 ms | 171 ms | 165 ms | 171 ms |
+
+The 150 ms quiet period is most of it, by design: it batches bursts such
+as a build or `git checkout` into one update. The rest is the update
+itself plus the snapshot rebuild, which grows with index size (about
+25 ms more at 100k). At around a million entries the rebuild would take on
+the order of a second per update. That is the case for the snapshot delta
+described in ARCHITECTURE.md.
+
+In the running launcher (scratch index of 202 entries), the log showed
+3–4 ms to apply each change and about 164 ms from delivery to searchable.
+
+### Idle cost with live updates
+
+The launcher was started with a scratch index (`SIFT_INDEX_DIR`), watching
+one root.
+
+| state | CPU time in 60 s | footprint | peak footprint |
+|-------|-----------------:|----------:|---------------:|
+| panel hidden (`SIFT_START_HIDDEN=1`) | 0.00 s | 25 MB | 35 MB |
+| panel left open | 0.30 s (≈ 0.5%) | 28 MB | 38 MB |
+
+The index thread blocks on its channel while idle, and FSEvents costs
+nothing until something changes. The 0.5% with the panel open is GPUI's
+display link, which keeps ticking while a window is visible.
+
+**Correction to Phase 1:** the "0.00 s in 60 s" Phase 1 measurement
+was taken while the screen was locked, which pauses the display link. The
+numbers above separate the two states: hidden (the normal idle state of a
+launcher) costs nothing, and a panel left open costs about 0.5%. Reducing
+the open-panel cost is a Phase 4 item.
+
+### Against the Phase 2 goals
+
+| goal | status |
+|------|--------|
+| Files and folders searchable from the launcher | Done (two-character minimum). |
+| Incremental updates (create, rename, delete) | ≈ 180 ms to searchable at 10k, ≈ 205 ms at 100k (median). |
+| Changes made while sift was not running | Replayed at startup from the saved FSEvents position, without a rescan (tested end to end). |
+| Recovery from lost events | Subtree or root rescans (tested on the update path; drop and wrap flags are not reproducible in tests). |
+| Idle CPU ≈ 0 with watching on | Met with the panel hidden: 0.00 s in 60 s. |

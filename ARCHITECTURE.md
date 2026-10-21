@@ -2,8 +2,8 @@
 
 This document records the technical decisions behind sift and the
 reasoning for them. It covers what exists today: the indexer and search
-engine (Phase 0) and the minimal launcher (Phase 1). Later phases add
-sections as they land.
+engine (Phase 0), the launcher (Phase 1), and live file search in the
+launcher (Phase 2). Later phases add sections as they land.
 
 ## Workspace
 
@@ -16,7 +16,9 @@ sift/
 │   ├── sift-cli/      `sift` binary: index / search / status / remove / bench
 │   ├── sift-core/     launcher result types, the Provider trait, query clock, selection
 │   ├── sift-apps/     installed-application discovery and the app provider
-│   ├── sift-macos/    AppKit glue: icons, launching apps, panel placement (objc2)
+│   ├── sift-macos/    AppKit glue: icons, opening apps and files, panel, folder picker
+│   ├── sift-watch/    FSEvents change notifications (objc2-core-services)
+│   ├── sift-files/    file provider and the live index service
 │   └── sift-launcher/ GPUI launcher app (binary `sift-launcher`, bundled as Sift.app)
 ├── scripts/bench.sh       reproducible file-search benchmark run
 ├── scripts/bundle-app.sh  builds target/release/Sift.app
@@ -28,7 +30,8 @@ Dependency directions:
 
 - File search: `cli → {indexer, search} → store`. The indexer and search
   crates do not know about each other; the CLI composes them.
-- Launcher: `launcher → {core, apps, macos}`, `apps → {core, search}`.
+- Launcher: `launcher → {core, apps, files, macos}`, `apps → {core, search}`,
+  `files → {core, indexer, search, store, watch}`.
   `sift-apps` reuses only `sift-search`'s folding and name matcher, so
   apps and files rank by the same rules.
 
@@ -323,20 +326,143 @@ need full Xcode and its Metal compiler; the shaders compile once on first
 launch, which is why the first start after a build is slower (about
 0.8 s against about 0.1 s).
 
+## Live file search (Phase 2)
+
+### Incremental updates
+
+`sift_indexer::apply_changes` takes *directory-level* changes, which is
+what FSEvents reports ("something in this folder changed"). For each one
+it lists the directory, compares the listing with the stored children
+(the `entries_parent` index added in schema v3), and applies the
+difference in one transaction:
+
+- names gone from disk → delete the entry and its subtree;
+- new names → insert; new folders are walked in full with the same
+  parallel walker as a full scan, because a folder moved in produces no
+  events for its contents;
+- same name, different kind (file replaced by folder) → replace;
+- files with a new size or modification time → update the metadata.
+
+The filesystem is the authority, not the event, so a change that is
+applied twice, late, or out of order is harmless. That is what makes
+coalesced, replayed and duplicated events safe. A path that is not
+indexed yet is handled by re-listing its nearest indexed ancestor.
+Changes inside excluded, dependency or package folders are ignored, using
+the same rule as the full scan (`descends`). If the root itself is
+missing, nothing changes (an unplugged drive must not wipe its index).
+
+New ids are allocated above every existing id, so a child's id stays
+larger than its parent's, as the snapshot builder requires.
+
+Tests compare each update with a fresh full scan of the same tree,
+including 60 random create/delete/move edits.
+
+### FSEvents (`sift-watch`)
+
+A thin wrapper over the C API: one stream for all roots, delivered on a
+private dispatch queue, with `NoDefer` (the first change after a quiet
+period is delivered at once) and `WatchRoot` (report the roots themselves
+moving). Each event has a system-wide id. A root stores the last id
+applied to it, plus the UUID of the volume's event store
+(`FSEventsCopyUUIDForDevice`); the id is only meaningful with that UUID.
+
+Recovery rules, in the index service:
+
+| situation | action |
+|-----------|--------|
+| start, saved id and UUID valid | replay from the oldest saved id (catches changes made while sift was not running) |
+| start, no saved id, or UUID changed | rescan the root once, recording the id from *before* the scan |
+| `MustScanSubDirs`, `UserDropped`, `KernelDropped` | rescan that subtree |
+| `EventIdsWrapped` | rescan every root |
+| `RootChanged`, mount, unmount | re-check roots: missing → *unavailable* (index kept); back → rescan |
+
+Because all roots share one stream and FSEvents delivers in id order,
+after each batch every root's saved id can advance to the batch's highest
+id, changed or not. Replay after a restart therefore starts close to where
+it stopped. `sift index` in a terminal also records the id from before
+its scan, so the launcher can resume from a CLI scan.
+
+### Index service (`sift-files`)
+
+One background thread owns the writable store:
+
+1. collects events: FSEvents latency 300 ms (with `NoDefer`, the first
+   event is immediate), then waits for 150 ms of quiet, at most 2 s;
+2. applies them with `apply_changes`, recording the event position in the
+   same transaction;
+3. rebuilds the name snapshot (written to a new file and renamed into
+   place) and swaps a freshly opened index into the shared `FileIndex`.
+
+Searches hold the `FileIndex` mutex only for the search and the path
+lookup (well under a millisecond). The old mapping stays valid during a
+swap because the old snapshot file is never modified, only replaced.
+
+Rebuilding the whole snapshot is the simple first version of step 3. It
+costs about 25 ms at 100k entries (BENCHMARKS.md) but grows linearly, so
+at around a million entries an in-memory delta (added and removed ids,
+merged into a fresh snapshot in the background) would be needed.
+
+The service also runs the settings commands (add, remove, re-index,
+change options) and a cheap `Refresh` each time the panel opens. That
+re-checks root availability and picks up changes another process made to
+the index (such as `sift index`).
+
+### File provider and ranking
+
+`FileProvider` answers queries of two or more characters (a single
+character matches a large part of any index and would bury the apps). It
+checks each result with one `lstat` before offering it, so a file deleted
+a moment ago is never shown, even before the update lands.
+
+`sift_core::Search` runs providers in parallel and orders results by:
+
+1. match tier (exact, stem, prefix, word, substring, fuzzy), so `notes.txt`
+   (exact) beats a fuzzy app match;
+2. provider priority (apps, then commands, then files), so `Notes` the app
+   precedes `notes.txt` when both match equally well;
+3. the provider's score, then the title.
+
+Results with the same id (an app inside an indexed folder) appear once.
+
+### Launcher and settings
+
+Enter opens a file with its default application (`NSWorkspace
+openURL:configuration:`), and ⌘Enter shows it in Finder. Icons render on
+the background executor: apps and packages get their own icon, documents
+share one per extension, and folders share one. A long result list
+therefore costs a handful of renders.
+
+The *Sift Settings* command opens a normal window listing indexed folders
+with their state, item count and last scan, with:
+
+- Add Folder (the standard folder picker);
+- Re-index and Remove;
+- Exclude Folder, and Include again to undo it;
+- a dependency-folder toggle.
+
+The home folder and the startup disk are refused with an explanation.
+Opening the window and the picker happens in a foreground task outside
+GPUI updates, for the same re-entrancy reason as resizing.
+
+### Permissions
+
+Sift reads folder listings only and never file contents. Reading
+Documents, Desktop or Downloads makes macOS ask once ("Sift would like to
+access files in your Documents folder"); choosing a folder in the picker
+grants access to it. No Full Disk Access or Accessibility permission is
+used. Builds are ad-hoc signed, so macOS may ask again after a rebuild.
+Security-scoped bookmarks would only matter for a sandboxed build, which
+Sift is not.
+
 ## What is deliberately deferred
 
-- Incremental updates via FSEvents (Phase 2). The design for it:
-  - Apply events to the store, then update the snapshot through a small
-    in-memory delta (added and removed ids) that is merged into a fresh
-    snapshot in the background. Fall back to a rescan of the affected
-    subtree when FSEvents reports dropped or coalesced history
-    (`MustScanSubDirs`, `UserDropped`/`KernelDropped`), or when the stored
-    event id is no longer valid.
+- A snapshot delta overlay for very large indexes (see "Index service").
 - Path filters, size and date filters, and usage-based ranking (recency,
   favorites).
 - `getattrlistbulk` scanning, and Launch Services package detection.
 - Launcher: a configurable hotkey, launch at login, usage-based ranking,
   lazy icon loading, and app-folder watching (the catalog currently
   refreshes by age).
-- Security-scoped bookmarks for sandboxed folder access (Phase 2/5).
+- Security-scoped bookmarks (only needed for a sandboxed build).
+- Quick Look, and query syntax such as `ext:` in the launcher.
 - Full-text content indexing (out of scope for the MVP).

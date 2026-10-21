@@ -4,10 +4,10 @@ A Rust-native macOS launcher and file search engine: Raycast's keyboard-first
 launcher combined with Everything-style instant filename search, built for low
 memory use and near-zero idle CPU.
 
-**Status:** Phase 1. There is a command-line file indexer and search
-engine, and a minimal launcher that finds and opens applications with
-Option+Space. File search is not in the launcher yet. See
-[PLAN.md](PLAN.md) for the roadmap.
+**Status:** Phase 2. Option+Space opens a launcher that searches
+applications, files and folders. The file index updates itself as files
+change (FSEvents). There is also a command-line indexer and search tool.
+See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Requirements
 
@@ -47,10 +47,24 @@ open target/release/Sift.app
 ```
 
 The panel appears once at launch. After that, **Option+Space** shows or
-hides it. Type to search apps, **↑/↓** (or Ctrl-P/Ctrl-N) to move,
-**Enter** to open, **Esc** or clicking elsewhere to close. **Cmd-Q** while
-the panel is open quits Sift. It has no Dock icon. No Accessibility
-permission is needed.
+hides it.
+
+- Type to search apps, files and folders (files need two characters).
+- **↑/↓** (or Ctrl-P/Ctrl-N) to move.
+- **Enter** to open.
+- **⌘Enter** to show the selection in Finder.
+- **Esc** or clicking elsewhere to close.
+- **Cmd-Q** while the panel is open quits Sift.
+
+Sift has no Dock icon and needs no Accessibility permission.
+
+**Choosing folders:** search for *Sift Settings* (or "preferences") and
+press Enter. Add the folders you want searchable. macOS asks once for
+access to Documents, Desktop or Downloads. Folders indexed with
+`sift index` in a terminal show up there too; they share one index.
+
+Environment options: `SIFT_INDEX_DIR` (index location),
+`SIFT_START_HIDDEN=1` (don't show the panel at launch), `SIFT_LOG=debug`.
 
 To see timing logs (startup, catalog load, hotkey-to-first-frame), run the
 executable from a terminal instead:
@@ -71,6 +85,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/bench.sh            # reproducible benchmarks, see BENCHMARKS.md
 cargo run --release -p sift-apps --example bench_apps   # app search timing
+cargo run --release -p sift-files --example live_latency # change-to-searchable timing
 ```
 
 Design notes are in [ARCHITECTURE.md](ARCHITECTURE.md), the roadmap is in
