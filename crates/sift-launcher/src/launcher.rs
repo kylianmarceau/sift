@@ -538,6 +538,19 @@ impl Launcher {
         self.follow_quick_look(cx);
         self.resize(cx);
         cx.notify();
+        self.draw_soon(cx);
+    }
+
+    /// Draws the next frame as soon as the current update returns, instead
+    /// of at the next display-link tick (up to one refresh interval later,
+    /// 16.7 ms at 60 Hz). Used when new results arrive, the moment that
+    /// decides how fast typing feels.
+    fn draw_soon(&self, cx: &mut Context<Self>) {
+        if let Some(panel) = self.panel.clone()
+            && panel.is_visible()
+        {
+            cx.spawn(async move |_, _| panel.draw_now()).detach();
+        }
     }
 
     fn height(&self) -> f32 {
