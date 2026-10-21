@@ -16,6 +16,7 @@ sift-search = { path = "crates/sift-search" }
 sift-core = { path = "crates/sift-core" }
 sift-apps = { path = "crates/sift-apps" }
 sift-macos = { path = "crates/sift-macos" }
+sift-watch = { path = "crates/sift-watch" }
 
 anyhow = "1.0.104"
 bytemuck = "1.25"
@@ -30,6 +31,9 @@ objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 block2 = "0.6.2"
 raw-window-handle = "0.6.2"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFString", "CFUUID"] }
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "FSEvents", "dispatch2", "libc"] }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
 global-hotkey = "0.9.0"
 futures = "0.3.31"
