@@ -10,10 +10,12 @@ use gpui::{AssetSource, Result, SharedString};
 
 pub const SEARCH: &str = "icons/search.svg";
 pub const CLIPBOARD: &str = "icons/clipboard.svg";
+pub const FOLDER: &str = "icons/folder.svg";
 
 const FILES: &[(&str, &[u8])] = &[
     (SEARCH, include_bytes!("../assets/icons/search.svg")),
     (CLIPBOARD, include_bytes!("../assets/icons/clipboard.svg")),
+    (FOLDER, include_bytes!("../assets/icons/folder.svg")),
 ];
 
 pub struct Assets;

@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, Global, SharedString,
-    Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-    actions, div, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Global,
+    SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, actions, div, prelude::*, px, size, svg,
 };
 use sift_files::{Command, RootState, RootStatus};
 use sift_indexer::IndexOptions;
@@ -59,7 +59,7 @@ pub fn open(launcher: Entity<Launcher>, _window: &mut Window, cx: &mut App) {
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(640.), px(520.)),
+            size(px(680.), px(540.)),
             cx,
         ))),
         kind: WindowKind::Normal,
@@ -249,15 +249,17 @@ impl Settings {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (state, state_color) = match &root.state {
-            RootState::Watching => ("Up to date".to_string(), theme.muted),
+            RootState::Watching => ("Up to date".to_string(), theme.success),
             RootState::Indexing { entries } => {
                 (format!("Indexing… {}", thousands(*entries)), theme.accent)
             }
-            RootState::Unavailable => (
-                "Not available (moved, deleted or not mounted)".to_string(),
-                theme.error,
-            ),
-            RootState::Failed(reason) => (format!("Failed: {reason}"), theme.error),
+            RootState::Unavailable => ("Not available".to_string(), theme.error),
+            RootState::Failed(_) => ("Failed".to_string(), theme.error),
+        };
+        let problem = match &root.state {
+            RootState::Unavailable => Some("Moved, deleted or not mounted.".to_string()),
+            RootState::Failed(reason) => Some(reason.clone()),
+            _ => None,
         };
         let details = format!(
             "{} items · indexed {}{}",
@@ -274,122 +276,188 @@ impl Settings {
 
         let reindex = {
             let path = path.clone();
-            button(("reindex", index), "Re-index", theme).on_click(
+            button(("reindex", index), "Re-index", Kind::Secondary, theme).on_click(
                 cx.listener(move |this, _, _, cx| this.send(Command::Reindex(path.clone()), cx)),
             )
         };
         let exclude = {
             let path = path.clone();
-            button(("exclude", index), "Exclude Folder…", theme)
-                .on_click(cx.listener(move |this, _, _, cx| this.exclude_folder(path.clone(), cx)))
+            button(
+                ("exclude", index),
+                "Exclude Folder…",
+                Kind::Secondary,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.exclude_folder(path.clone(), cx)))
         };
         let toggle = {
             let path = path.clone();
             let options = root.options.clone();
-            button(
-                ("deps", index),
-                if skip_deps {
-                    "Dependency folders: skipped"
-                } else {
-                    "Dependency folders: included"
-                },
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let mut options = options.clone();
-                options.skip_dependency_dirs = !options.skip_dependency_dirs;
-                this.send(
-                    Command::SetOptions {
-                        path: path.clone(),
-                        options,
-                    },
-                    cx,
-                );
-            }))
+            div()
+                .id(("deps", index))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
+                .child(switch(skip_deps, theme))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .child("Skip dependency and cache folders"),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let mut options = options.clone();
+                    options.skip_dependency_dirs = !options.skip_dependency_dirs;
+                    this.send(
+                        Command::SetOptions {
+                            path: path.clone(),
+                            options,
+                        },
+                        cx,
+                    );
+                }))
         };
         let remove = {
             let path = path.clone();
-            button(("remove", index), "Remove", theme).on_click(
+            button(("remove", index), "Remove", Kind::Destructive, theme).on_click(
                 cx.listener(move |this, _, _, cx| this.send(Command::RemoveRoot(path.clone()), cx)),
             )
         };
 
-        let exclusions: Vec<AnyElement> =
-            root.options
-                .exclude_paths
-                .iter()
-                .enumerate()
-                .map(|(i, excluded)| {
-                    let mut options = root.options.clone();
-                    options.exclude_paths.retain(|p| p != excluded);
-                    let path = path.clone();
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.muted)
-                                .child(format!("Skipped: {}", self.display(excluded))),
+        let exclusions: Vec<AnyElement> = root
+            .options
+            .exclude_paths
+            .iter()
+            .enumerate()
+            .map(|(i, excluded)| {
+                let mut options = root.options.clone();
+                options.exclude_paths.retain(|p| p != excluded);
+                let path = path.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(format!("Skipped: {}", self.display(excluded))),
+                    )
+                    .child(
+                        button(
+                            ("unexclude", index * 1000 + i),
+                            "Include Again",
+                            Kind::Link,
+                            theme,
                         )
-                        .child(
-                            button(("unexclude", index * 1000 + i), "Include again", theme)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.send(
-                                        Command::SetOptions {
-                                            path: path.clone(),
-                                            options: options.clone(),
-                                        },
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .into_any_element()
-                })
-                .collect();
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.send(
+                                Command::SetOptions {
+                                    path: path.clone(),
+                                    options: options.clone(),
+                                },
+                                cx,
+                            )
+                        })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
 
+        let hairline = || div().h(px(1.)).bg(theme.divider);
         div()
-            .p_3()
-            .rounded(px(8.))
+            .p(px(14.))
+            .rounded(px(10.))
             .border_1()
             .border_color(theme.divider)
+            .bg(theme.card)
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(12.))
             .child(
                 div()
                     .flex()
-                    .justify_between()
-                    .gap_3()
+                    .items_center()
+                    .gap(px(12.))
                     .child(
                         div()
-                            .text_size(px(14.))
-                            .truncate()
-                            .child(self.display(&root.path)),
+                            .flex_none()
+                            .size(px(32.))
+                            .rounded(px(8.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme.accent.opacity(0.14))
+                            .child(
+                                svg()
+                                    .path(crate::assets::FOLDER)
+                                    .size(px(17.))
+                                    .text_color(theme.accent),
+                            ),
                     )
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(self.display(&root.path)),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(theme.muted)
+                                    .child(problem.unwrap_or(details)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
                             .text_size(px(12.))
-                            .text_color(state_color)
+                            .text_color(theme.muted)
+                            .child(div().size(px(7.)).rounded_full().bg(state_color))
                             .child(state),
                     ),
             )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme.muted)
-                    .child(details),
-            )
-            .children(exclusions)
+            .when(!exclusions.is_empty(), |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .pl(px(44.))
+                        .children(exclusions),
+                )
+            })
+            .child(hairline())
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(reindex)
-                    .child(exclude)
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
                     .child(toggle)
-                    .child(remove),
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(reindex)
+                            .child(exclude)
+                            .child(remove),
+                    ),
             )
             .into_any_element()
     }
@@ -418,10 +486,15 @@ impl Render for Settings {
         let mut facts = vec![format!("Index size {}", bytes(status.index_bytes))];
         if let Some(update) = status.last_update {
             facts.push(format!(
-                "last change searchable {} ms after it was reported",
+                "last change searchable in {} ms",
                 update.event_to_searchable.as_millis()
             ));
         }
+        let count = match status.roots.len() {
+            0 => String::new(),
+            1 => "1 folder".to_string(),
+            n => format!("{n} folders"),
+        };
 
         div()
             .key_context("Settings")
@@ -435,14 +508,19 @@ impl Render for Settings {
             .flex_col()
             .child(
                 div()
-                    .px_6()
-                    .pt_5()
-                    .pb_3()
+                    .px(px(PAGE_INSET))
+                    .pt(px(20.))
+                    .pb(px(16.))
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(div().text_size(px(18.)).child("File Search"))
-                    .child(div().text_color(theme.muted).child(
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("File Search"),
+                    )
+                    .child(div().max_w(px(540.)).text_color(theme.muted).child(
                         "Sift finds files and folders by name in these locations and keeps up \
                          with changes as they happen. Only names, sizes and dates are stored, \
                          on this Mac; file contents are never read.",
@@ -450,66 +528,168 @@ impl Render for Settings {
             )
             .child(
                 div()
-                    .id("roots")
-                    .flex_grow()
-                    .overflow_y_scroll()
-                    .px_6()
+                    .px(px(PAGE_INSET))
+                    .pb(px(8.))
                     .flex()
-                    .flex_col()
-                    .gap_3()
-                    .when(roots.is_empty(), |list| {
-                        list.child(div().text_color(theme.muted).child(
-                            "No folders yet. Add the folders you want to search, such as \
-                             Documents or a projects folder.",
-                        ))
-                    })
-                    .children(roots),
+                    .justify_between()
+                    .text_size(px(11.))
+                    .text_color(theme.placeholder)
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Locations"))
+                    .child(count),
             )
             .child(
                 div()
-                    .px_6()
-                    .py_4()
+                    .id("roots")
+                    .flex_grow()
+                    .overflow_y_scroll()
+                    .px(px(PAGE_INSET))
+                    .pb(px(16.))
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .when_some(message, |col, message| {
-                        col.child(div().text_color(theme.error).child(message))
+                    .gap(px(10.))
+                    .when(roots.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .p(px(20.))
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(theme.divider)
+                                .bg(theme.card)
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_center()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("No folders yet"),
+                                )
+                                .child(div().text_color(theme.muted).child(
+                                    "Add the folders you want to search, such as Documents \
+                                     or a projects folder.",
+                                )),
+                        )
                     })
+                    .children(roots),
+            )
+            .when_some(message, |page, message| {
+                page.child(
+                    div().px(px(PAGE_INSET)).pb(px(12.)).child(
+                        div()
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .bg(theme.error.opacity(0.12))
+                            .text_color(theme.error)
+                            .child(message),
+                    ),
+                )
+            })
+            .child(div().h(px(1.)).bg(theme.divider))
+            .child(
+                div()
+                    .h(px(52.))
+                    .px(px(PAGE_INSET))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .bg(theme.surface)
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme.muted)
-                                    .child(facts.join(" · ")),
-                            )
-                            .child(
-                                button("add", "Add Folder…", &theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.add_folder(cx))),
-                            ),
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(facts.join(" · ")),
+                    )
+                    .child(
+                        button("add", "Add Folder…", Kind::Primary, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.add_folder(cx))),
                     ),
             )
     }
 }
 
+/// Left and right margin of the settings page.
+const PAGE_INSET: f32 = 24.;
+
+#[derive(Clone, Copy)]
+enum Kind {
+    /// The one main action on the page.
+    Primary,
+    Secondary,
+    /// Removes something.
+    Destructive,
+    /// A small text-only action inside a line.
+    Link,
+}
+
 fn button(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
+    kind: Kind,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    let base = div()
         .id(id)
-        .px_3()
-        .py_1()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
         .rounded(px(6.))
-        .bg(theme.key_background)
         .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
-        .hover(|style| style.bg(theme.selected))
-        .child(label)
+        .child(label);
+    let (bg, hover, text) = (theme.key_background, theme.selected, theme.text);
+    match kind {
+        Kind::Primary => base
+            .h(px(28.))
+            .px(px(14.))
+            .bg(theme.accent)
+            .text_color(theme.on_accent)
+            .hover(|style| style.opacity(0.88)),
+        Kind::Secondary => base
+            .h(px(26.))
+            .px(px(10.))
+            .bg(bg)
+            .text_color(text)
+            .hover(move |style| style.bg(hover)),
+        Kind::Destructive => base
+            .h(px(26.))
+            .px(px(10.))
+            .bg(bg)
+            .text_color(theme.error)
+            .hover(move |style| style.bg(hover)),
+        Kind::Link => base
+            .px(px(4.))
+            .text_color(theme.accent)
+            .hover(|style| style.opacity(0.75)),
+    }
+}
+
+/// An on/off switch, drawn without animation.
+fn switch(on: bool, theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .w(px(30.))
+        .h(px(18.))
+        .p(px(2.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .when(on, |track| track.justify_end().bg(theme.accent))
+        .when(!on, |track| track.justify_start().bg(theme.selected))
+        .child(
+            div()
+                .size(px(14.))
+                .rounded_full()
+                .bg(gpui::white())
+                .shadow_sm(),
+        )
+        .into_any_element()
 }
 
 fn thousands(n: u64) -> String {
