@@ -426,6 +426,23 @@ impl Store {
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     }
 
+    /// Runs SQLite's `quick_check`: `Ok(None)` when the database is
+    /// intact, otherwise the first problem it reports. Reads every page, so
+    /// it costs about as much as reading the file once; run it only when
+    /// there is reason to doubt the file (after an unclean shutdown).
+    pub fn quick_check(&self) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("PRAGMA quick_check")?;
+        let mut rows = stmt.query([])?;
+        let mut first = None;
+        while let Some(row) = rows.next()? {
+            let line: String = row.get(0)?;
+            if line != "ok" && first.is_none() {
+                first = Some(line);
+            }
+        }
+        Ok(first)
+    }
+
     /// Rewrites the database when more than a quarter of it is free pages,
     /// as happens after re-indexing a root with far fewer entries. SQLite
     /// otherwise keeps the space for reuse and never shrinks the file.
@@ -668,6 +685,33 @@ fn path_from_blob(bytes: &[u8]) -> PathBuf {
 
 fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Moves a damaged database at `path`, with its `-wal` and `-shm` files,
+/// into a new `damaged-<unix time>` folder next to it, so a fresh one can be
+/// created without losing the old file. Returns the folder.
+pub fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut target = dir.join(format!("damaged-{stamp}"));
+    let mut n = 1;
+    while target.exists() {
+        n += 1;
+        target = dir.join(format!("damaged-{stamp}-{n}"));
+    }
+    std::fs::create_dir_all(&target)?;
+    let name = path.file_name().unwrap_or_default().to_os_string();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = name.clone();
+        file.push(suffix);
+        let from = dir.join(&file);
+        if from.exists() {
+            std::fs::rename(&from, target.join(&file))?;
+        }
+    }
+    Ok(target)
 }
 
 #[cfg(test)]

@@ -460,3 +460,71 @@ fn migrates_version_2_databases_and_keeps_entries() {
         .unwrap();
     assert_eq!(indexes, 1);
 }
+
+#[test]
+fn quick_check_passes_on_an_intact_store() {
+    let (_dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    assert_eq!(store.quick_check().unwrap(), None);
+}
+
+#[test]
+fn damaged_pages_are_detected() {
+    let (dir, mut store) = temp_store();
+    // Enough rows to span several pages.
+    let mut w = store.replace_root(Path::new("/data/big"), 1, b"").unwrap();
+    for i in 0..5000i64 {
+        let name = format!("file-{i:05}-with-a-longer-name.txt");
+        w.insert(&NewEntry {
+            id: 2 + i,
+            parent_id: 1,
+            kind: EntryKind::File,
+            name: name.as_bytes(),
+            size: Some(i as u64),
+            mtime: Some(1_700_000_000),
+        })
+        .unwrap();
+    }
+    w.commit(ScanSummary {
+        entry_count: 5001,
+        error_count: 0,
+        scan_millis: 1,
+    })
+    .unwrap();
+    store.checkpoint();
+    let path = store.path().to_path_buf();
+    drop(store);
+
+    // Scribble over the middle of the file, as a disk or crash bug might.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let middle = bytes.len() / 2;
+    for b in &mut bytes[middle..middle + 8192] {
+        *b = 0xA5;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+
+    let detected = match Store::open(&path) {
+        Err(StoreError::Corrupt { .. }) => true,
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(store) => store.quick_check().map_or(true, |p| p.is_some()),
+    };
+    assert!(detected);
+    drop(dir);
+}
+
+#[test]
+fn move_aside_keeps_the_database_and_its_journal() {
+    let (dir, mut store) = temp_store();
+    write_tree(&mut store, Path::new("/data/root"), 1);
+    let path = store.path().to_path_buf();
+    drop(store);
+    std::fs::write(dir.path().join("index.db-wal"), b"wal").unwrap();
+
+    let moved = move_aside(&path).unwrap();
+    assert!(!path.exists());
+    assert!(moved.join("index.db").exists());
+    assert!(moved.join("index.db-wal").exists());
+    assert!(moved.starts_with(dir.path()));
+    // A fresh store can be created in its place.
+    assert_eq!(Store::open(&path).unwrap().entry_count().unwrap(), 0);
+}
