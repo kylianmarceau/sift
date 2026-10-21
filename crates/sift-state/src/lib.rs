@@ -9,7 +9,8 @@ mod store;
 use std::path::PathBuf;
 
 pub use config::{
-    ClipboardConfig, CommandAction, Config, CustomCommand, Loaded, Snippet, TEMPLATE, expand_tilde,
+    ClipboardConfig, CommandAction, Config, CustomCommand, Loaded, Snippet, TEMPLATE,
+    UpdatesConfig, expand_tilde,
 };
 pub use store::{ClipEntry, FAVORITE_BOOST, MAX_CLIP_BYTES, MAX_USAGE_ROWS, StateDb};
 

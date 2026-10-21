@@ -26,6 +26,7 @@ use crate::icons::{IconCache, IconKey, icon_for};
 use crate::input::{Changed, SearchInput};
 use crate::speech;
 use crate::theme::{Theme, tile_color};
+use crate::updates::{self, UpdateState};
 use crate::user::{Reload, UserData, expand_placeholders};
 
 actions!(
@@ -136,7 +137,15 @@ pub struct Launcher {
     /// window has focus.
     quick_look: Option<Rc<QuickLook>>,
     message: Option<SharedString>,
+    /// The message is information (an update check), not a problem.
+    message_info: bool,
     theme: Theme,
+    /// What is known about a newer release (see `updates.rs`).
+    update: UpdateState,
+    last_update_check: updates::LastCheck,
+    /// When an automatic check last failed; retried an hour later.
+    update_failed_at: Option<Instant>,
+    update_task: Option<Task<()>>,
     /// VoiceOver was running when the panel was last shown.
     voice_over: bool,
     /// The last summary announced to VoiceOver (see `announce_changes`).
@@ -218,6 +227,15 @@ impl Launcher {
             .or_else(sift_search::default_index_dir)
             .unwrap_or_else(|| PathBuf::from("."));
         let file_index = Arc::new(FileIndex::open(&index_dir));
+        // A newer release seen by an earlier check is shown without asking
+        // the network again.
+        let last_update_check = updates::load(&user_dir());
+        let update = match &last_update_check.latest {
+            Some(latest) if updates::is_newer(latest, updates::CURRENT) => {
+                UpdateState::Available(latest.clone())
+            }
+            _ => UpdateState::Unknown,
+        };
         let files = Arc::new(FileProvider::new(file_index.clone()));
         let (status_tx, mut status_rx) = unbounded::<Status>();
         // After a crash, check the index page by page before using it.
@@ -283,6 +301,11 @@ impl Launcher {
             panel: None,
             quick_look: None,
             message: None,
+            message_info: false,
+            update,
+            last_update_check,
+            update_failed_at: None,
+            update_task: None,
             theme,
             voice_over: false,
             spoken: None,
@@ -293,6 +316,7 @@ impl Launcher {
             _subscriptions: subscriptions,
         };
         if !notices.is_empty() {
+            this.message_info = false;
             this.message = Some(notices.join(" ").into());
         }
         this.rebuild_search();
@@ -352,6 +376,7 @@ impl Launcher {
                     1 => String::new(),
                     n => format!(" (and {} more)", n - 1),
                 };
+                self.message_info = false;
                 self.message = Some(format!("{first}{more}").into());
             }
             self.run_query(self.query.clone(), cx);
@@ -374,6 +399,7 @@ impl Launcher {
             && status.message != self.index_status.message
             && !crate::settings::is_open(cx)
         {
+            self.message_info = false;
             self.message = status.message.clone().map(Into::into);
             self.resize(cx);
         }
@@ -495,6 +521,7 @@ impl Launcher {
         if let Some(service) = &self.service {
             service.send(sift_files::Command::Refresh);
         }
+        self.check_for_updates(false, cx);
         let stale = self
             .catalog_loaded_at
             .is_none_or(|t| t.elapsed().as_secs() >= CATALOG_MAX_AGE_SECS);
@@ -523,6 +550,7 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.message_info = false;
         self.message = Some(error.to_string().into());
         self.show(window, cx);
     }
@@ -930,6 +958,7 @@ impl Launcher {
                     self.input
                         .update(cx, |input, cx| input.set_text("clip ", cx));
                 } else {
+                    self.message_info = false;
                     self.message = Some(
                         "Clipboard history is off. Turn it on in Edit Sift Configuration \
                          ([clipboard] enabled = true)."
@@ -952,12 +981,146 @@ impl Launcher {
                 let launcher = cx.entity();
                 cx.defer(move |cx| crate::settings::open(launcher, cx));
             }
+            commands::CHECK_UPDATES => match &self.update {
+                UpdateState::Available(_) => self.open_release_page(cx),
+                _ => self.check_for_updates(true, cx),
+            },
             commands::QUIT => cx.quit(),
             other => tracing::warn!(command = other, "unknown command"),
         }
     }
 
+    pub fn update_state(&self) -> &UpdateState {
+        &self.update
+    }
+
+    pub fn update_checks_enabled(&self) -> bool {
+        self.user.update_checks_enabled()
+    }
+
+    /// Shows information (not a problem) in place of the results.
+    fn show_info(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        if !self.is_visible() {
+            // Asked from the settings window, which shows the result.
+            return;
+        }
+        self.message = Some(text.into());
+        self.message_info = true;
+        self.resize(cx);
+        cx.notify();
+    }
+
+    pub fn open_release_page(&mut self, cx: &mut Context<Self>) {
+        let failures = crate::launch_failures();
+        let opened = sift_macos::open_url(updates::RELEASES_PAGE, move |error| {
+            let _ = failures.unbounded_send(error);
+        });
+        match opened {
+            Ok(()) => self.hide(cx),
+            Err(error) => self.show_error(error, cx),
+        }
+    }
+
+    /// Asks GitHub for the latest release, in the background. Automatic
+    /// checks (`explicit` false) run only when enabled in the configuration
+    /// and a day after the last one; an explicit check (the command or the
+    /// settings button) always runs and reports its result.
+    pub fn check_for_updates(&mut self, explicit: bool, cx: &mut Context<Self>) {
+        if self.update_task.is_some() {
+            return;
+        }
+        if !explicit {
+            let failed_recently = self
+                .update_failed_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60 * 60));
+            if !self.user.update_checks_enabled()
+                || failed_recently
+                || !updates::due(&self.last_update_check, sift_state::now())
+            {
+                return;
+            }
+        }
+        let previous = std::mem::replace(&mut self.update, UpdateState::Checking);
+        if explicit {
+            self.show_info("Checking for updates…", cx);
+        }
+        let fetch = cx.background_spawn(async { updates::fetch_latest() });
+        self.update_task = Some(cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            this.update(cx, |this, cx| {
+                this.update_task = None;
+                this.finish_update_check(result, previous, explicit, cx);
+            })
+            .ok();
+        }));
+        cx.emit(UpdateStateChanged);
+    }
+
+    fn finish_update_check(
+        &mut self,
+        result: Result<Option<String>, String>,
+        previous: UpdateState,
+        explicit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(latest) => {
+                self.update_failed_at = None;
+                self.last_update_check = updates::LastCheck {
+                    at: sift_state::now(),
+                    latest: latest.clone(),
+                };
+                updates::save(&user_dir(), &self.last_update_check);
+                match latest.filter(|v| updates::is_newer(v, updates::CURRENT)) {
+                    Some(version) => {
+                        tracing::info!(version, "a newer release is available");
+                        if explicit {
+                            self.show_info(
+                                format!(
+                                    "Sift {version} is available. Choose Check for Updates \
+                                     again to open the download page."
+                                ),
+                                cx,
+                            );
+                        }
+                        self.update = UpdateState::Available(version);
+                    }
+                    None => {
+                        tracing::info!("no newer release");
+                        self.update = UpdateState::UpToDate;
+                        if explicit {
+                            self.show_info(
+                                format!("Sift {} is the latest version.", updates::CURRENT),
+                                cx,
+                            );
+                        }
+                    }
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(%reason, "cannot check for updates");
+                self.update_failed_at = Some(Instant::now());
+                if explicit {
+                    if self.is_visible() {
+                        self.message_info = false;
+                        self.message =
+                            Some(format!("Could not check for updates: {reason}").into());
+                        self.resize(cx);
+                    }
+                    self.update = UpdateState::Failed(reason);
+                } else {
+                    // A failed automatic check is not worth a message;
+                    // keep what was known.
+                    self.update = previous;
+                }
+            }
+        }
+        cx.emit(UpdateStateChanged);
+        cx.notify();
+    }
+
     fn show_error(&mut self, error: LaunchError, cx: &mut Context<Self>) {
+        self.message_info = false;
         self.message = Some(error.to_string().into());
         self.resize(cx);
         cx.notify();
@@ -1139,6 +1302,11 @@ impl Launcher {
                 theme.error,
                 "A search folder is unavailable · see Sift Settings".into(),
             )
+        } else if let UpdateState::Available(version) = &self.update {
+            (
+                theme.accent,
+                format!("Sift {version} is available · search “update”").into(),
+            )
         } else {
             // From the service's status, not `FileIndex::len`: that takes
             // the index lock, which a background search holds, and this
@@ -1303,6 +1471,12 @@ fn result_icon(kind: ResultKind, icon: Option<Arc<RenderImage>>) -> AnyElement {
 /// listens).
 pub struct IndexStatusChanged;
 
+/// Emitted when an update check starts or ends (the settings window
+/// listens).
+pub struct UpdateStateChanged;
+
+impl gpui::EventEmitter<UpdateStateChanged> for Launcher {}
+
 impl gpui::EventEmitter<IndexStatusChanged> for Launcher {}
 
 /// Decodes an icon's PNG into the form GPUI draws (BGRA pixels). Doing it
@@ -1393,7 +1567,7 @@ impl Render for Launcher {
             .message
             .clone()
             .or_else(|| self.shows_message().then(|| self.empty_message().into()));
-        let message_color = if self.message.is_some() {
+        let message_color = if self.message.is_some() && !self.message_info {
             theme.error
         } else {
             theme.muted

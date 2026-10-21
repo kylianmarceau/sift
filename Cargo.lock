@@ -4717,6 +4717,7 @@ dependencies = [
  "gpui",
  "raw-window-handle",
  "resvg",
+ "serde_json",
  "sift-apps",
  "sift-calc",
  "sift-core",

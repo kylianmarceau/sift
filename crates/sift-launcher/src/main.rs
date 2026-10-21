@@ -18,6 +18,7 @@ mod shell;
 mod speech;
 mod theme;
 mod uibench;
+mod updates;
 mod user;
 
 use std::sync::OnceLock;

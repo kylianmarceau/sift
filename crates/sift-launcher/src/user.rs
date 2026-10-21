@@ -128,6 +128,11 @@ impl UserData {
         self.config.clipboard.enabled
     }
 
+    /// `[updates] check` in the configuration.
+    pub fn update_checks_enabled(&self) -> bool {
+        self.config.updates.check
+    }
+
     /// Clipboard history entries; empty while the feature is off.
     pub fn clipboard(&self) -> Arc<ClipboardProvider> {
         self.clipboard.clone()

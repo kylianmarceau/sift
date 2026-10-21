@@ -21,6 +21,12 @@ enabled = false
 # How many entries to keep.
 max_items = 200
 
+[updates]
+# Once a day at most, ask GitHub whether a newer Sift has been released,
+# and say so in the launcher. One HTTPS request; nothing is downloaded or
+# installed, and nothing about you is sent. Set to false to never check.
+check = true
+
 # Snippets: search by name (or keyword); Enter copies the text.
 # {date}, {time} and {datetime} are replaced when copied.
 #
@@ -53,6 +59,7 @@ max_items = 200
 #[serde(default)]
 pub struct Config {
     pub clipboard: ClipboardConfig,
+    pub updates: UpdatesConfig,
     pub snippets: Vec<Snippet>,
     pub commands: Vec<CustomCommand>,
 }
@@ -62,6 +69,19 @@ pub struct Config {
 pub struct ClipboardConfig {
     pub enabled: bool,
     pub max_items: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct UpdatesConfig {
+    /// Check for a newer release once a day.
+    pub check: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { check: true }
+    }
 }
 
 impl Default for ClipboardConfig {
@@ -194,6 +214,17 @@ mod tests {
         let loaded = Config::parse(TEMPLATE);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
         assert_eq!(loaded.config, Config::default());
+    }
+
+    #[test]
+    fn update_checks_are_on_unless_turned_off() {
+        assert!(Config::parse("").config.updates.check);
+        assert!(
+            !Config::parse("[updates]\ncheck = false\n")
+                .config
+                .updates
+                .check
+        );
     }
 
     #[test]

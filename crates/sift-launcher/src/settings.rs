@@ -18,8 +18,10 @@ use gpui::{
 use sift_files::{Command, RootState, RootStatus};
 use sift_indexer::IndexOptions;
 
-use crate::launcher::{IndexStatusChanged, Launcher};
+use crate::launcher::{IndexStatusChanged, Launcher, UpdateStateChanged};
 use crate::theme::Theme;
+use crate::updates::UpdateState;
+use sift_macos::login_item::{self, Status as LoginStatus};
 
 actions!(settings, [CloseSettings]);
 
@@ -62,7 +64,7 @@ pub fn open(launcher: Entity<Launcher>, cx: &mut App) {
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(680.), px(540.)),
+            size(px(680.), px(640.)),
             cx,
         ))),
         kind: WindowKind::Normal,
@@ -96,6 +98,9 @@ pub struct Settings {
     picked: UnboundedSender<Picked>,
     message: Option<SharedString>,
     home: Option<PathBuf>,
+    /// Open at Login, read when the window opens or becomes active (it can
+    /// also be changed in System Settings).
+    login: LoginStatus,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -115,16 +120,26 @@ impl Settings {
         .detach();
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
+        let login = login_item::status();
+        tracing::info!(?login, "open at login status");
         Self {
             _subscriptions: vec![
                 cx.subscribe(&launcher, |_, _, _: &IndexStatusChanged, cx| cx.notify()),
+                cx.subscribe(&launcher, |_, _, _: &UpdateStateChanged, cx| cx.notify()),
                 cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+                cx.observe_window_activation(window, |this, window, cx| {
+                    if window.is_window_active() {
+                        this.login = login_item::status();
+                        cx.notify();
+                    }
+                }),
             ],
             launcher,
             focus_handle,
             picked,
             message: None,
             home: std::env::home_dir(),
+            login,
         }
     }
 
@@ -243,6 +258,129 @@ impl Settings {
 
     fn close(&mut self, _: &CloseSettings, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
+    }
+
+    /// Turns Open at Login on or off. Runs after the current update: the
+    /// system may post notifications back into AppKit.
+    fn toggle_login(&mut self, cx: &mut Context<Self>) {
+        let turn_on = matches!(self.login, LoginStatus::Off);
+        cx.spawn(async move |this, cx| {
+            let result = login_item::set(turn_on);
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(status) => {
+                        tracing::info!(?status, "open at login changed");
+                        this.login = status;
+                    }
+                    Err(reason) => {
+                        this.message =
+                            Some(format!("Could not change Open at Login: {reason}").into());
+                        this.login = login_item::status();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_general(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (login_detail, login_on, login_enabled) = match self.login {
+            LoginStatus::On => ("Sift starts when you log in.", true, true),
+            LoginStatus::Off => ("Start Sift when you log in.", false, true),
+            LoginStatus::NeedsApproval => (
+                "Allow Sift in System Settings › General › Login Items.",
+                true,
+                true,
+            ),
+            LoginStatus::Unavailable => ("Available when Sift runs from Sift.app.", false, false),
+        };
+        let update = self.launcher.read(cx).update_state().clone();
+        let current = crate::updates::CURRENT;
+        let (update_detail, update_button) = match &update {
+            UpdateState::Unknown => (format!("Sift {current}"), "Check for Updates"),
+            UpdateState::Checking => (format!("Sift {current} · checking…"), "Check for Updates"),
+            UpdateState::UpToDate => (
+                format!("Sift {current} is the latest version."),
+                "Check for Updates",
+            ),
+            UpdateState::Available(version) => (
+                format!("Sift {version} is available (you have {current})."),
+                "Download…",
+            ),
+            UpdateState::Failed(reason) => (
+                format!("Sift {current} · could not check: {reason}"),
+                "Check for Updates",
+            ),
+        };
+        let checks_on = self.launcher.read(cx).update_checks_enabled();
+        let update_detail = if checks_on || matches!(update, UpdateState::Available(_)) {
+            update_detail
+        } else {
+            format!("{update_detail} Automatic checks are off ([updates] in the configuration).")
+        };
+        let row = |title: &'static str, detail: SharedString| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .gap(px(2.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .child(detail),
+                )
+        };
+        let login_switch = div()
+            .id("open-at-login")
+            .flex_none()
+            .when(login_enabled, |s| {
+                s.cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)))
+            })
+            .when(!login_enabled, |s| s.opacity(0.45))
+            .child(switch(login_on, theme));
+        let launcher = self.launcher.clone();
+        let check = button("check-updates", update_button, Kind::Secondary, theme).on_click(
+            cx.listener(move |_, _, _, cx| {
+                launcher.update(cx, |launcher, cx| match launcher.update_state() {
+                    UpdateState::Available(_) => launcher.open_release_page(cx),
+                    _ => launcher.check_for_updates(true, cx),
+                });
+            }),
+        );
+        let hairline = || div().h(px(1.)).bg(theme.divider);
+        div()
+            .p(px(14.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.divider)
+            .bg(theme.card)
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(row("Open at Login", login_detail.into()))
+                    .child(login_switch),
+            )
+            .child(hairline())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(row("Updates", update_detail.into()))
+                    .child(check),
+            )
+            .into_any_element()
     }
 
     fn render_root(
@@ -529,6 +667,21 @@ impl Render for Settings {
                          with changes as they happen. Only names, sizes and dates are stored, \
                          on this Mac; file contents are never read.",
                     )),
+            )
+            .child(
+                div()
+                    .px(px(PAGE_INSET))
+                    .pb(px(8.))
+                    .text_size(px(11.))
+                    .text_color(theme.placeholder)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("General"),
+            )
+            .child(
+                div()
+                    .px(px(PAGE_INSET))
+                    .pb(px(18.))
+                    .child(self.render_general(&theme, cx)),
             )
             .child(
                 div()

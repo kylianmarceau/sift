@@ -29,6 +29,8 @@ futures.workspace = true
 global-hotkey.workspace = true
 gpui.workspace = true
 raw-window-handle.workspace = true
+# Reads the release reply in updates.rs; already in the tree through GPUI.
+serde_json = "1.0.154"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

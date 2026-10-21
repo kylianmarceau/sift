@@ -8,9 +8,17 @@ pub const EDIT_CONFIG: &str = "edit-config";
 pub const CLIPBOARD: &str = "clipboard";
 pub const CLEAR_CLIPBOARD: &str = "clear-clipboard";
 pub const QUIT: &str = "quit";
+pub const CHECK_UPDATES: &str = "check-updates";
 
 /// Every built-in command id (stored recents may only name these).
-pub const ALL: &[&str] = &[SETTINGS, EDIT_CONFIG, CLIPBOARD, CLEAR_CLIPBOARD, QUIT];
+pub const ALL: &[&str] = &[
+    SETTINGS,
+    EDIT_CONFIG,
+    CLIPBOARD,
+    CLEAR_CLIPBOARD,
+    CHECK_UPDATES,
+    QUIT,
+];
 
 struct Spec {
     id: &'static str,
@@ -44,6 +52,12 @@ const COMMANDS: &[Spec] = &[
         title: "Clear Clipboard History",
         subtitle: "Delete every entry Sift has kept",
         aliases: &["delete clipboard history"],
+    },
+    Spec {
+        id: CHECK_UPDATES,
+        title: "Check for Updates",
+        subtitle: "See whether a newer Sift has been released",
+        aliases: &["update", "upgrade", "new version", "about sift", "version"],
     },
     Spec {
         id: QUIT,
