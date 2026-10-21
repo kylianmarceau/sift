@@ -91,7 +91,9 @@ Changes apply the next time the panel opens.
 search what you copied. Text that password managers mark as concealed is
 never kept. *Clear Clipboard History* deletes everything kept.
 
-Sift has no Dock icon and needs no Accessibility permission.
+Sift has no Dock icon and needs no Accessibility permission. It follows
+the system's light or dark appearance and your accent colour (System
+Settings › Appearance).
 
 **VoiceOver:** while VoiceOver runs, Sift speaks the highlighted result
 when it moves ("report.pdf, file, in Documents, 2 of 8"). It also speaks
@@ -147,7 +149,9 @@ SIFT_FUZZ_SEED=7 SIFT_FUZZ_OPS=3000 cargo test --release -p sift-files --test se
 
 `scripts/ui-bench.sh` needs the 100k-file tree from `scripts/bench.sh`. It
 opens the panel on screen while it types, using its own config, index and
-log directories.
+log directories. To compare two builds, keep a copy of the older
+`target/release/sift-launcher` and run it with
+`LAUNCHER=/path/to/copy scripts/ui-bench.sh 5`.
 
 Design notes are in [ARCHITECTURE.md](ARCHITECTURE.md), the roadmap is in
 [PLAN.md](PLAN.md), and measurements are in [BENCHMARKS.md](BENCHMARKS.md).

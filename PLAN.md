@@ -231,6 +231,26 @@ Moved to later:
   will be opt-in, and I will ask first), and a settings page for
   `config.toml` options.
 
+## UI redesign ✅ built, visual check pending
+
+- [x] Launcher: an aligned icon and text grid, a section label with the
+      position, single-line rows (title, folder and kind), coloured tiles
+      for commands, calculator, snippets and clipboard, and a footer
+      action bar with key caps and a status dot
+- [x] Settings: folder cards, status dots, a switch for dependency
+      folders, and primary, secondary and destructive buttons
+- [x] Shared colour tokens for light and dark at normal and increased
+      contrast, with the system accent colour and WCAG contrast tested
+- [x] Measured against the previous UI in alternation: no latency, idle
+      or memory regression (BENCHMARKS.md). That check caught and fixed a
+      per-frame index-lock wait in the new footer
+
+Still open: **a visual check by you.** GPUI cannot capture its own frames,
+and screen capture needs a permission Sift does not ask for. The design
+was checked with a browser mockup using the same sizes and colours, but
+not on screen. Please look at both themes, Increase Contrast, a long
+file name, an error message, and the settings window.
+
 ## Phase 5: packaging and release
 
 `.app` bundle, signing, notarization, updates, documentation, Apple

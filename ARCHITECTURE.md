@@ -241,8 +241,10 @@ can still become key, joins every Space and appears over full-screen apps.
   about 28% down;
 - resizes it to fit the results, keeping the top edge fixed.
 
-The panel is 720 pt wide. Its height is search field + up to 8 rows +
-footer, so it grows and shrinks as you type.
+The panel is 720 pt wide. Its height is search field + a section label
+and up to 8 rows + footer, so it grows and shrinks as you type
+(`window_height`, which must match the layout in `render`; see "Visual
+design").
 
 Resizes are never made from inside a GPUI update. AppKit reports a
 resize back to GPUI synchronously, and GPUI drops that report while its
@@ -715,6 +717,69 @@ instead, with no extra permission:
 These AppKit calls are made on the main thread only; elsewhere they return
 defaults. Calling them from test threads crashed the test binary about
 once in 130 runs.
+
+## Visual design
+
+The launcher and the settings window share one set of colour tokens
+(`theme.rs`) and one layout grid. The aim is a calm, native-feeling panel
+that costs nothing extra to draw.
+
+**Layout (launcher, in points).**
+
+| part | size |
+|------|------|
+| search field | 56 high; 19 pt text |
+| section label ("Results", "Favorites and Recents", "Clipboard History") and "n of m" | 26 high; 11 pt |
+| result rows | 42 high, inset 8 from the window edge, 8 pt corner radius; 28 pt icons |
+| message (no results, errors) | 56 high, centred, at most two lines |
+| footer | 38 high, on its own surface colour |
+| hairlines | 1 pt |
+
+The search icon, section labels and result icons share a left edge (18
+pt). The search icon is centred over the 28 pt icon column, so the typed
+text and the result titles start at the same x.
+
+- **Rows.** A medium-weight title, then the folder or detail on the same
+  line in secondary text. The detail truncates first, and the title
+  never takes more than three quarters of the line. The kind (and a ★
+  for favorites) sits at the right in tertiary text.
+- **Icons.** Results without a file get a coloured tile with a white
+  symbol: commands grey ⌘, calculator orange =, snippets purple ¶,
+  clipboard teal (an SVG). The tile colours match in light and dark, like
+  app icons.
+- **Footer.** The status is on the left, with a dot: green when the index
+  is up to date, the accent colour while loading or indexing, red if a
+  folder is unavailable. The main action for the selection (Open, Run or
+  Copy) is on the right in primary text with its key cap. After a
+  separator come the other shortcuts in secondary text.
+
+**Colour.** Tokens are `background`, `surface` (footer), `card`
+(settings), `divider`, three text levels (`text`, `muted`,
+`placeholder`), `selected`, `hover`, `accent` and `on_accent`, key caps,
+and `error`, `success` and `favorite`. Each exists for light and dark at
+normal and increased contrast. The accent follows System Settings ›
+Appearance (`sift_macos::a11y::accent_color`, read with the theme when
+the panel opens). A test checks WCAG contrast for every text level on
+every surface: 7:1 for primary text, 4.5:1 for secondary, 3:1 for
+tertiary and for text on the accent.
+
+**Settings window.** Each folder is a card with a folder tile, the path
+and its details, and a status dot. Below a hairline come the "Skip
+dependency and cache folders" switch and the folder's buttons
+(secondary, plus a red Remove). The footer holds the index facts and
+the one primary button, Add Folder…. A damaged-index or picker message
+appears as a tinted banner above it.
+
+**What it costs.** Surfaces are opaque, with no blur, transparency,
+shadows on the panel's content, or animation, so a frame is drawn only
+when something changes. The symbols are three small SVGs compiled into
+the binary (`assets.rs`). GPUI rasterises each once per size into its
+texture atlas. Text levels and weights use the system font, which GPUI
+already loads. Nothing drawn per frame may take the file index lock, which
+a background search holds for its whole run. The footer's file count
+therefore comes from the service status, not `FileIndex::len`, after a
+first version that read it every frame raised p95 latency by 1.7 ms.
+Measurements before and after are in BENCHMARKS.md.
 
 ## What is deliberately deferred
 

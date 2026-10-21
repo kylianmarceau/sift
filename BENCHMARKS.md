@@ -572,3 +572,69 @@ VoiceOver off, the launcher does nothing else for accessibility.
   `SIFT_ANNOUNCE=1` and the debug log (see README). VoiceOver itself
   needs a person.
 - Cold-cache indexing (needs `sudo purge`).
+
+## 2026-10-21 — UI redesign (launcher and settings)
+
+Same machine. The previous UI (`e8e4b6b`) and the redesign (`1ef3ae9`)
+were built in release mode and run **in alternation**, so background load
+(WindowServer and other apps at about 40% CPU each during these runs)
+affected both. Each typing run is `scripts/ui-bench.sh 5`: 5 rounds,
+295 keystrokes, with the 100k-file index plus the installed
+applications. The table below uses only runs that completed all 295
+keystrokes.
+
+### Before the fix: a regression the comparison caught
+
+The first version of the new footer read the file count with
+`FileIndex::len` on every frame. That takes the index lock, which a
+background search holds for the whole search. So a frame drawn while a
+search ran waited for it, and the results waited behind the frame. In
+complete alternating pairs, the median was unchanged (+0.06 to
++0.10 ms), but **p95 keystroke-to-frame rose from 6.55 to 8.21–8.30 ms**
+and run CPU time rose 2–3%. The footer now sums the per-folder counts
+from the service status (no lock).
+
+### After the fix (three alternating pairs)
+
+| | previous UI | redesign |
+|---|---:|---:|
+| keystroke to frame, median (per run) | 2.97, 2.82, 3.16 ms | 2.99, 3.12, 3.12 ms |
+| keystroke to frame, p95 (per run) | 6.32, 6.95, 7.20 ms | 6.21, 6.89, 6.37 ms |
+| results to frame (drawing), p95 | 1.71–1.79 ms | 1.68–1.82 ms |
+| show to first frame, median | 5.16–6.74 ms | 4.95–5.96 ms |
+| CPU time, launch to end of run | 4.24–4.37 s | 4.25–4.45 s |
+| footprint after the run | 30–32 MB | 30–33 MB |
+| idle CPU after the run, 30 s hidden | 0 s | 0 s |
+
+Hidden start, 10 s settle, then 30 s idle (three alternating pairs):
+
+| | previous UI | redesign |
+|---|---:|---:|
+| footprint | 19, 19, 17 MB | 19, 19, 17 MB |
+| context switches in 30 s | 31, 26, 35 | 26, 26, 25 |
+
+**Result:**
+- **Responsiveness:** no regression. The redesign's p95 was at or below
+  the previous UI's in every pair, and its medians are within run-to-run
+  noise (−0.04 to +0.30 ms per pair).
+- **Memory:** identical after a hidden start, and within 1 MB after use
+  (the budget was 5 MB). The three SVG symbols are rasterised once into
+  GPUI's atlas.
+- **Idle cost:** unchanged.
+
+These absolute numbers are higher than the Phase 4 table (2.6 ms median
+there). That is because of the background load during these runs; only
+the alternating comparison is meaningful here.
+
+**Benchmark fixes found on the way.**
+
+- **Rescans during typing.** The bench's source index was built by the
+  `sift` CLI, which records no file-system event position. So the
+  launcher rescanned all 100k files at the start of every run, sometimes
+  while typing. That made runs noisy and dropped keystrokes.
+  `ui-bench.sh` now lets the launcher record a position in the source
+  once.
+- **Lost focus.** Another app taking focus hid the panel mid-run, which
+  cut the measurement short. The bench now keeps the panel open.
+- **Comparing builds.** `LAUNCHER=` runs a saved binary for comparisons
+  like this one.
