@@ -246,7 +246,11 @@ as GPUI's own `Window::resize` does. With `SIFT_LOG=debug` every
 viewport change is logged, so a mismatch is easy to spot.
 
 **Show and hide.** Showing is `makeKeyAndOrderFront` on the existing
-window, and hiding is `orderOut`. Nothing is rebuilt, so the process,
+window, and hiding is `orderOut`. GPUI pauses its display link while the
+window is hidden and restarts it only when AppKit later reports the window
+visible (about 45 ms after showing). So after ordering the panel in, the
+launcher asks the view's layer to display, which makes GPUI draw the
+first frame immediately (`Panel::draw_now`). Nothing is rebuilt, so the process,
 GPUI's text and image caches and the app catalog stay warm. The panel
 hides on Escape, on Cmd-W, when it loses key status (a click elsewhere),
 and when Option+Space is pressed while it is visible. Hiding clears the

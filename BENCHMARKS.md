@@ -225,16 +225,39 @@ icons.
 | `xyzzy` (miss)    | 1.7 µs | 2.5 µs  | — |
 | `act mon`         | 2.0 µs | 3.2 µs  | Activity Monitor |
 
+### Hotkey to first frame
+
+**Real hotkey, before the fix** (`scripts/measure-hotkey.sh`, commit
+`5b72241`, 20 presses by hand): min 11.70 ms, **median 48.22 ms**, p90
+52.38 ms, max 75.44 ms. At that commit the clock stopped when GPUI
+started the frame (an `on_next_frame` callback).
+
+**Cause.** GPUI stops its display link while the window is hidden, and
+starts it again only when AppKit reports the window visible. That report
+is asynchronous and arrived about 45 ms after the panel was shown. The
+fix (`Panel::draw_now`) asks the view's layer to display right after
+showing, so GPUI draws immediately.
+
+**Show path, before and after the fix.** A temporary probe, removed
+afterwards, called the same `toggle` the hotkey uses every 300 ms, with
+10 shows per run. The clock stops inside the first `render`. This
+excludes the delivery of the key event itself (Carbon event to GPUI task,
+well under a millisecond).
+
+| build | min | median | max |
+|-------|----:|-------:|----:|
+| without `draw_now` | 47.94 ms | 48.53 ms | 58.26 ms |
+| with `draw_now`    | 4.26 ms  | 5.30 ms  | 12.42 ms |
+
+Layout, paint and GPU presentation follow `render`. The frame reaches the
+display at the next screen refresh, up to one refresh interval later.
+
+**Real hotkey, after the fix:** to be recorded with
+`scripts/measure-hotkey.sh`.
+
 ### Not measured yet
 
-- **Hotkey to visible.** The launcher logs `hotkey to first frame` with
-  the latency on every Option+Space press. `scripts/measure-hotkey.sh`
-  collects 20 samples from real key presses and prints min / median /
-  p90 / max. It needs someone at the keyboard with the screen unlocked:
-  synthetic key events need Accessibility permission, and macOS draws no
-  frames while the display sleeps. Both blocked a measurement in this
-  session.
-- **Keystroke to rendered results** (search plus layout plus paint), and
+- Keystroke to rendered results (search plus layout plus paint), and
   memory after long use with many queries.
 
 ### Against the Phase 1 targets
@@ -242,6 +265,6 @@ icons.
 | target | status |
 |--------|--------|
 | Idle memory < 50 MB | **Met:** 26 MB footprint idle, 34 MB peak. |
-| Hotkey to visible < 50 ms | **Not yet measured** (see above). Showing the panel reuses an existing window, with no process start or window creation. |
+| Hotkey to visible < 50 ms | **Show path met:** 5.3 ms median to the first render, after the display-link fix. Before the fix, a real-hotkey run gave a 48.2 ms median. A real-hotkey run after the fix is pending. |
 | Search < 20 ms | **Met** for the app provider: ≤ 11 µs p99. Rendering time was not measured separately. |
 | Idle CPU ≈ 0 | **Met:** no CPU time used in 60 s idle. |
