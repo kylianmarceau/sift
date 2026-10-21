@@ -25,6 +25,11 @@ memchr = "2.8"
 memmap2 = "0.9.11"
 nucleo-matcher = "0.3.1"
 plist = { version = "1.10", default-features = false }
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+block2 = "0.6.2"
+raw-window-handle = "0.6.2"
 rayon = "1.12"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3.27"
