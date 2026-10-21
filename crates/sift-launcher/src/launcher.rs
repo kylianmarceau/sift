@@ -178,7 +178,9 @@ impl Launcher {
             // Clicking another app (the panel resigning key) dismisses
             // sift, like Spotlight.
             cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() || !this.is_visible() {
+                // The UI benchmark keeps the panel open: another app taking
+                // focus mid-run would otherwise end the measurement.
+                if window.is_window_active() || !this.is_visible() || this.bench.is_some() {
                     return;
                 }
                 if this.quick_look.as_ref().is_some_and(|q| q.is_visible()) {
@@ -992,11 +994,9 @@ impl Launcher {
         let theme = self.theme;
         let item = &self.results[index];
         let selected = self.selection.index() == Some(index);
-        let title = SharedString::from(item.title.to_string());
-        let subtitle = item
-            .subtitle
-            .as_ref()
-            .map(|s| SharedString::from(s.to_string()));
+        // Shares the result's strings rather than copying them every frame.
+        let title = SharedString::new(item.title.clone());
+        let subtitle = item.subtitle.clone().map(SharedString::new);
         let favorite = self.user.is_favorite(&item.id);
         let kind = item.kind;
         let item = item.clone();
@@ -1135,12 +1135,16 @@ impl Launcher {
                 "A search folder is unavailable · see Sift Settings".into(),
             )
         } else {
+            // From the service's status, not `FileIndex::len`: that takes
+            // the index lock, which a background search holds, and this
+            // runs on every frame.
+            let files: u64 = roots.iter().map(|r| r.entries).sum();
             (
                 theme.success,
                 format!(
                     "{} apps · {} files and folders",
                     self.app_count,
-                    thousands(self.file_index.len())
+                    thousands(files as usize)
                 )
                 .into(),
             )
