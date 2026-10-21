@@ -382,3 +382,24 @@ fn whole_words_and_own_files_rank_first_within_a_tier() {
         ]
     );
 }
+
+#[test]
+fn temporary_snapshots_left_by_a_killed_writer_are_removed() {
+    let f = Fixture::new(&["a.txt"]);
+    let stale = f.index_dir.join("names.tmp-99999");
+    let fresh = f.index_dir.join("names.tmp-99998");
+    fs::write(&stale, b"partial").expect("write");
+    fs::write(&fresh, b"partial").expect("write");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .and_then(|file| file.set_modified(old))
+        .expect("age");
+    // A new generation makes opening rebuild the snapshot.
+    f.reindex();
+    drop(f.open());
+    assert!(!stale.exists(), "a stale temporary file was left");
+    // A recent one may belong to another process that is still writing.
+    assert!(fresh.exists());
+}

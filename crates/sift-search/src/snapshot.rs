@@ -366,6 +366,7 @@ pub fn build(store: &Store, path: &Path) -> Result<BuildStats, SnapshotError> {
             reason: "snapshot too large",
         })?;
 
+    remove_stale_temp_files(path);
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         let mut out = BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
@@ -406,4 +407,34 @@ pub fn build(store: &Store, path: &Path) -> Result<BuildStats, SnapshotError> {
         bytes: total as u64,
         generation,
     })
+}
+
+/// Temporary snapshot files older than this were left by a process that
+/// was killed while writing; a write takes seconds even at a million
+/// entries, so a younger one may belong to another running process.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Removes `<snapshot>.tmp-<pid>` files left behind by a killed writer.
+fn remove_stale_temp_files(path: &Path) {
+    let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) else {
+        return;
+    };
+    let prefix = format!("{}.tmp-", stem.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_TEMP_AGE);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            tracing::info!(file = %entry.path().display(), "removed a stale temporary snapshot");
+        }
+    }
 }
