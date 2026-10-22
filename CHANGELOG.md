@@ -3,7 +3,7 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-22)
 
 The first release. Apple Silicon, macOS 13 or later.
 
