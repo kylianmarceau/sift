@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="776" height="378" viewBox="-8 -8 776 378" role="img" aria-labelledby="t d" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'>
+<title id="t">Sift performance compared with Spotlight and Raycast</title>
+<desc id="d">Sift compared with Spotlight and Raycast. File search median: Sift 5 ms, Spotlight (used by Raycast) 65 ms. Memory: Sift 54 MB, Raycast 240 MB. App size: Sift 13 MB, Raycast 242 MB.</desc>
+<text x="0" y="20" font-size="15" font-weight="600" fill="#f0efec">File search<tspan font-weight="400" fill="#9a9890" font-size="13" dx="6">— median time, ms, lower is better</tspan></text>
+<text x="760" y="20" font-size="13" font-weight="600" text-anchor="end" fill="#c3c2b7">Sift: 13× faster</text>
+<text x="0" y="47.5" font-size="13" font-weight="600" fill="#f0efec">Sift</text>
+<rect x="170" y="34" width="470" height="18" rx="4" fill="#1f242b"/>
+<path d="M170,34 H202.2095531587057 Q206.2095531587057,34 206.2095531587057,38 V48 Q206.2095531587057,52 202.2095531587057,52 H170 Z" fill="#3987e5"/>
+<text x="652" y="47.5" font-size="13" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">5 ms</text>
+<text x="0" y="77.5" font-size="13" font-weight="400" fill="#f0efec">Spotlight / Raycast</text>
+<rect x="170" y="64" width="470" height="18" rx="4" fill="#1f242b"/>
+<path d="M170,64 H636.0 Q640.0,64 640.0,68 V78 Q640.0,82 636.0,82 H170 Z" fill="#76756f"/>
+<text x="652" y="77.5" font-size="13" font-weight="400" fill="#f0efec" style="font-variant-numeric: tabular-nums">65 ms</text>
+<text x="0" y="128" font-size="15" font-weight="600" fill="#f0efec">Memory in use<tspan font-weight="400" fill="#9a9890" font-size="13" dx="6">— physical footprint, MB, lower is better</tspan></text>
+<text x="760" y="128" font-size="13" font-weight="600" text-anchor="end" fill="#c3c2b7">Sift: 4.4× less</text>
+<text x="0" y="155.5" font-size="13" font-weight="600" fill="#f0efec">Sift</text>
+<rect x="170" y="142" width="470" height="18" rx="4" fill="#1f242b"/>
+<path d="M170,142 H271.75 Q275.75,142 275.75,146 V156 Q275.75,160 271.75,160 H170 Z" fill="#3987e5"/>
+<text x="652" y="155.5" font-size="13" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">54 MB</text>
+<text x="0" y="185.5" font-size="13" font-weight="400" fill="#f0efec">Raycast</text>
+<rect x="170" y="172" width="470" height="18" rx="4" fill="#1f242b"/>
+<path d="M170,172 H636.0 Q640.0,172 640.0,176 V186 Q640.0,190 636.0,190 H170 Z" fill="#76756f"/>
+<text x="652" y="185.5" font-size="13" font-weight="400" fill="#f0efec" style="font-variant-numeric: tabular-nums">240 MB</text>
+<text x="0" y="236" font-size="15" font-weight="600" fill="#f0efec">App size<tspan font-weight="400" fill="#9a9890" font-size="13" dx="6">— on disk, MB, lower is better</tspan></text>
+<text x="760" y="236" font-size="13" font-weight="600" text-anchor="end" fill="#c3c2b7">Sift: 19× smaller</text>
+<text x="0" y="263.5" font-size="13" font-weight="600" fill="#f0efec">Sift</text>
+<rect x="170" y="250" width="470" height="18" rx="4" fill="#1f242b"/>
+<path d="M170,250 H191.2479338842975 Q195.2479338842975,250 195.2479338842975,254 V264 Q195.2479338842975,268 191.2479338842975,268 H170 Z" fill="#3987e5"/>
+<text x="652" y="263.5" font-size="13" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">13 MB</text>
+<text x="0" y="293.5" font-size="13" font-weight="400" fill="#f0efec">Raycast</text>
+<rect x="170" y="280" width="470" height="18" rx="4" fill="#1f242b"/>
+<path d="M170,280 H636.0 Q640.0,280 640.0,284 V294 Q640.0,298 636.0,298 H170 Z" fill="#76756f"/>
+<text x="652" y="293.5" font-size="13" font-weight="400" fill="#f0efec" style="font-variant-numeric: tabular-nums">242 MB</text>
+<text x="0" y="332" font-size="12" fill="#9a9890">Apple M2, macOS 27 · Sift 0.1.0, Raycast 2.8.2 · measured 2026-10-22.</text>
+<text x="0" y="349" font-size="12" fill="#9a9890">Raycast’s file search runs on Spotlight. Method and caveats: BENCHMARKS.md.</text>
+</svg>

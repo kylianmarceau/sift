@@ -13,6 +13,18 @@ also a command-line indexer and search tool, `sift`.
 the first release. See [PLAN.md](PLAN.md) for the roadmap and
 [CHANGELOG.md](CHANGELOG.md) for what is in each release.
 
+## Performance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-dark.svg">
+  <img src="docs/benchmarks-light.svg" width="776" alt="Bar charts comparing Sift with Spotlight and Raycast. File search median time: Sift 5 ms, Spotlight (which Raycast's file search uses) 65 ms. Memory in use: Sift 54 MB, Raycast 240 MB. App size on disk: Sift 13 MB, Raycast 242 MB.">
+</picture>
+
+Measured side by side on an Apple M2. File search times are for five
+queries over a 54,000-file `~/Documents`, against `mdfind`, the Spotlight
+search that Raycast's file search is built on. See
+[BENCHMARKS.md](BENCHMARKS.md) for the method and caveats.
+
 ## Install
 
 Sift needs **macOS 13 (Ventura) or later on an Apple Silicon Mac**.
