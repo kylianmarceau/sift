@@ -9,8 +9,9 @@ you type, with a calculator, snippets, custom commands and an optional
 clipboard history. The file index updates itself as files change. There is
 also a command-line indexer and search tool, `sift`.
 
-**Status:** 0.1.0, the first release candidate. See [PLAN.md](PLAN.md) for
-the roadmap and [CHANGELOG.md](CHANGELOG.md) for what is in each release.
+**Status:** [0.1.0](https://github.com/kylianmarceau/sift/releases/tag/v0.1.0),
+the first release. See [PLAN.md](PLAN.md) for the roadmap and
+[CHANGELOG.md](CHANGELOG.md) for what is in each release.
 
 ## Install
 

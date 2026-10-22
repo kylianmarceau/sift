@@ -250,7 +250,7 @@ was checked with a browser mockup using the same sizes and colours, but
 not on screen. Please look at both themes, Increase Contrast, a long
 file name, an error message, and the settings window.
 
-## Phase 5: packaging and release ✅ built, release not yet published
+## Phase 5: packaging and release ✅ 0.1.0 published (2026-10-22)
 
 Decisions: MIT licence; updates are checked and reported, never
 installed; Apple Silicon only; Open at Login off by default.
@@ -270,6 +270,11 @@ installed; Apple Silicon only; Open at Login off by default.
       and Settings, with `[updates] check = false` to turn it off
 - [x] Install, privacy, uninstall, contributing, security, changelog and
       release documentation
+- [x] 0.1.0 released on GitHub (ad-hoc signed `.dmg`, `.zip`,
+      `SHA256SUMS`), repository made public, private vulnerability
+      reporting turned on. Checked after publishing: the public downloads
+      match their checksums and unpack to a validly signed app, and the
+      app's update check reads 0.1.0 from the live API
 
 Not yet done, and needing you:
 
@@ -279,16 +284,17 @@ Not yet done, and needing you:
   out and in, then turn it off again.
 - **Folder access again.** The new bundle id makes macOS see Sift as a
   new app, so it asks again for Documents, Desktop or Downloads.
+- **First launch from the download.** The Gatekeeper prompt and Open
+  Anyway only appear for a file downloaded by a browser (which marks it
+  as quarantined), so that path is untested here. Please download the
+  `.dmg` from the release page and install it once.
 - **Signing and notarization** need your Apple Developer ID and a
   notarytool keychain profile (RELEASING.md). Without them, releases are
   ad-hoc signed and users click Open Anyway once.
-- **Publishing.** Tagging v0.1.0, creating the GitHub release, and making
-  the repository public (the update check cannot see releases of a
-  private repository).
-- **CI** (GitHub Actions on macOS) is not set up. On a private
-  repository it uses paid runner minutes.
+- **CI** (GitHub Actions on macOS) is not set up. It is free now that
+  the repository is public.
 
 ## Open questions for you
 
-- When to make the repository public and publish 0.1.0.
-- Whether to set up CI once the repository is public (free there).
+- Whether to set up CI (fmt, Clippy and tests on each push).
+- Whether to get a Developer ID so releases are notarized.
