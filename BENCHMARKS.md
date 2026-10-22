@@ -638,3 +638,84 @@ the alternating comparison is meaningful here.
   cut the measurement short. The bench now keeps the panel open.
 - **Comparing builds.** `LAUNCHER=` runs a saved binary for comparisons
   like this one.
+
+## 2026-10-22 — Sift compared with Raycast
+
+**Machine:** the Apple M2 above, macOS 27.0.1. **Sift:** 0.1.0, release
+build from `target/release/Sift.app`. **Raycast:** 2.8.2. Both apps were
+already running with their usual settings, and both were measured at the
+same time under the same background load.
+
+### Memory
+
+Physical footprint from `footprint <pid>`, the number Activity Monitor
+shows in its "Memory" column. Raycast runs three processes; all three
+are counted.
+
+| process | Sift | Raycast |
+|---------|-----:|--------:|
+| main app | 54 MB (peak 55 MB) | 64 MB (peak 66 MB) |
+| extension backend (`node`) | — | 168 MB (peak 200 MB) |
+| clipboard helper (XPC) | — | 8 MB |
+| **total** | **54 MB** | **240 MB** |
+| app bundle on disk (`du -sh`) | 13 MB | 242 MB |
+
+Sift's 54 MB is higher than the 26 MB idle figure in the Phase 1 table
+because the panel had been used. `footprint` breaks it down as 25 MB of
+heap (app icons, catalog, file index state), 13 MB of IOSurface and
+8 MB of graphics memory. The last two are GPU frame buffers that stay
+allocated after the panel has been shown once.
+
+### Idle CPU
+
+CPU time from `ps -o cputime`, with both apps idle and their panels
+hidden.
+
+| window | Sift | Raycast (all processes) |
+|--------|-----:|------------------------:|
+| 60 s sample | 0.03 s | 0.15 s |
+| average since launch | ~1 s per hour | ~5 s per hour |
+
+Both are negligible.
+
+### File search
+
+Raycast's file search is built on Spotlight, so `mdfind` stands in for
+its search backend. Both commands searched `~/Documents` (Sift's index:
+54,492 entries, 2.0 MiB snapshot). Each query ran 15 times; the clock
+covers the whole process, start to exit, so both include process
+start-up.
+
+```bash
+sift search --paths-only -n 20 <query>
+mdfind -onlyin ~/Documents -name <query>
+```
+
+| query | Sift median | Sift max | Sift hits | `mdfind` median | `mdfind` max | `mdfind` hits |
+|-------|-----:|-----:|----:|------:|------:|-----:|
+| `report`  | 5.2 ms | 6.1 ms | 20 | 60.2 ms | 61.3 ms | 149 |
+| `readme`  | 4.9 ms | 5.4 ms | 20 | 74.1 ms | 84.5 ms | 1,244 |
+| `package` | 5.0 ms | 5.4 ms | 20 | 79.7 ms | 86.2 ms | 1,584 |
+| `main`    | 4.9 ms | 5.4 ms | 20 | 64.9 ms | 65.9 ms | 413 |
+| `prjrpt`  | 5.1 ms | 5.7 ms | 20 | 54.5 ms | 57.8 ms | 0 |
+
+Sift was 11–16× faster. Inside the process, the search itself took about
+1 ms (`sift search --stats report`: open 0.66 ms, search 1.12 ms,
+resolve 0.34 ms).
+
+### Caveats
+
+- **Uneven uptime.** Raycast had been running for 37 hours and Sift for
+  73 minutes. Raycast's backend may grow over time, so a fresh start
+  could show less.
+- **Different result sets.** `mdfind` returns every match, unranked;
+  Sift returns the top 20, ranked. Spotlight has no approximate
+  matching, so `prjrpt` found nothing.
+- **Backend only.** The `mdfind` timings leave out Raycast's own UI and
+  ranking on top of Spotlight. Raycast's application search keeps its
+  catalog in memory and was not measured.
+- **Not measured.** Hotkey-to-visible latency for Raycast: timing it the
+  way `scripts/measure-hotkey.sh` times Sift needs Accessibility
+  permission to send the hotkey, which the measuring shell did not have.
+  Startup time for Raycast: measuring it would have meant quitting the
+  running copy.
