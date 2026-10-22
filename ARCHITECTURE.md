@@ -263,15 +263,16 @@ launcher asks the view's layer to display, which makes GPUI draw the
 first frame immediately (`Panel::draw_now`). Nothing is rebuilt, so the process,
 GPUI's text and image caches and the app catalog stay warm. The panel
 hides on Escape, on Cmd-W, when it loses key status (a click elsewhere),
-and when Option+Space is pressed while it is visible. Hiding clears the
+and when the shortcut is pressed while it is visible. Hiding clears the
 query. Cmd-Q quits.
 
-**Hotkey.** Option+Space is registered with the `global-hotkey` crate,
-which uses Carbon's `RegisterEventHotKey`. That API needs no
-Accessibility or Input Monitoring permission. The press is time-stamped
-in the event handler and sent through a channel to a GPUI task.
-`on_next_frame` then logs the time from key press to the first painted
-frame.
+**Hotkey.** The shortcut (Option+Space unless changed) is registered with
+the `global-hotkey` crate, which uses Carbon's `RegisterEventHotKey`.
+That API needs no Accessibility or Input Monitoring permission. The press
+is time-stamped in the event handler and sent through a channel to a GPUI
+task. `on_next_frame` then logs the time from key press to the first
+painted frame. Changing the shortcut is described under "Keyboard
+shortcut" below.
 
 **Text input.** `SearchInput` implements GPUI's `EntityInputHandler`, so
 the panel goes through the macOS text system. Dead keys and input methods
@@ -888,11 +889,60 @@ and no signing key whose loss could push code to every user.
   is available") and in Settings › General. A check runs on a background
   thread and costs nothing while idle.
 
+## Keyboard shortcut (after 0.1.0)
+
+Settings › General › Keyboard Shortcut shows the shortcut as key caps.
+Clicking them records a new one; *Use ⌥Space* goes back to the default.
+
+**Recording.** `sift_macos::key_capture` adds an AppKit local event
+monitor for key presses. It sees presses in Sift's own windows before
+they do, and swallows them, so the recorded keys don't also type or
+trigger a menu. Local monitors need no permission (watching other apps'
+keys would need Input Monitoring). The monitor exists only while
+recording and is removed when recording ends, when the window loses
+focus, or when it closes.
+
+While recording, the current shortcut is unregistered. Carbon would
+otherwise take the press before any window saw it, so pressing the
+current shortcut would toggle the panel instead of being recorded.
+
+**Physical keys.** A press reports the hardware key code (`kVK_…`) and
+the character that key types in the current layout. The shortcut is
+registered by key code, so it works the same whatever the layout. The
+label ("K", "É") is taken from the layout at recording time, for
+display only. GPUI's key events carry only the character, which on a
+non-QWERTY layout would map back to the wrong physical key, so they are
+not used. The key-code table matches `global-hotkey`'s, minus media keys
+(watched through an event tap that needs a permission), Caps Lock, Help
+and the input-source keys.
+
+**Rules.** Escape alone cancels. A shortcut needs ⌘, ⌃ or ⌥ unless it
+is a function key (F1–F20), so it cannot take over typing; Shift alone
+is not enough. ⌘Space and ⌃Space are accepted, with a note that macOS
+uses them for Spotlight and input sources by default.
+
+**Registering.** The new shortcut is registered at once, then saved in
+`hotkey` next to `config.toml`: two lines, `global-hotkey`'s notation
+("control+alt+KeyK") and the label. If macOS refuses it, the previous
+shortcut is restored. At launch, a missing, damaged or unusable file
+means Option+Space, and a saved shortcut that cannot be registered
+falls back to Option+Space too.
+
+**Conflicts with other apps.** Carbon lets two processes register the
+same shortcut without an error (tested: two Sift copies both registered
+⌃⌥K, and a second copy registered ⌥Space while the first held it). So
+Sift cannot tell that another app uses a shortcut. It reports only what
+macOS itself refuses.
+
+**What it costs.** Nothing while idle: the monitor and its task exist
+only during recording, and the shortcut is read from a small file once
+at launch.
+
 ## What is deliberately deferred
 
 - A snapshot delta overlay for very large indexes (see "Index service").
 - `getattrlistbulk` scanning, and Launch Services package detection.
-- Launcher: a configurable hotkey, lazy loading of
+- Launcher: lazy loading of
   application icons (they are rendered with the catalog), and app-folder
   watching (the catalog currently refreshes by age).
 - A real accessibility tree for the result list (needs GPUI support).

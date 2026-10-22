@@ -227,8 +227,8 @@ Moved to later:
 - Faster scanning with `getattrlistbulk` and deferred index creation.
   The profile shows where the time goes, but the current speed (about
   550k entries a second, warm) meets the targets.
-- Configurable hotkey and a settings page for `config.toml` options.
-  (Launch at login landed in Phase 5, opt-in.)
+- A settings page for `config.toml` options. (Launch at login landed in
+  Phase 5, opt-in; the configurable shortcut after 0.1.0.)
 
 ## UI redesign ✅ built, visual check pending
 
@@ -293,6 +293,15 @@ Not yet done, and needing you:
   ad-hoc signed and users click Open Anyway once.
 - **CI** (GitHub Actions on macOS) is not set up. It is free now that
   the repository is public.
+
+## After 0.1.0
+
+- [x] Configurable keyboard shortcut: a recorder in Settings › General,
+      registered by physical key so it works on any keyboard layout.
+      Tested: saving, loading and validation (unit tests), registration
+      at launch and the fallback to Option+Space, Settings opening with
+      the new row. **Recording itself needs you:** it reacts to real key
+      presses, which this session cannot make.
 
 ## Open questions for you
 

@@ -3,6 +3,12 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+- Change the keyboard shortcut in Settings › General: click it and press
+  a new one. It works by key position, so it is the same on any keyboard
+  layout.
+
 ## 0.1.0 (2026-10-22)
 
 The first release. Apple Silicon, macOS 13 or later.

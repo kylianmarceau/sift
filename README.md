@@ -21,7 +21,9 @@ Sift needs **macOS 13 (Ventura) or later on an Apple Silicon Mac**.
    [latest release](https://github.com/kylianmarceau/sift/releases/latest).
 2. Open the disk image and drag **Sift** into **Applications**.
 3. Open Sift from Applications. The search panel appears once at launch;
-   after that, **Option+Space** shows and hides it.
+   after that, **Option+Space** shows and hides it. To use another
+   shortcut, open Sift Settings › General › Keyboard Shortcut, click the
+   keys shown and press the new shortcut.
 
 **If macOS says Sift "cannot be opened" or "cannot be verified":** a
 release is notarized by Apple only when it was signed with a Developer ID
@@ -135,7 +137,14 @@ again.
 
 **Choosing folders:** search for *Sift Settings* (or "preferences") and
 press Enter. Add the folders you want searchable. The General section at
-the top holds Open at Login and the update check. macOS asks once for
+the top holds the keyboard shortcut, Open at Login and the update check.
+
+**Changing the shortcut:** in Settings › General, click the shortcut and
+press the new one (Esc cancels). It needs ⌘, ⌃ or ⌥, or can be a
+function key on its own. It works by key position, so it stays the same
+if you switch keyboard layouts. macOS does not tell Sift when another app
+uses the same shortcut, so if the panel stops appearing, pick another
+one. *Use ⌥Space* restores the default. macOS asks once for
 access to Documents, Desktop or Downloads. Folders indexed with
 `sift index` in a terminal show up there too; they share one index.
 

@@ -31,8 +31,8 @@ Without these, a release is ad-hoc signed: it works, but users must click
 
 1. **Version.** Set `version` in the root `Cargo.toml` (it is shared by
    every crate) and run `cargo check` to update `Cargo.lock`. In
-   `CHANGELOG.md`, replace "(unreleased)" after the version with today's
-   date. Commit.
+   `CHANGELOG.md`, rename the *Unreleased* section to the version and
+   today's date, for example `## 0.1.1 (2026-11-02)`. Commit.
 
 2. **Tag** the commit:
 
