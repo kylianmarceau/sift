@@ -67,6 +67,8 @@ pub mod a11y;
 #[cfg(target_os = "macos")]
 mod imp;
 #[cfg(target_os = "macos")]
+pub mod key_capture;
+#[cfg(target_os = "macos")]
 pub mod login_item;
 #[cfg(target_os = "macos")]
 mod quicklook;
