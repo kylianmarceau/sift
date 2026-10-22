@@ -1,4 +1,5 @@
-//! The settings window: which folders the file search covers.
+//! The settings window: the keyboard shortcut, Open at Login, updates, and
+//! which folders the file search covers.
 //!
 //! It shows each indexed folder with its state and size, and sends changes
 //! to the index service. Folders are chosen with the standard macOS folder
@@ -18,9 +19,12 @@ use gpui::{
 use sift_files::{Command, RootState, RootStatus};
 use sift_indexer::IndexOptions;
 
+use crate::hotkey::{self, Hotkeys, Recorded, Shortcut};
 use crate::launcher::{IndexStatusChanged, Launcher, UpdateStateChanged};
 use crate::theme::Theme;
 use crate::updates::UpdateState;
+use sift_macos::a11y::{self, Urgency};
+use sift_macos::key_capture::{KeyCapture, KeyPress};
 use sift_macos::login_item::{self, Status as LoginStatus};
 
 actions!(settings, [CloseSettings]);
@@ -64,7 +68,7 @@ pub fn open(launcher: Entity<Launcher>, cx: &mut App) {
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(680.), px(640.)),
+            size(px(680.), px(680.)),
             cx,
         ))),
         kind: WindowKind::Normal,
@@ -101,6 +105,10 @@ pub struct Settings {
     /// Open at Login, read when the window opens or becomes active (it can
     /// also be changed in System Settings).
     login: LoginStatus,
+    /// While a new shortcut is being recorded: the capture of key presses.
+    recording: Option<KeyCapture>,
+    /// A note under the shortcut, and whether it reports a problem.
+    shortcut_note: Option<(SharedString, bool)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -131,6 +139,18 @@ impl Settings {
                     if window.is_window_active() {
                         this.login = login_item::status();
                         cx.notify();
+                    } else {
+                        // Key presses in other apps never reach the
+                        // recorder, so stop rather than leave the shortcut
+                        // switched off.
+                        this.stop_recording(cx);
+                    }
+                }),
+                // Closing the window mid-recording must not leave the
+                // shortcut switched off.
+                cx.on_release(|this, cx| {
+                    if this.recording.take().is_some() {
+                        resume_shortcut(cx);
                     }
                 }),
             ],
@@ -140,7 +160,97 @@ impl Settings {
             message: None,
             home: std::env::home_dir(),
             login,
+            recording: None,
+            shortcut_note: None,
         }
+    }
+
+    /// Starts recording a new shortcut: the next key press in Sift's
+    /// windows becomes it. The current shortcut is off meanwhile, so it can
+    /// be pressed too.
+    fn start_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording.is_some() {
+            return;
+        }
+        let (tx, mut presses) = unbounded::<KeyPress>();
+        let Some(capture) = KeyCapture::start(move |press| {
+            let _ = tx.unbounded_send(press);
+        }) else {
+            self.shortcut_note = Some(("Cannot read the keyboard right now.".into(), true));
+            cx.notify();
+            return;
+        };
+        if let Some(hotkeys) = cx.try_global::<Hotkeys>().is_some().then_some(()) {
+            let () = hotkeys;
+            cx.update_global::<Hotkeys, _>(|hotkeys, _| hotkeys.pause());
+        }
+        self.recording = Some(capture);
+        self.shortcut_note = None;
+        speak("Recording a shortcut. Press the new shortcut, or Escape to cancel.");
+        // The task ends when the capture is dropped, which drops the sender.
+        cx.spawn(async move |this, cx| {
+            while let Some(press) = presses.next().await {
+                if this
+                    .update(cx, |this, cx| this.on_key_press(press, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Stops recording without changing the shortcut.
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording.take().is_some() {
+            resume_shortcut(cx);
+            self.shortcut_note = None;
+            cx.notify();
+        }
+    }
+
+    fn on_key_press(&mut self, press: KeyPress, cx: &mut Context<Self>) {
+        if self.recording.is_none() {
+            return;
+        }
+        match hotkey::interpret(&press) {
+            Recorded::Cancel => {
+                self.stop_recording(cx);
+                speak("Cancelled.");
+            }
+            Recorded::Rejected(reason) => {
+                self.shortcut_note = Some((reason.into(), true));
+                speak(reason);
+                cx.notify();
+            }
+            Recorded::Shortcut(shortcut) => {
+                self.recording = None;
+                self.use_shortcut(shortcut, cx);
+            }
+        }
+    }
+
+    /// Makes `shortcut` the one that shows the panel.
+    fn use_shortcut(&mut self, shortcut: Shortcut, cx: &mut Context<Self>) {
+        let result = if cx.try_global::<Hotkeys>().is_some() {
+            cx.update_global::<Hotkeys, _>(|hotkeys, _| hotkeys.set(shortcut.clone()))
+        } else {
+            Err("Keyboard shortcuts are not available.".to_string())
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!(shortcut = shortcut.display(), "keyboard shortcut changed");
+                speak(&format!("Shortcut set to {}.", shortcut.spoken()));
+                self.shortcut_note = shortcut.system_conflict().map(|note| (note.into(), false));
+            }
+            Err(reason) => {
+                speak(&reason);
+                self.shortcut_note = Some((reason.into(), true));
+            }
+        }
+        cx.notify();
     }
 
     fn send(&self, command: Command, cx: &App) {
@@ -354,6 +464,7 @@ impl Settings {
             }),
         );
         let hairline = || div().h(px(1.)).bg(theme.divider);
+        let shortcut_row = self.render_shortcut(theme, cx);
         div()
             .p(px(14.))
             .rounded(px(10.))
@@ -363,6 +474,8 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(12.))
+            .child(shortcut_row)
+            .child(hairline())
             .child(
                 div()
                     .flex()
@@ -380,6 +493,100 @@ impl Settings {
                     .child(row("Updates", update_detail.into()))
                     .child(check),
             )
+            .into_any_element()
+    }
+
+    /// "Keyboard Shortcut": the current shortcut as key caps, which start
+    /// recording when clicked.
+    fn render_shortcut(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (shortcut, registered) = cx
+            .try_global::<Hotkeys>()
+            .map(|h| (h.current().clone(), h.is_registered()))
+            .unwrap_or((Shortcut::default(), false));
+        let recording = self.recording.is_some();
+        let (detail, problem): (SharedString, bool) = match &self.shortcut_note {
+            Some((note, problem)) => (note.clone(), *problem),
+            None if recording => ("Type the new shortcut. Esc cancels.".into(), false),
+            None if !registered => (
+                format!(
+                    "{} is not working: macOS did not accept it. Choose another.",
+                    shortcut.display()
+                )
+                .into(),
+                true,
+            ),
+            None => ("Shows and hides the Sift panel.".into(), false),
+        };
+        let recorder = div()
+            .id("shortcut-recorder")
+            .flex_none()
+            .min_w(px(92.))
+            .h(px(26.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(3.))
+            .text_size(px(12.))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .map(|el| {
+                if recording {
+                    el.border_color(theme.accent)
+                        .bg(theme.card)
+                        .text_color(theme.accent)
+                        .child("Type shortcut…")
+                } else {
+                    let hover = theme.selected;
+                    el.border_color(gpui::transparent_black())
+                        .bg(theme.key_background)
+                        .text_color(theme.key_text)
+                        .hover(move |style| style.bg(hover))
+                        .children(shortcut.parts().into_iter().map(|part| div().child(part)))
+                }
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.recording.is_some() {
+                    this.stop_recording(cx);
+                } else {
+                    this.start_recording(cx);
+                }
+            }));
+        let reset = (!recording && !shortcut.is_default()).then(|| {
+            button("shortcut-reset", "Use ⌥Space", Kind::Link, theme).on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.stop_recording(cx);
+                    this.use_shortcut(Shortcut::default(), cx);
+                },
+            ))
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Keyboard Shortcut"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(if problem { theme.error } else { theme.muted })
+                            .child(detail),
+                    ),
+            )
+            .children(reset)
+            .child(recorder)
             .into_any_element()
     }
 
@@ -766,6 +973,21 @@ impl Render for Settings {
                             .on_click(cx.listener(|this, _, _, cx| this.add_folder(cx))),
                     ),
             )
+    }
+}
+
+/// Turns the shortcut back on after recording.
+fn resume_shortcut(cx: &mut App) {
+    if cx.try_global::<Hotkeys>().is_some() {
+        cx.update_global::<Hotkeys, _>(|hotkeys, _| hotkeys.resume());
+    }
+}
+
+/// Tells VoiceOver, if it is running (the window has no accessibility
+/// tree to read; see `sift_macos::a11y`).
+fn speak(text: &str) {
+    if a11y::voice_over_enabled() {
+        a11y::announce(text, Urgency::Interrupt);
     }
 }
 

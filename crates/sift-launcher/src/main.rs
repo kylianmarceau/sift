@@ -1,13 +1,14 @@
 //! Sift: a keyboard-first macOS launcher.
 //!
-//! Runs as an accessory app (no Dock icon). Option+Space shows a floating
-//! search panel; Escape, the hotkey again, or clicking elsewhere hides it.
+//! Runs as an accessory app (no Dock icon). A global shortcut (Option+Space
+//! unless changed in Settings) shows a floating search panel; Escape, the hotkey again, or clicking elsewhere hides it.
 //! The process, window and caches stay alive between uses, so showing the
 //! panel is an order-front, not a relaunch.
 
 mod assets;
 mod clipboard;
 mod commands;
+mod hotkey;
 mod icons;
 mod input;
 mod launcher;
@@ -26,8 +27,6 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, WindowBackgroundAppearance, WindowBounds,
     WindowKind, WindowOptions, actions, px, size,
@@ -100,27 +99,10 @@ fn main() {
                 tracing::error!(%error, "cannot set up the launcher window");
             }
 
-            // Hotkey events arrive from a Carbon event handler on the main
+            // Shortcut presses arrive from a Carbon event handler on the main
             // thread; forward them to a GPUI task through a channel.
             let (hotkey_tx, mut hotkey_rx) = unbounded::<Instant>();
-            let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
-            match GlobalHotKeyManager::new().and_then(|manager| {
-                manager.register(hotkey)?;
-                Ok(manager)
-            }) {
-                Ok(manager) => {
-                    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-                        if event.id == hotkey.id() && event.state == HotKeyState::Pressed {
-                            let _ = hotkey_tx.unbounded_send(Instant::now());
-                        }
-                    }));
-                    // The registration lasts as long as the manager; keep it for
-                    // the life of the process.
-                    std::mem::forget(manager);
-                    tracing::info!("registered Option+Space");
-                }
-                Err(error) => tracing::error!(%error, "cannot register Option+Space"),
-            }
+            hotkey::install(launcher::user_dir(), hotkey_tx, cx);
             cx.spawn(async move |cx| {
                 while let Some(pressed_at) = hotkey_rx.next().await {
                     let _ = window.update(cx, |launcher, window, cx| {
