@@ -296,7 +296,8 @@ Not yet done, and needing you:
 
 ## After 0.1.0
 
-- [x] Configurable keyboard shortcut: a recorder in Settings › General,
+- [x] Configurable keyboard shortcut (released in 0.1.1): a recorder in
+      Settings › General,
       registered by physical key so it works on any keyboard layout.
       Tested: saving, loading and validation (unit tests), registration
       at launch and the fallback to Option+Space, Settings opening with

@@ -3,7 +3,7 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
-## Unreleased
+## 0.1.1 (2026-10-22)
 
 - Change the keyboard shortcut in Settings › General: click it and press
   a new one. It works by key position, so it is the same on any keyboard
