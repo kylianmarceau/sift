@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Measures Option+Space → first painted frame with the real hotkey.
+# Measures shortcut → first painted frame with the real global shortcut
+# (Option+Space unless changed in Sift Settings).
 #
 #   scripts/measure-hotkey.sh [samples]     # default 20 (quits a running Sift)
 #
-# Starts target/release/Sift.app with logging, then you press Option+Space
+# Starts target/release/Sift.app with logging, then you press the shortcut
 # repeatedly (each press alternately shows and hides the panel). Every show
 # logs "hotkey to first frame"; the script prints min / median / p90 / max
 # once enough samples arrive. Needs an unlocked screen: macOS draws no
@@ -15,9 +16,10 @@ BIN="$ROOT/target/release/Sift.app/Contents/MacOS/Sift"
 SAMPLES="${1:-20}"
 LOG="$(mktemp -t sift-hotkey)"
 
-# Only one process can own Option+Space, so stop a running copy first.
+# macOS lets two copies register the same shortcut, and the press could go
+# to the wrong one, so stop a running copy first.
 if pgrep -x Sift >/dev/null || pgrep -x sift-launcher >/dev/null; then
-    echo "Quitting the running Sift so this measurement can register Option+Space."
+    echo "Quitting the running Sift so this measurement gets the shortcut."
     pkill -x Sift || true
     pkill -x sift-launcher || true
     sleep 0.5
@@ -30,7 +32,7 @@ disown "$PID"  # no "Terminated" job message when it is stopped at the end
 trap 'kill $PID 2>/dev/null; rm -f "$LOG"' EXIT
 sleep 1
 
-echo "Press Option+Space $((SAMPLES * 2)) times (show, hide, show, …), about once a second."
+echo "Press the Sift shortcut (Option+Space by default) $((SAMPLES * 2)) times (show, hide, show, …), about once a second."
 count() { grep -c "hotkey to first frame" "$LOG" || true; }
 while (( $(count) < SAMPLES )); do
     sleep 0.5

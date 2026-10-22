@@ -15,8 +15,8 @@
 # running hidden, and this script records its memory and idle CPU.
 #
 # Uses its own config, index and log directories, so a running Sift and its
-# data are not touched (the second instance cannot register Option+Space;
-# that error in the log is expected).
+# data are not touched. (It also registers the default shortcut, which
+# macOS allows alongside a running Sift; the bench never presses it.)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ROUNDS="${1:-5}"
