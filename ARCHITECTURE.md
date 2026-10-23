@@ -514,6 +514,17 @@ changes. *Edit Sift Configuration* writes a commented template if there
 is no file, and opens it in the default editor (TextEdit when nothing is
 registered for `.toml`).
 
+**Location.** `SIFT_CONFIG_DIR/config.toml` when that variable is set.
+Otherwise the first existing file of `$XDG_CONFIG_HOME/sift/config.toml`,
+`~/.config/sift/config.toml` and the support directory's `config.toml`.
+`~/.config` is checked even without `XDG_CONFIG_HOME`, because an app
+opened from the Dock or at login doesn't see a shell profile's
+variables. With no file yet, a new one goes in `$XDG_CONFIG_HOME/sift`
+if that is set, else the support directory, so setting the variable
+never hides a config already in use. The path is chosen once at launch
+and logged. Everything else (`state.db`, `hotkey`, `update-check`)
+stays in the support directory.
+
 Shell commands run with `/bin/sh -c` from the home folder, with no
 input. A background thread logs the exit status and the start of stderr.
 They come only from the user's own config file.
@@ -874,7 +885,7 @@ and no signing key whose loss could push code to every user.
   Updates* (launcher command and Settings button) checks on request,
   even with the setting off. A failed automatic check waits an hour
   before retrying. The time and the latest version seen are stored in
-  `update-check`, a two-line text file next to `config.toml`.
+  `update-check`, a two-line text file in the support directory.
 - **How.** A background thread runs `/usr/bin/curl` with HTTPS only
   (also for redirects), a 15 s timeout and a 1 MB reply limit, against
   the GitHub API's latest-release endpoint. `curl` uses the system's
@@ -922,7 +933,7 @@ is not enough. ⌘Space and ⌃Space are accepted, with a note that macOS
 uses them for Spotlight and input sources by default.
 
 **Registering.** The new shortcut is registered at once, then saved in
-`hotkey` next to `config.toml`: two lines, `global-hotkey`'s notation
+`hotkey` in the support directory: two lines, `global-hotkey`'s notation
 ("control+alt+KeyK") and the label. If macOS refuses it, the previous
 shortcut is restored. At launch, a missing, damaged or unusable file
 means Option+Space, and a saved shortcut that cannot be registered

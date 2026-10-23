@@ -86,8 +86,8 @@ off.
 2. Open the panel and press **Cmd-Q** to quit, then delete
    `/Applications/Sift.app`.
 3. To remove your data too, delete `~/Library/Application Support/sift`
-   (index, settings, recents, favorites, clipboard history) and
-   `~/Library/Logs/Sift`.
+   (index, settings, recents, favorites, clipboard history),
+   `~/Library/Logs/Sift`, and `~/.config/sift` if you put your config there.
 
 ## Using Sift
 
@@ -119,7 +119,9 @@ off.
 
 **Snippets and custom commands:** search for *Edit Sift Configuration*.
 It creates `~/Library/Application Support/sift/config.toml` with
-commented examples. Snippets are found by name or keyword, and Enter
+commented examples. If you keep your dotfiles in the XDG layout, put the
+file at `~/.config/sift/config.toml` (or `$XDG_CONFIG_HOME/sift/config.toml`)
+instead: Sift uses that one when it exists. Snippets are found by name or keyword, and Enter
 copies their text (`{date}`, `{time}` and `{datetime}` are filled in).
 Custom commands open a URL, open a file or app, or run a shell command.
 Changes apply the next time the panel opens.
@@ -161,7 +163,8 @@ access to Documents, Desktop or Downloads. Folders indexed with
 `sift index` in a terminal show up there too; they share one index.
 
 Environment options: `SIFT_INDEX_DIR` (index location),
-`SIFT_CONFIG_DIR` (where `config.toml` and `state.db` live),
+`SIFT_CONFIG_DIR` (where `config.toml` and `state.db` live; it takes
+priority over `XDG_CONFIG_HOME`),
 `SIFT_START_HIDDEN=1` (don't show the panel at launch), `SIFT_LOG=debug`,
 `SIFT_LOG_DIR` (log location), `SIFT_ANNOUNCE=1` (make the VoiceOver
 announcements, logged at debug level, even when VoiceOver is off), and

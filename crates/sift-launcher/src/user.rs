@@ -48,9 +48,10 @@ pub enum Reload {
 }
 
 impl UserData {
-    /// Opens `dir/config.toml` and `dir/state.db`. A database that cannot
+    /// Opens `config_path` and `dir/state.db`. A database that cannot
     /// be opened only disables recents and favorites.
-    pub fn open(dir: &Path) -> Self {
+    pub fn open(dir: &Path, config_path: PathBuf) -> Self {
+        tracing::info!(path = %config_path.display(), "config file");
         let mut notice = None;
         let db = match StateDb::open_recovering(&dir.join("state.db")) {
             Ok((db, moved)) => {
@@ -70,7 +71,7 @@ impl UserData {
         };
         let mut this = Self {
             notice,
-            config_path: dir.join("config.toml"),
+            config_path,
             config_stamp: None,
             loaded: false,
             config: Config::default(),
@@ -493,7 +494,7 @@ mod tests {
     fn snippets_and_commands_are_searchable() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_config(dir.path(), CONFIG);
-        let user = UserData::open(dir.path());
+        let user = UserData::open(dir.path(), dir.path().join("config.toml"));
         assert_eq!(titles(&*user.snippets(), "sig"), ["Email signature"]);
         assert_eq!(titles(&*user.snippets(), "email"), ["Email signature"]);
         let snippet = &user.snippets().search("sig", 1)[0];
@@ -512,7 +513,7 @@ mod tests {
     fn recents_follow_the_current_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_config(dir.path(), CONFIG);
-        let mut user = UserData::open(dir.path());
+        let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
         let flush = user.custom_commands().search("flush", 1)[0].clone();
         user.record_use(&flush);
         assert_eq!(user.home().len(), 1);
@@ -528,7 +529,7 @@ mod tests {
     #[test]
     fn home_lists_favorites_then_existing_recents() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut user = UserData::open(dir.path());
+        let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
         let file = dir.path().join("report.pdf");
         std::fs::write(&file, b"x").expect("write");
         let item = |id: &str, path: &Path| ResultItem {
@@ -567,7 +568,7 @@ mod tests {
     #[test]
     fn quit_and_calculator_results_are_not_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut user = UserData::open(dir.path());
+        let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
         let quit = ResultItem {
             id: "command:quit".into(),
             kind: ResultKind::Command,
@@ -592,7 +593,7 @@ mod tests {
     #[test]
     fn clipboard_history_is_kept_only_when_enabled() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut user = UserData::open(dir.path());
+        let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
         assert!(!user.record_clipboard("secret"));
         assert_eq!(user.clipboard().len(), 0);
 

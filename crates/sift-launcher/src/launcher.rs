@@ -159,13 +159,23 @@ pub struct Launcher {
     _subscriptions: Vec<Subscription>,
 }
 
-/// Where `config.toml`, `state.db` and the session marker live:
+/// Where `state.db`, the session marker and (unless it is in the XDG
+/// config directory, see [`config_file`]) `config.toml` live:
 /// `~/Library/Application Support/sift`, or `SIFT_CONFIG_DIR`.
 pub fn user_dir() -> PathBuf {
     std::env::var_os("SIFT_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(sift_state::support_dir)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// `config.toml`: in `SIFT_CONFIG_DIR` when that is set, otherwise in the
+/// XDG config directory or [`user_dir`] (see [`sift_state::config_file`]).
+pub fn config_file() -> PathBuf {
+    match std::env::var_os("SIFT_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir).join("config.toml"),
+        None => sift_state::config_file(&user_dir()),
+    }
 }
 
 /// What `main` knows at startup.
@@ -263,7 +273,7 @@ impl Launcher {
         })
         .detach();
 
-        let mut user = UserData::open(&user_dir());
+        let mut user = UserData::open(&user_dir(), config_file());
         let mut notices: Vec<String> = Vec::new();
         if startup.unclean_exit {
             let log = crate::logging::log_path()

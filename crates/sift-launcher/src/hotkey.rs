@@ -1,7 +1,7 @@
 //! The keyboard shortcut that shows and hides the panel.
 //!
 //! Option+Space unless the user records another one in Settings. The
-//! choice is kept in `hotkey`, a two-line file next to `config.toml`: the
+//! choice is kept in `hotkey`, a two-line file in the support directory: the
 //! shortcut in `global-hotkey`'s notation ("alt+Space"), then the key's
 //! label as the keyboard layout showed it when recorded ("Space", "K",
 //! "É"). A missing or unreadable file means the default.

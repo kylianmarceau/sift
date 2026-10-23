@@ -3,6 +3,12 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+- `config.toml` can live in `~/.config/sift` (or `$XDG_CONFIG_HOME/sift`)
+  for XDG-style dotfiles. Sift uses it there when it exists; otherwise
+  nothing changes.
+
 ## 0.1.1 (2026-10-22)
 
 - Change the keyboard shortcut in Settings › General: click it and press
