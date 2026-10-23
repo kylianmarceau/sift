@@ -3,7 +3,7 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
-## Unreleased
+## 0.1.2 (2026-10-23)
 
 - `config.toml` can live in `~/.config/sift` (or `$XDG_CONFIG_HOME/sift`)
   for XDG-style dotfiles. Sift uses it there when it exists; otherwise
