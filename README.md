@@ -29,6 +29,17 @@ search that Raycast's file search is built on. See
 
 Sift needs **macOS 13 (Ventura) or later on an Apple Silicon Mac**.
 
+**With Homebrew:**
+
+```bash
+brew install --cask kylianmarceau/sift/sift
+```
+
+`brew upgrade` then keeps it up to date. Open Sift from Applications and
+see step 3 below.
+
+**Or by hand:**
+
 1. Download `Sift-VERSION-arm64.dmg` (or the `.zip`) from the
    [latest release](https://github.com/kylianmarceau/sift/releases/latest).
 2. Open the disk image and drag **Sift** into **Applications**.
@@ -81,6 +92,9 @@ check = false
 off.
 
 ### Uninstall
+
+With Homebrew: `brew uninstall --cask sift` (add `--zap` to remove your
+data too, except `~/.config/sift`). Otherwise:
 
 1. Turn off Open at Login in Sift Settings, if you turned it on.
 2. Open the panel and press **Cmd-Q** to quit, then delete

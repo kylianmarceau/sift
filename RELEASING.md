@@ -74,6 +74,17 @@ Without these, a release is ad-hoc signed: it works, but users must click
    Mark test builds as pre-releases (`--prerelease`): the update check
    ignores drafts and pre-releases.
 
+6. **Homebrew.** Point the cask at the new release. The script checks
+   that the published zip matches `dist/SHA256SUMS`, then commits and
+   pushes the tap ([kylianmarceau/homebrew-sift](https://github.com/kylianmarceau/homebrew-sift),
+   cloned next to this repository, or set `TAP_DIR`):
+
+   ```bash
+   scripts/bump-cask.sh
+   ```
+
+   Skip this for pre-releases.
+
 ## Notes
 
 - **The repository must be public** for the update check to see
