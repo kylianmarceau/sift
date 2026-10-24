@@ -4648,7 +4648,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sift-apps"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "plist",
  "sift-core",
@@ -4659,14 +4659,14 @@ dependencies = [
 
 [[package]]
 name = "sift-calc"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "sift-core",
 ]
 
 [[package]]
 name = "sift-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4682,11 +4682,11 @@ dependencies = [
 
 [[package]]
 name = "sift-core"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "sift-files"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "sift-core",
  "sift-indexer",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "sift-indexer"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "sift-store",
  "tempfile",
@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "sift-launcher"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "futures",
  "global-hotkey",
@@ -4733,7 +4733,7 @@ dependencies = [
 
 [[package]]
 name = "sift-macos"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "block2",
  "libc",
@@ -4748,7 +4748,7 @@ dependencies = [
 
 [[package]]
 name = "sift-search"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytemuck",
  "memchr",
@@ -4765,7 +4765,7 @@ dependencies = [
 
 [[package]]
 name = "sift-state"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "rusqlite",
  "serde",
@@ -4779,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "sift-store"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -4788,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "sift-watch"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "dispatch2",
  "libc",

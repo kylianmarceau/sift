@@ -3,7 +3,7 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
-## Unreleased
+## 0.1.3 (2026-10-24)
 
 - Settings has a Clipboard History section: turn it on or off, choose
   how many entries to keep, and clear it. Settings › General can turn
