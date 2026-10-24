@@ -5,5 +5,4 @@
 /bench-data/
 .DS_Store
 prompt*.txt
-/graphify-out/
 /dist/
