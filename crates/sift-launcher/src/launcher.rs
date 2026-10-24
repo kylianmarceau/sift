@@ -377,10 +377,11 @@ impl Launcher {
     }
 
     /// Picks up edits to config.toml (one `stat` when nothing changed).
-    fn reload_config(&mut self, cx: &mut Context<Self>) {
+    pub fn reload_config(&mut self, cx: &mut Context<Self>) {
         if let Reload::Reloaded(problems) = self.user.reload_config() {
             self.rebuild_search();
             self.watch_clipboard(cx);
+            cx.emit(UserDataChanged);
             if let Some(first) = problems.first() {
                 let more = match problems.len() {
                     1 => String::new(),
@@ -495,6 +496,7 @@ impl Launcher {
             sift_macos::ClipboardText::Text(text) => {
                 if self.user.record_clipboard(&text) {
                     self.rebuild_search();
+                    cx.emit(UserDataChanged);
                     if clipboard::scope(&self.query).is_some() {
                         self.run_query(self.query.clone(), cx);
                     }
@@ -940,10 +942,52 @@ impl Launcher {
         self.run_query(self.query.clone(), cx);
     }
 
+    /// Writes one option to config.toml (from the settings window) and
+    /// applies it at once: clipboard watching starts or stops now rather
+    /// than when the panel next opens.
+    pub fn change_setting(
+        &mut self,
+        setting: sift_state::Setting,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        sift_state::Config::save_setting(self.user.config_path(), setting)?;
+        tracing::info!(?setting, "setting changed");
+        self.reload_config(cx);
+        Ok(())
+    }
+
+    pub fn clipboard_enabled(&self) -> bool {
+        self.user.clipboard_enabled()
+    }
+
+    pub fn clipboard_max_items(&self) -> usize {
+        self.user.clipboard_max_items()
+    }
+
+    /// Entries kept in the clipboard history (0 while it is off).
+    pub fn clipboard_count(&self) -> usize {
+        self.user.clipboard().len()
+    }
+
+    pub fn clear_clipboard(&mut self, cx: &mut Context<Self>) {
+        self.user.clear_clipboard();
+        self.rebuild_search();
+        cx.emit(UserDataChanged);
+    }
+
     fn edit_config(&mut self, cx: &mut Context<Self>) {
+        match self.open_config_file() {
+            Ok(()) => self.hide(cx),
+            Err(error) => self.show_error(error, cx),
+        }
+    }
+
+    /// Opens config.toml in a text editor, writing the commented template
+    /// first if there is no file yet.
+    pub fn open_config_file(&self) -> Result<(), LaunchError> {
         let path = self.user.config_path().to_path_buf();
         let failures = crate::launch_failures();
-        let result = sift_state::Config::ensure_exists(&path)
+        sift_state::Config::ensure_exists(&path)
             .map_err(|e| LaunchError::Failed {
                 path: path.clone(),
                 reason: e.to_string(),
@@ -952,11 +996,7 @@ impl Launcher {
                 sift_macos::open_text_file(&path, move |error| {
                     let _ = failures.unbounded_send(error);
                 })
-            });
-        match result {
-            Ok(()) => self.hide(cx),
-            Err(error) => self.show_error(error, cx),
-        }
+            })
     }
 
     /// Runs a built-in command (`commands::ALL`), as choosing it does.
@@ -969,18 +1009,14 @@ impl Launcher {
                         .update(cx, |input, cx| input.set_text("clip ", cx));
                 } else {
                     self.message_info = false;
-                    self.message = Some(
-                        "Clipboard history is off. Turn it on in Edit Sift Configuration \
-                         ([clipboard] enabled = true)."
-                            .into(),
-                    );
+                    self.message =
+                        Some("Clipboard history is off. Turn it on in Sift Settings.".into());
                     self.resize(cx);
                     cx.notify();
                 }
             }
             commands::CLEAR_CLIPBOARD => {
-                self.user.clear_clipboard();
-                self.rebuild_search();
+                self.clear_clipboard(cx);
                 self.hide(cx);
             }
             commands::SETTINGS => {
@@ -1488,6 +1524,12 @@ pub struct UpdateStateChanged;
 impl gpui::EventEmitter<UpdateStateChanged> for Launcher {}
 
 impl gpui::EventEmitter<IndexStatusChanged> for Launcher {}
+
+/// Emitted when config.toml is loaded again or the clipboard history
+/// changes (the settings window listens).
+pub struct UserDataChanged;
+
+impl gpui::EventEmitter<UserDataChanged> for Launcher {}
 
 /// Decodes an icon's PNG into the form GPUI draws (BGRA pixels). Doing it
 /// here, off the main thread, also means the launcher owns every decoded

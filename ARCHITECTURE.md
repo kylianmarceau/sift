@@ -435,7 +435,10 @@ the background executor: apps and packages get their own icon, documents
 share one per extension, and folders share one. A long result list
 therefore costs a handful of renders.
 
-The *Sift Settings* command opens a normal window listing indexed folders
+The *Sift Settings* command opens a normal window. One scrolling page
+holds General (shortcut, Open at Login, updates, a button that opens
+`config.toml`), Clipboard History (on or off, history size, Clear History
+with a confirmation step) and Locations: the indexed folders
 with their state, item count and last scan, with:
 
 - Add Folder (the standard folder picker);
@@ -504,7 +507,7 @@ so showing the launcher reads nothing from disk.
 
 ### Configuration (`config.toml`)
 
-The file is hand-edited TOML: `[clipboard]` options, `[[snippets]]`
+The file is TOML: `[clipboard]` options, `[[snippets]]`
 (name, optional keyword, text) and `[[commands]]` (name plus exactly one
 of `url`, `open`, `shell`). A parse error falls back to defaults, and an
 invalid command is dropped. Either way, each problem is reported in the
@@ -513,6 +516,20 @@ each time the launcher opens, and reloaded when its modification time
 changes. *Edit Sift Configuration* writes a commented template if there
 is no file, and opens it in the default editor (TextEdit when nothing is
 registered for `.toml`).
+
+**Written from Settings.** The settings window changes three options
+(`[clipboard] enabled` and `max_items`, `[updates] check`) through
+`Config::save_setting`. It edits the file with `toml_edit`, so comments,
+order and everything else stay as they were, and only the value changes
+(a comment after it stays too). A missing file starts from the template.
+A file `toml_edit` cannot parse is refused with a message, so a hand edit
+in progress is never overwritten, and an edit the launcher could not read
+back is never written. The new text goes to a temporary file that is
+renamed over the target. A symbolic link (a dotfiles checkout) is
+followed, so the linked file changes and the link stays. The launcher
+then reloads at once: turning clipboard history on starts watching
+straight away. The settings window also reloads (one `stat`) when it
+becomes active, so a hand edit shows up there.
 
 **Location.** `SIFT_CONFIG_DIR/config.toml` when that variable is set.
 Otherwise the first existing file of `$XDG_CONFIG_HOME/sift/config.toml`,
@@ -771,8 +788,10 @@ the panel opens). A test checks WCAG contrast for every text level on
 every surface: 7:1 for primary text, 4.5:1 for secondary, 3:1 for
 tertiary and for text on the accent.
 
-**Settings window.** Each folder is a card with a folder tile, the path
-and its details, and a status dot. Below a hairline come the "Skip
+**Settings window.** Sections are cards under small headings, and the
+page scrolls as a whole. History size is a row of choices (50, 200, 500,
+1,000, plus the configured value if it is another one). Each folder is a
+card with a folder tile, the path and its details, and a status dot. Below a hairline come the "Skip
 dependency and cache folders" switch and the folder's buttons
 (secondary, plus a red Remove). The footer holds the index facts and
 the one primary button, Add Folder…. A damaged-index or picker message
@@ -961,8 +980,8 @@ at launch.
 - Security-scoped bookmarks (only needed for a sandboxed build).
 - Auto-paste of snippets and clipboard entries (needs Accessibility),
   and non-text clipboard history.
-- A settings page for `config.toml` options; the file is the interface
-  for now.
+- Editing snippets and custom commands in Settings; they stay in the
+  file.
 - Full-text content indexing (out of scope for the MVP).
 - Installing updates automatically (Sparkle or similar). Sift only
   reports them.

@@ -3,6 +3,14 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+- Settings has a Clipboard History section: turn it on or off, choose
+  how many entries to keep, and clear it. Settings › General can turn
+  the automatic update check on or off and open `config.toml`. These
+  edit `config.toml` in place and keep your comments, snippets and
+  commands; a file with a mistake in it is left alone.
+
 ## 0.1.2 (2026-10-23)
 
 - `config.toml` can live in `~/.config/sift` (or `$XDG_CONFIG_HOME/sift`)

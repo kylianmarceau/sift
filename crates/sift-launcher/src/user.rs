@@ -129,6 +129,10 @@ impl UserData {
         self.config.clipboard.enabled
     }
 
+    pub fn clipboard_max_items(&self) -> usize {
+        self.config.clipboard.max_items
+    }
+
     /// `[updates] check` in the configuration.
     pub fn update_checks_enabled(&self) -> bool {
         self.config.updates.check

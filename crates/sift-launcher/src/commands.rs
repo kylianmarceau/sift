@@ -38,7 +38,7 @@ const COMMANDS: &[Spec] = &[
     Spec {
         id: EDIT_CONFIG,
         title: "Edit Sift Configuration",
-        subtitle: "Snippets, custom commands and clipboard history (config.toml)",
+        subtitle: "Snippets and custom commands (config.toml)",
         aliases: &["snippets", "custom commands", "config"],
     },
     Spec {

@@ -1,4 +1,6 @@
 //! `config.toml`: snippets, custom commands and options, edited by hand.
+//! The settings window can also change the options ([`Setting`]); it
+//! edits the file in place and keeps everything else in it.
 //!
 //! A missing file means defaults. A file with mistakes still loads: each
 //! problem is reported (and shown in the launcher) and the rest is used,
@@ -8,8 +10,13 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+/// The most clipboard entries `max_items` can ask for.
+pub const MAX_CLIP_ITEMS: usize = 10_000;
+
 /// Written when the user first asks to edit the configuration.
 pub const TEMPLATE: &str = r#"# Sift configuration. Changes apply the next time the launcher opens.
+# The [clipboard] and [updates] options can also be changed in Sift
+# Settings, which edits this file and leaves the rest of it as it is.
 
 [clipboard]
 # Keep a history of copied text (plain text only), searchable by typing
@@ -180,10 +187,111 @@ impl Config {
                 false
             }
         });
-        config.clipboard.max_items = config.clipboard.max_items.clamp(1, 10_000);
+        config.clipboard.max_items = config.clipboard.max_items.clamp(1, MAX_CLIP_ITEMS);
         Loaded { config, problems }
     }
 
+    /// Changes one option in the file at `path` and keeps the rest of the
+    /// file as it was: comments, snippets, commands and layout. A missing
+    /// file starts from [`TEMPLATE`]. A file that is not valid TOML is
+    /// left alone, so a hand edit in progress is never overwritten.
+    ///
+    /// The file is replaced atomically. If `path` is a symbolic link (a
+    /// dotfiles checkout), the file it points to is the one written.
+    pub fn save_setting(path: &Path, setting: Setting) -> Result<(), String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        let edited = apply_setting(&text, setting)?;
+        if edited == text && path.exists() {
+            return Ok(());
+        }
+        write_replacing(path, &edited).map_err(|e| format!("Cannot save {}: {e}", path.display()))
+    }
+}
+
+/// An option the settings window can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// `[clipboard] enabled`
+    ClipboardEnabled(bool),
+    /// `[clipboard] max_items`, clamped to 1..=[`MAX_CLIP_ITEMS`].
+    ClipboardMaxItems(usize),
+    /// `[updates] check`
+    UpdateChecks(bool),
+}
+
+/// `text` (a `config.toml`) with `setting` applied and everything else
+/// unchanged. Fails, without changing anything, if `text` is not valid
+/// TOML or the option's table is something other than a table.
+pub fn apply_setting(text: &str, setting: Setting) -> Result<String, String> {
+    use toml_edit::{DocumentMut, Item, Value};
+
+    let mut doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| {
+        format!(
+            "config.toml has a mistake, so it was not changed: {}",
+            e.message()
+        )
+    })?;
+    let (table, key, value): (&str, &str, Value) = match setting {
+        Setting::ClipboardEnabled(on) => ("clipboard", "enabled", on.into()),
+        Setting::ClipboardMaxItems(n) => (
+            "clipboard",
+            "max_items",
+            (n.clamp(1, MAX_CLIP_ITEMS) as i64).into(),
+        ),
+        Setting::UpdateChecks(on) => ("updates", "check", on.into()),
+    };
+    let section = doc
+        .as_table_mut()
+        .entry(table)
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or_else(|| format!("[{table}] in config.toml is not a table, so it was not changed"))?;
+    match section.get_mut(key) {
+        // Keep any comment after the old value.
+        Some(Item::Value(old)) => {
+            let decor = old.decor().clone();
+            *old = value;
+            *old.decor_mut() = decor;
+        }
+        _ => {
+            section.insert(key, Item::Value(value));
+        }
+    }
+    let edited = doc.to_string();
+    // The launcher must still be able to read what is written.
+    toml::from_str::<Config>(&edited)
+        .map_err(|e| format!("config.toml was not changed: {}", e.message()))?;
+    Ok(edited)
+}
+
+/// Writes `text` to a temporary file beside `path`'s target and renames
+/// it over the target, so a reader never sees half a file.
+fn write_replacing(path: &Path, text: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".into());
+    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result = std::fs::write(&temp, text)
+        .and_then(|()| match std::fs::metadata(&target) {
+            Ok(meta) => std::fs::set_permissions(&temp, meta.permissions()),
+            Err(_) => Ok(()),
+        })
+        .and_then(|()| std::fs::rename(&temp, &target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+impl Config {
     /// Creates `path` from [`TEMPLATE`] if it does not exist yet.
     pub fn ensure_exists(path: &Path) -> std::io::Result<()> {
         if path.exists() {
@@ -274,6 +382,85 @@ mod tests {
         let loaded = Config::parse("[[snippets]\nname = ");
         assert_eq!(loaded.config, Config::default());
         assert_eq!(loaded.problems.len(), 1);
+    }
+
+    #[test]
+    fn settings_change_only_their_value() {
+        let text = TEMPLATE.replace("max_items = 200", "max_items = 200 # mine");
+        let on = apply_setting(&text, Setting::ClipboardEnabled(true)).unwrap();
+        assert_eq!(on, text.replace("enabled = false", "enabled = true"));
+        let fewer = apply_setting(&on, Setting::ClipboardMaxItems(50)).unwrap();
+        // The comment after the value stays.
+        assert!(fewer.contains("max_items = 50 # mine"), "{fewer}");
+        let off = apply_setting(&fewer, Setting::UpdateChecks(false)).unwrap();
+        assert_eq!(off, fewer.replace("check = true", "check = false"));
+        let config = Config::parse(&off).config;
+        assert!(config.clipboard.enabled);
+        assert_eq!(config.clipboard.max_items, 50);
+        assert!(!config.updates.check);
+    }
+
+    #[test]
+    fn settings_add_missing_tables_and_keep_snippets() {
+        let text = "# my notes\n[[snippets]]\nname = \"Sig\"\ntext = \"Hi\"\n";
+        let edited = apply_setting(text, Setting::ClipboardEnabled(true)).unwrap();
+        assert!(edited.starts_with(text), "{edited}");
+        let config = Config::parse(&edited).config;
+        assert!(config.clipboard.enabled);
+        assert_eq!(config.snippets.len(), 1);
+
+        let inline = "clipboard = { max_items = 9 }\n";
+        let inline = apply_setting(inline, Setting::ClipboardEnabled(true)).unwrap();
+        let config = Config::parse(&inline).config;
+        assert!(config.clipboard.enabled);
+        assert_eq!(config.clipboard.max_items, 9);
+    }
+
+    #[test]
+    fn settings_refuse_broken_files() {
+        assert!(apply_setting("[[snippets]\nname = ", Setting::UpdateChecks(false)).is_err());
+        assert!(apply_setting("clipboard = 3\n", Setting::ClipboardEnabled(true)).is_err());
+        let huge = apply_setting("", Setting::ClipboardMaxItems(1_000_000)).unwrap();
+        assert_eq!(
+            Config::parse(&huge).config.clipboard.max_items,
+            MAX_CLIP_ITEMS
+        );
+    }
+
+    #[test]
+    fn save_setting_writes_the_template_or_edits_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::save_setting(&path, Setting::ClipboardEnabled(true)).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            written,
+            TEMPLATE.replace("enabled = false", "enabled = true")
+        );
+
+        // A dotfiles-style link: the linked file changes, the link stays.
+        let real = dir.path().join("dotfiles.toml");
+        std::fs::write(&real, "[updates]\ncheck = true\n").unwrap();
+        let link = dir.path().join("linked.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        Config::save_setting(&link, Setting::UpdateChecks(false)).unwrap();
+        let link_type = std::fs::symlink_metadata(&link).unwrap().file_type();
+        assert!(link_type.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "[updates]\ncheck = false\n"
+        );
+
+        // A broken file is left as it is.
+        std::fs::write(&path, "[[snippets]\n").unwrap();
+        assert!(Config::save_setting(&path, Setting::ClipboardEnabled(false)).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[[snippets]\n");
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]

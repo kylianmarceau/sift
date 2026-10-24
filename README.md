@@ -81,7 +81,8 @@ panel footer says so; *Check for Updates* in the launcher, or the button
 in Settings, opens the release page. Sift never downloads or installs
 anything itself: you update by installing the new version the same way.
 
-To turn the check off, search for *Edit Sift Configuration* and set:
+To turn the check off, switch off *Check Automatically* in Settings ›
+General, or search for *Edit Sift Configuration* and set:
 
 ```toml
 [updates]
@@ -140,10 +141,12 @@ copies their text (`{date}`, `{time}` and `{datetime}` are filled in).
 Custom commands open a URL, open a file or app, or run a shell command.
 Changes apply the next time the panel opens.
 
-**Clipboard history** is off by default. Set `enabled = true` under
-`[clipboard]` in the config, then type `clip` (or `clip invoice`) to
-search what you copied. Text that password managers mark as concealed is
-never kept. *Clear Clipboard History* deletes everything kept.
+**Clipboard history** is off by default. Turn it on in Sift Settings ›
+Clipboard History (or set `enabled = true` under `[clipboard]` in the
+config), then type `clip` (or `clip invoice`) to search what you copied.
+Settings also chooses how many entries to keep. Text that password
+managers mark as concealed is never kept. *Clear History* in Settings,
+or the *Clear Clipboard History* command, deletes everything kept.
 
 Sift follows the system's light or dark appearance and your accent colour
 (System Settings › Appearance).
@@ -165,7 +168,10 @@ again.
 
 **Choosing folders:** search for *Sift Settings* (or "preferences") and
 press Enter. Add the folders you want searchable. The General section at
-the top holds the keyboard shortcut, Open at Login and the update check.
+the top holds the keyboard shortcut, Open at Login, the update check and
+a button that opens `config.toml`. Clipboard History has its own section.
+Options changed in Settings are written to `config.toml`, keeping
+everything else in the file; a file with a mistake in it is not changed.
 
 **Changing the shortcut:** in Settings › General, click the shortcut and
 press the new one (Esc cancels). It needs ⌘, ⌃ or ⌥, or can be a

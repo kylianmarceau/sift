@@ -1,5 +1,9 @@
-//! The settings window: the keyboard shortcut, Open at Login, updates, and
-//! which folders the file search covers.
+//! The settings window: the keyboard shortcut, Open at Login, updates,
+//! clipboard history, and which folders the file search covers.
+//!
+//! The update and clipboard options live in `config.toml`. Changing them
+//! here edits that file in place (see `sift_state::Setting`), so the file
+//! and this window always agree.
 //!
 //! It shows each indexed folder with its state and size, and sends changes
 //! to the index service. Folders are chosen with the standard macOS folder
@@ -20,12 +24,17 @@ use sift_files::{Command, RootState, RootStatus};
 use sift_indexer::IndexOptions;
 
 use crate::hotkey::{self, Hotkeys, Recorded, Shortcut};
-use crate::launcher::{IndexStatusChanged, Launcher, UpdateStateChanged};
+use crate::launcher::{IndexStatusChanged, Launcher, UpdateStateChanged, UserDataChanged};
 use crate::theme::Theme;
 use crate::updates::UpdateState;
 use sift_macos::a11y::{self, Urgency};
 use sift_macos::key_capture::{KeyCapture, KeyPress};
 use sift_macos::login_item::{self, Status as LoginStatus};
+use sift_state::Setting;
+
+/// History sizes offered in the settings window. Another value set in
+/// config.toml is shown as an extra choice.
+const CLIP_SIZES: &[usize] = &[50, 200, 500, 1000];
 
 actions!(settings, [CloseSettings]);
 
@@ -68,7 +77,7 @@ pub fn open(launcher: Entity<Launcher>, cx: &mut App) {
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(680.), px(680.)),
+            size(px(680.), px(720.)),
             cx,
         ))),
         kind: WindowKind::Normal,
@@ -109,6 +118,8 @@ pub struct Settings {
     recording: Option<KeyCapture>,
     /// A note under the shortcut, and whether it reports a problem.
     shortcut_note: Option<(SharedString, bool)>,
+    /// Clear History was clicked once and waits for confirmation.
+    confirm_clear: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -134,12 +145,17 @@ impl Settings {
             _subscriptions: vec![
                 cx.subscribe(&launcher, |_, _, _: &IndexStatusChanged, cx| cx.notify()),
                 cx.subscribe(&launcher, |_, _, _: &UpdateStateChanged, cx| cx.notify()),
+                cx.subscribe(&launcher, |_, _, _: &UserDataChanged, cx| cx.notify()),
                 cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
                 cx.observe_window_activation(window, |this, window, cx| {
                     if window.is_window_active() {
                         this.login = login_item::status();
+                        // Picks up hand edits to config.toml (one `stat`).
+                        this.launcher
+                            .update(cx, |launcher, cx| launcher.reload_config(cx));
                         cx.notify();
                     } else {
+                        this.confirm_clear = false;
                         // Key presses in other apps never reach the
                         // recorder, so stop rather than leave the shortcut
                         // switched off.
@@ -162,6 +178,30 @@ impl Settings {
             login,
             recording: None,
             shortcut_note: None,
+            confirm_clear: false,
+        }
+    }
+
+    /// Saves an option to config.toml; a problem is shown in the banner.
+    fn change(&mut self, setting: Setting, cx: &mut Context<Self>) {
+        let result = self
+            .launcher
+            .update(cx, |launcher, cx| launcher.change_setting(setting, cx));
+        match result {
+            Ok(()) => self.message = None,
+            Err(reason) => {
+                tracing::warn!(%reason, "cannot save setting");
+                speak(&reason);
+                self.message = Some(reason.into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_config_file(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.launcher.read(cx).open_config_file() {
+            self.message = Some(error.to_string().into());
+            cx.notify();
         }
     }
 
@@ -425,11 +465,6 @@ impl Settings {
             ),
         };
         let checks_on = self.launcher.read(cx).update_checks_enabled();
-        let update_detail = if checks_on || matches!(update, UpdateState::Available(_)) {
-            update_detail
-        } else {
-            format!("{update_detail} Automatic checks are off ([updates] in the configuration).")
-        };
         let row = |title: &'static str, detail: SharedString| {
             div()
                 .flex()
@@ -463,6 +498,17 @@ impl Settings {
                 });
             }),
         );
+        let checks_switch =
+            div()
+                .id("check-automatically")
+                .flex_none()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.change(Setting::UpdateChecks(!checks_on), cx)
+                }))
+                .child(switch(checks_on, theme));
+        let edit_config = button("edit-config", "Edit Configuration…", Kind::Secondary, theme)
+            .on_click(cx.listener(|this, _, _, cx| this.open_config_file(cx)));
         let hairline = || div().h(px(1.)).bg(theme.divider);
         let shortcut_row = self.render_shortcut(theme, cx);
         div()
@@ -492,6 +538,180 @@ impl Settings {
                     .gap_3()
                     .child(row("Updates", update_detail.into()))
                     .child(check),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(row(
+                        "Check Automatically",
+                        "Once a day, ask GitHub whether a newer Sift is out. Nothing is \
+                         downloaded, and nothing about you is sent."
+                            .into(),
+                    ))
+                    .child(checks_switch),
+            )
+            .child(hairline())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(row(
+                        "Snippets and Custom Commands",
+                        "Written in config.toml, which opens in your text editor.".into(),
+                    ))
+                    .child(edit_config),
+            )
+            .into_any_element()
+    }
+
+    /// "Clipboard History": on or off, how much to keep, and clearing it.
+    fn render_clipboard(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let launcher = self.launcher.read(cx);
+        let on = launcher.clipboard_enabled();
+        let max = launcher.clipboard_max_items();
+        let count = launcher.clipboard_count();
+        let row = |title: &'static str, detail: SharedString| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .gap(px(2.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .child(detail),
+                )
+        };
+        let hairline = || div().h(px(1.)).bg(theme.divider);
+
+        let detail = if on {
+            "Type clip in the panel to search text you copied, or clip and a word. \
+             Text that password managers mark as private is never kept."
+        } else {
+            "Keep a history of the text you copy, on this Mac only. Off by default, \
+             because copied text can be private."
+        };
+        let enable = div()
+            .id("clipboard-enabled")
+            .flex_none()
+            .cursor_pointer()
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.change(Setting::ClipboardEnabled(!on), cx)),
+            )
+            .child(switch(on, theme));
+
+        let mut sizes: Vec<usize> = CLIP_SIZES.to_vec();
+        if !sizes.contains(&max) {
+            sizes.push(max);
+            sizes.sort_unstable();
+        }
+        let choices =
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(4.))
+                .children(sizes.into_iter().map(|n| {
+                    let label = thousands(n as u64).into();
+                    choice(("clip-size", n), label, n == max, theme).on_click(cx.listener(
+                        move |this, _, _, cx| this.change(Setting::ClipboardMaxItems(n), cx),
+                    ))
+                }));
+
+        let kept: SharedString = match (on, count) {
+            (false, _) => "Deletes what was kept while history was on.".into(),
+            (true, 0) => "Nothing kept yet.".into(),
+            (true, 1) => "1 entry kept on this Mac.".into(),
+            (true, n) => format!("{} entries kept on this Mac.", thousands(n as u64)).into(),
+        };
+        let clear: AnyElement = if self.confirm_clear {
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(8.))
+                .child(
+                    button("clear-cancel", "Cancel", Kind::Secondary, theme).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.confirm_clear = false;
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(
+                    button("clear-confirm", "Delete History", Kind::Destructive, theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.confirm_clear = false;
+                            this.launcher
+                                .update(cx, |launcher, cx| launcher.clear_clipboard(cx));
+                            speak("Clipboard history deleted.");
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .into_any_element()
+        } else {
+            button(
+                "clear-clipboard",
+                "Clear History…",
+                Kind::Destructive,
+                theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.confirm_clear = true;
+                speak("Delete the clipboard history? Choose Delete History or Cancel.");
+                cx.notify();
+            }))
+            .into_any_element()
+        };
+        let kept: SharedString = if self.confirm_clear {
+            "Delete every entry? This cannot be undone.".into()
+        } else {
+            kept
+        };
+
+        div()
+            .p(px(14.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.divider)
+            .bg(theme.card)
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(row("Keep Clipboard History", detail.into()))
+                    .child(enable),
+            )
+            .when(on, |card| {
+                card.child(hairline()).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(row(
+                            "History Size",
+                            "The newest entries are kept; older ones are deleted.".into(),
+                        ))
+                        .child(choices),
+                )
+            })
+            .child(hairline())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(row("Clear History", kept))
+                    .child(clear),
             )
             .into_any_element()
     }
@@ -857,85 +1077,64 @@ impl Render for Settings {
             .flex_col()
             .child(
                 div()
+                    .id("settings-page")
+                    .flex_grow()
+                    .overflow_y_scroll()
                     .px(px(PAGE_INSET))
                     .pt(px(20.))
                     .pb(px(16.))
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
+                    .child(section_label("General", &theme))
+                    .child(div().pb(px(18.)).child(self.render_general(&theme, cx)))
+                    .child(section_label("Clipboard History", &theme))
+                    .child(div().pb(px(18.)).child(self.render_clipboard(&theme, cx)))
                     .child(
                         div()
-                            .text_size(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("File Search"),
+                            .pb(px(8.))
+                            .flex()
+                            .justify_between()
+                            .text_size(px(11.))
+                            .text_color(theme.placeholder)
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Locations"))
+                            .child(count),
                     )
-                    .child(div().max_w(px(540.)).text_color(theme.muted).child(
+                    .child(div().pb(px(10.)).max_w(px(540.)).text_color(theme.muted).child(
                         "Sift finds files and folders by name in these locations and keeps up \
                          with changes as they happen. Only names, sizes and dates are stored, \
                          on this Mac; file contents are never read.",
-                    )),
-            )
-            .child(
-                div()
-                    .px(px(PAGE_INSET))
-                    .pb(px(8.))
-                    .text_size(px(11.))
-                    .text_color(theme.placeholder)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("General"),
-            )
-            .child(
-                div()
-                    .px(px(PAGE_INSET))
-                    .pb(px(18.))
-                    .child(self.render_general(&theme, cx)),
-            )
-            .child(
-                div()
-                    .px(px(PAGE_INSET))
-                    .pb(px(8.))
-                    .flex()
-                    .justify_between()
-                    .text_size(px(11.))
-                    .text_color(theme.placeholder)
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Locations"))
-                    .child(count),
-            )
-            .child(
-                div()
-                    .id("roots")
-                    .flex_grow()
-                    .overflow_y_scroll()
-                    .px(px(PAGE_INSET))
-                    .pb(px(16.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .when(roots.is_empty(), |list| {
-                        list.child(
-                            div()
-                                .p(px(20.))
-                                .rounded(px(10.))
-                                .border_1()
-                                .border_color(theme.divider)
-                                .bg(theme.card)
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_center()
-                                .child(
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .when(roots.is_empty(), |list| {
+                                list.child(
                                     div()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("No folders yet"),
+                                        .p(px(20.))
+                                        .rounded(px(10.))
+                                        .border_1()
+                                        .border_color(theme.divider)
+                                        .bg(theme.card)
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .text_center()
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child("No folders yet"),
+                                        )
+                                        .child(div().text_color(theme.muted).child(
+                                            "Add the folders you want to search, such as \
+                                             Documents or a projects folder.",
+                                        )),
                                 )
-                                .child(div().text_color(theme.muted).child(
-                                    "Add the folders you want to search, such as Documents \
-                                     or a projects folder.",
-                                )),
-                        )
-                    })
-                    .children(roots),
+                            })
+                            .children(roots),
+                    ),
             )
             .when_some(message, |page, message| {
                 page.child(
@@ -1046,6 +1245,47 @@ fn button(
             .px(px(4.))
             .text_color(theme.accent)
             .hover(|style| style.opacity(0.75)),
+    }
+}
+
+/// A small heading above a card.
+fn section_label(text: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .pb(px(8.))
+        .text_size(px(11.))
+        .text_color(theme.placeholder)
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text)
+}
+
+/// One option of a set of choices; the selected one is filled.
+fn choice(
+    id: impl Into<gpui::ElementId>,
+    label: SharedString,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let base = div()
+        .id(id)
+        .flex_none()
+        .h(px(24.))
+        .min_w(px(40.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(label);
+    if selected {
+        base.bg(theme.accent).text_color(theme.on_accent)
+    } else {
+        let hover = theme.selected;
+        base.bg(theme.key_background)
+            .text_color(theme.text)
+            .hover(move |style| style.bg(hover))
     }
 }
 
