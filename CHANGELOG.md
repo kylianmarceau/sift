@@ -3,6 +3,11 @@
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 
+## 0.1.4 (2026-10-25)
+
+- Replace the app icon with Sieve: three graphite bars and a cobalt-blue
+  square on an ivory background, with artwork for every macOS icon size.
+
 ## 0.1.3 (2026-10-24)
 
 - Settings has a Clipboard History section: turn it on or off, choose
