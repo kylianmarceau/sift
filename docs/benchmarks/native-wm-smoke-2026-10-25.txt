@@ -1,0 +1,24 @@
+PASS fixture launched through Launch Services
+PASS fixture ready
+PASS fixture registered as a regular application
+PASS discover only fixture windows
+PASS actual native windows tiled
+PASS fixture inactive before focus test
+PASS focus native window
+PASS native cursor positioning
+PASS move to hidden workspace
+PASS workspace shows native window
+PASS minimize leaves tile tree
+PASS unminimize rejoins tile tree
+PASS fixture is stalled
+PASS stalled application does not block status
+PASS pause restores original frames
+PASS resume tiles native windows again
+PASS mouse configuration enabled
+PASS mouse configuration disabled
+PASS mouse configuration enabled
+PASS mouse configuration disabled
+PASS mouse configuration enabled
+PASS mouse configuration disabled
+PASS shutdown restores original frames
+Native window-manager checks passed.

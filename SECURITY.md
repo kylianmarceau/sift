@@ -21,8 +21,9 @@ Only the latest release is supported.
   redirects. Only the version string of the reply is used; the page Sift
   opens is a fixed URL, never one taken from the reply. Sift downloads
   and installs nothing.
-- **Permissions.** No Accessibility, Full Disk Access, Screen Recording
-  or Input Monitoring. macOS's own folder prompts appear when you add
+- **Permissions.** Launching and file search need no Accessibility, Full Disk
+  Access, Screen Recording or Input Monitoring. Optional native window
+  management requires Accessibility and is off by default. macOS's folder prompts appear when you add
   Documents, Desktop or Downloads. Open at Login uses `SMAppService` and
   only when you turn it on.
 - **Local data.** The index, recents, favorites and clipboard history
@@ -34,6 +35,10 @@ Only the latest release is supported.
   passed through a shell. Custom commands in `config.toml` do run shell
   commands: that file is yours to edit, and Sift runs only what you wrote
   in it.
+- **Window management.** The optional service has a user-owned local control
+  socket (0700 directory, 0600 socket, same-uid peers, bounded messages and
+  deadlines). It accepts window commands, not arbitrary shell execution. Original
+  window positions are saved locally for restoration after an interrupted exit.
 - **Signing.** Release builds use the hardened runtime. A build signed
   with a Developer ID is also notarized; the release notes say which
   kind a release is. `SHA256SUMS` lists the checksums of each download.

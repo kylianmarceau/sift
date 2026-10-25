@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0 (2026-10-25)
+
+- Optional native Rust window management: nested tiles and accordion layouts,
+  floating windows, workspaces, monitor assignments, application rules, binding
+  modes, and commands for focus, moving, resizing and fullscreen.
+- Open-window and workspace search (`win` / `ws`), Settings controls, `sift wm`
+  and an app-bundled command client (`Sift --wm`).
+- Per-application AX workers and coalesced geometry updates; recovery positions
+  are saved before arranging windows and restored when disabled or quitting.
+- Per-display gaps, bounded startup/window/focus/workspace callbacks, optional
+  focus-follow-mouse, cursor positioning/following and native drag/resize handling.
+- Isolated native smoke coverage for actual frames, focus, workspace switching,
+  minimize/restore, stalled applications, pause/resume and shutdown restoration.
+- Homebrew now installs the standalone `sift` CLI bundled inside Sift.app,
+  including `sift wm` commands. File search/index commands remain available.
+- Window management is experimental and off by default. Enabling requires
+  Device Control and Data Access on macOS 27, or Accessibility on older macOS.
+  Broader native application, multi-monitor and physical-gesture acceptance
+  remains pending; AeroSpace configuration/CLI compatibility is not complete.
+
 All notable changes are listed here. Versions follow
 [Semantic Versioning](https://semver.org).
 

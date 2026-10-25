@@ -14,8 +14,9 @@
 //! - [`QuickLook`]: preview the selected file with the system Quick Look
 //!   panel.
 //!
-//! Everything here uses public, documented AppKit APIs and needs no special
-//! permissions (no Accessibility, no Full Disk Access).
+//! Launcher integrations use public AppKit APIs without special permissions.
+//! The opt-in [`wm`] backend requires Accessibility and dynamically resolves
+//! a private AX window-id bridge; it is never started for ordinary search.
 
 use std::path::{Path, PathBuf};
 
@@ -72,6 +73,8 @@ pub mod key_capture;
 pub mod login_item;
 #[cfg(target_os = "macos")]
 mod quicklook;
+#[cfg(target_os = "macos")]
+pub mod wm;
 
 #[cfg(target_os = "macos")]
 pub use quicklook::QuickLook;

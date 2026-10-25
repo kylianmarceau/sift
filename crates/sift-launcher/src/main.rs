@@ -21,6 +21,7 @@ mod theme;
 mod uibench;
 mod updates;
 mod user;
+mod window_manager;
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -53,6 +54,30 @@ pub fn launch_failures() -> UnboundedSender<LaunchError> {
 }
 
 fn main() {
+    // The bundled executable doubles as a small command client. Exit before
+    // creating a session, UI, hotkeys or any window observers.
+    if std::env::args().nth(1).as_deref() == Some("--wm") {
+        match sift_wm::protocol::request(&launcher::user_dir(), std::env::args().skip(2).collect())
+        {
+            Ok(reply) if reply.ok => {
+                println!("{}", reply.data);
+                return;
+            }
+            Ok(reply) => {
+                eprintln!(
+                    "{}",
+                    reply
+                        .error
+                        .unwrap_or_else(|| "window command failed".into())
+                );
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
     let started = Instant::now();
     logging::init(log_level());
     let (session, unclean_exit) = session::Session::start(&launcher::user_dir());
@@ -103,6 +128,7 @@ fn main() {
             // thread; forward them to a GPUI task through a channel.
             let (hotkey_tx, mut hotkey_rx) = unbounded::<Instant>();
             hotkey::install(launcher::user_dir(), hotkey_tx, cx);
+            let _ = window.update(cx, |launcher, _, cx| launcher.sync_window_hotkeys(cx));
             cx.spawn(async move |cx| {
                 while let Some(pressed_at) = hotkey_rx.next().await {
                     let _ = window.update(cx, |launcher, window, cx| {
@@ -147,9 +173,20 @@ fn main() {
 
             cx.on_action(|_: &Quit, cx| cx.quit());
             // Quitting normally removes the marker; a crash leaves it behind.
-            cx.on_app_quit(move |_| {
-                session.end();
-                async {}
+            let session = std::sync::Arc::new(session);
+            cx.on_app_quit(move |cx| {
+                let session = session.clone();
+                let controller = window.update(cx, |launcher, _, _| launcher.stop_window_management()).ok().flatten();
+                let (finished, wait) = futures::channel::oneshot::channel();
+                if let Some(controller) = controller {
+                    let _ = std::thread::Builder::new().name("sift-wm-exit".into()).spawn(move || {
+                        if !controller.wait_stopped(std::time::Duration::from_secs(4)) {
+                            tracing::warn!("window restoration did not finish before exit; recovery positions are saved");
+                        }
+                        let _ = finished.send(());
+                    });
+                } else { let _ = finished.send(()); }
+                async move { let _ = wait.await; session.end(); }
             })
             .detach();
             tracing::info!(

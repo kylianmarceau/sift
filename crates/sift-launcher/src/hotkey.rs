@@ -11,8 +11,8 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedSender;
@@ -408,6 +408,15 @@ pub struct Hotkeys {
     /// handler.
     active: Arc<AtomicU32>,
     dir: PathBuf,
+    window_keys: Vec<HotKey>,
+    window_routes: Arc<Mutex<Option<WindowRoutes>>>,
+    window_signature: Option<(String, std::collections::BTreeMap<String, Vec<String>>)>,
+    paused: Arc<AtomicBool>,
+}
+
+struct WindowRoutes {
+    controller: sift_macos::wm::Controller,
+    commands: std::collections::HashMap<u32, sift_wm::Command>,
 }
 
 impl Global for Hotkeys {}
@@ -416,14 +425,24 @@ impl Global for Hotkeys {}
 /// the time of each press to `presses`.
 pub fn install(dir: PathBuf, presses: UnboundedSender<Instant>, cx: &mut App) {
     let active = Arc::new(AtomicU32::new(0));
+    let window_routes: Arc<Mutex<Option<WindowRoutes>>> = Arc::default();
+    let paused = Arc::new(AtomicBool::new(false));
     let manager = match GlobalHotKeyManager::new() {
         Ok(manager) => {
             let active = active.clone();
+            let routes = window_routes.clone();
+            let paused = paused.clone();
             // Events arrive from a Carbon handler on the main thread.
             GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-                if event.state == HotKeyState::Pressed && event.id == active.load(Ordering::Relaxed)
-                {
+                if event.state != HotKeyState::Pressed || paused.load(Ordering::Relaxed) {
+                    return;
+                }
+                if event.id == active.load(Ordering::Relaxed) {
                     let _ = presses.unbounded_send(Instant::now());
+                } else if let Some(routes) = &*routes.lock().unwrap_or_else(|e| e.into_inner()) {
+                    if let Some(command) = routes.commands.get(&event.id) {
+                        let _ = routes.controller.execute(command.clone());
+                    }
                 }
             }));
             Some(manager)
@@ -439,6 +458,10 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<Instant>, cx: &mut App) {
         registered: false,
         active,
         dir,
+        window_keys: Vec::new(),
+        window_routes,
+        window_signature: None,
+        paused,
     };
     if let Err(error) = hotkeys.register()
         && !hotkeys.current.is_default()
@@ -451,6 +474,90 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<Instant>, cx: &mut App) {
 }
 
 impl Hotkeys {
+    /// Register the current WM binding mode on the main thread. The same
+    /// signature is a no-op, so window geometry updates never touch Carbon.
+    pub fn configure_windows(
+        &mut self,
+        config: &sift_wm::Config,
+        mode: &str,
+        controller: Option<sift_macos::wm::Controller>,
+    ) -> Result<(), String> {
+        let Some(controller) = controller else {
+            if let Some(manager) = &self.manager {
+                for key in self.window_keys.drain(..) {
+                    let _ = manager.unregister(key);
+                }
+            }
+            self.window_signature = None;
+            *self.window_routes.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return Ok(());
+        };
+        let bindings = config
+            .bindings
+            .get(mode)
+            .ok_or_else(|| format!("unknown window binding mode {mode}"))?;
+        let signature = (mode.to_owned(), bindings.clone());
+        if self.window_signature.as_ref() == Some(&signature) {
+            return Ok(());
+        }
+        let mut keys = Vec::new();
+        let mut commands = std::collections::HashMap::new();
+        for (text, values) in bindings {
+            let key = window_mode_hotkey(text, mode)?;
+            if key == self.current.hotkey {
+                return Err(format!("{text} conflicts with Sift's launcher shortcut"));
+            }
+            let sequence = values
+                .iter()
+                .map(|s| sift_wm::parse(s).map_err(|e| e.to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if commands
+                .insert(key.id(), sift_wm::Command::Sequence(sequence))
+                .is_some()
+            {
+                return Err(format!("duplicate physical window shortcut: {text}"));
+            }
+            keys.push(key);
+        }
+        if mode != "main" {
+            let escape = HotKey::new(None, Code::Escape);
+            if let std::collections::hash_map::Entry::Vacant(entry) = commands.entry(escape.id()) {
+                entry.insert(sift_wm::Command::Mode("main".into()));
+                keys.push(escape);
+            }
+        }
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or("keyboard shortcuts are unavailable")?;
+        let previous_keys = self.window_keys.clone();
+        for key in &previous_keys {
+            let _ = manager.unregister(*key);
+        }
+        let mut registered = Vec::new();
+        if !self.paused.load(Ordering::Relaxed) {
+            for key in &keys {
+                if let Err(error) = manager.register(*key) {
+                    for key in registered {
+                        let _ = manager.unregister(key);
+                    }
+                    for key in &previous_keys {
+                        let _ = manager.register(*key);
+                    }
+                    return Err(format!("could not register window shortcut: {error}"));
+                }
+                registered.push(*key);
+            }
+        }
+        self.window_keys = keys;
+        self.window_signature = Some(signature);
+        *self.window_routes.lock().unwrap_or_else(|e| e.into_inner()) = Some(WindowRoutes {
+            controller,
+            commands,
+        });
+        Ok(())
+    }
+
     pub fn current(&self) -> &Shortcut {
         &self.current
     }
@@ -498,19 +605,36 @@ impl Hotkeys {
     /// Turns the shortcut off while a new one is recorded, so pressing it
     /// reaches the recorder instead of toggling the panel.
     pub fn pause(&mut self) {
+        self.paused.store(true, Ordering::Relaxed);
+        if let Some(manager) = &self.manager {
+            for key in &self.window_keys {
+                let _ = manager.unregister(*key);
+            }
+        }
         self.unregister();
     }
 
     /// Turns the shortcut back on after [`pause`](Self::pause).
     pub fn resume(&mut self) {
+        let was_paused = self.paused.swap(false, Ordering::Relaxed);
         if !self.registered {
             let _ = self.register();
+        }
+        if was_paused {
+            if let Some(manager) = &self.manager {
+                for key in &self.window_keys {
+                    let _ = manager.register(*key);
+                }
+            }
         }
     }
 
     /// Replaces the shortcut and saves it. If macOS refuses the new one,
     /// the previous one stays and the reason is returned.
     pub fn set(&mut self, shortcut: Shortcut) -> Result<(), String> {
+        if self.window_keys.contains(&shortcut.hotkey) {
+            return Err("This shortcut is assigned to a window-management command.".into());
+        }
         if shortcut == self.current {
             self.resume();
             return Ok(());
@@ -526,9 +650,37 @@ impl Hotkeys {
     }
 }
 
+pub(crate) fn window_mode_hotkey(text: &str, mode: &str) -> Result<HotKey, String> {
+    let text = text.replace('-', "+");
+    let key = HotKey::from_str(&text).map_err(|e| e.to_string())?;
+    if !KEYS.iter().any(|(_, code)| *code == key.key)
+        || (mode == "main"
+            && !is_function_key(key.key)
+            && !key
+                .mods
+                .intersects(Modifiers::ALT | Modifiers::CONTROL | Modifiers::META))
+    {
+        return Err(
+            "Main-mode window shortcuts need Command, Control or Option, or a function key.".into(),
+        );
+    }
+    Ok(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_window_shortcuts_are_valid_and_secondary_modes_can_use_bare_keys() {
+        for shortcut in sift_wm::Config::default().bindings["main"].keys() {
+            window_mode_hotkey(shortcut, "main").expect("default binding");
+        }
+        assert!(window_mode_hotkey("h", "main").is_err());
+        assert!(window_mode_hotkey("h", "resize").is_ok());
+        assert!(window_mode_hotkey("escape", "resize").is_ok());
+        assert!(window_mode_hotkey("ctrl-alt-h", "main").is_ok());
+    }
 
     fn press(key_code: u16, mods: &str, character: &str) -> KeyPress {
         KeyPress {

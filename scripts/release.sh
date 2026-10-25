@@ -70,9 +70,10 @@ notarize() {
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
     step "Sign the app with $SIGN_IDENTITY"
+    sign "$APP/Contents/MacOS/sift-cli"
     sign "$APP"
 fi
-codesign --verify --strict --verbose=2 "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

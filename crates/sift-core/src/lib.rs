@@ -22,10 +22,12 @@ pub enum ResultKind {
     Calculator,
     Snippet,
     Clipboard,
+    Window,
+    Workspace,
 }
 
 impl ResultKind {
-    pub const ALL: [ResultKind; 7] = [
+    pub const ALL: [ResultKind; 9] = [
         Self::Application,
         Self::File,
         Self::Folder,
@@ -33,6 +35,8 @@ impl ResultKind {
         Self::Calculator,
         Self::Snippet,
         Self::Clipboard,
+        Self::Window,
+        Self::Workspace,
     ];
 
     pub fn label(self) -> &'static str {
@@ -44,6 +48,8 @@ impl ResultKind {
             Self::Calculator => "Calculator",
             Self::Snippet => "Snippet",
             Self::Clipboard => "Clipboard",
+            Self::Window => "Window",
+            Self::Workspace => "Workspace",
         }
     }
 
@@ -76,6 +82,8 @@ pub enum Action {
     CopyText(Arc<str>),
     /// Run a user-defined shell command (from the config file).
     Shell(Arc<str>),
+    /// A native Sift window-management command, never a shell command.
+    WindowCommand(Arc<str>),
     /// Run one of the launcher's built-in commands, by id.
     Run(&'static str),
 }
@@ -100,6 +108,7 @@ impl Action {
             Self::OpenUrl(url) => format!("url:{url}"),
             Self::CopyText(text) => format!("copy:{text}"),
             Self::Shell(command) => format!("shell:{command}"),
+            Self::WindowCommand(command) => format!("wm:{command}"),
             Self::Run(id) => format!("run:{id}"),
         }
     }
@@ -115,6 +124,7 @@ impl Action {
             "url" => Self::OpenUrl(rest.into()),
             "copy" => Self::CopyText(rest.into()),
             "shell" => Self::Shell(rest.into()),
+            "wm" => Self::WindowCommand(rest.into()),
             "run" => Self::Run(commands.iter().copied().find(|c| *c == rest)?),
             _ => return None,
         })

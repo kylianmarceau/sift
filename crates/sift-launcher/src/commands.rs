@@ -9,6 +9,8 @@ pub const CLIPBOARD: &str = "clipboard";
 pub const CLEAR_CLIPBOARD: &str = "clear-clipboard";
 pub const QUIT: &str = "quit";
 pub const CHECK_UPDATES: &str = "check-updates";
+pub const WINDOWS: &str = "windows";
+pub const WORKSPACES: &str = "workspaces";
 
 /// Every built-in command id (stored recents may only name these).
 pub const ALL: &[&str] = &[
@@ -18,6 +20,8 @@ pub const ALL: &[&str] = &[
     CLEAR_CLIPBOARD,
     CHECK_UPDATES,
     QUIT,
+    WINDOWS,
+    WORKSPACES,
 ];
 
 struct Spec {
@@ -29,6 +33,18 @@ struct Spec {
 }
 
 const COMMANDS: &[Spec] = &[
+    Spec {
+        id: WINDOWS,
+        title: "Search Windows",
+        subtitle: "Switch to an open window (Window Management must be on)",
+        aliases: &["window switcher", "win"],
+    },
+    Spec {
+        id: WORKSPACES,
+        title: "Switch Workspace",
+        subtitle: "Search Sift's workspaces (Window Management must be on)",
+        aliases: &["virtual desktop", "ws"],
+    },
     Spec {
         id: SETTINGS,
         title: "Sift Settings",

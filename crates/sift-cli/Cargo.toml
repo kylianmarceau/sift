@@ -14,6 +14,9 @@ name = "sift"
 path = "src/main.rs"
 
 [dependencies]
+sift-wm.workspace = true
+sift-state.workspace = true
+serde_json.workspace = true
 sift-store.workspace = true
 sift-indexer.workspace = true
 sift-search.workspace = true

@@ -37,6 +37,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Control Sift's native window manager. Try `sift wm status` or
+    /// `sift wm list-windows`. Sift.app must be running with it enabled.
+    Wm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
     /// Scan directories and (re)build their index.
     Index(IndexArgs),
     /// Search indexed file and folder names.
@@ -177,6 +183,23 @@ fn run(cli: Cli) -> Result<()> {
         None => default_index_dir()?,
     };
     match cli.command {
+        Command::Wm { args } => {
+            let support = std::env::var_os("SIFT_CONFIG_DIR")
+                .map(PathBuf::from)
+                .or_else(sift_state::support_dir)
+                .context("cannot determine Sift support directory")?;
+            let reply = sift_wm::protocol::request(&support, args)?;
+            if !reply.ok {
+                bail!(
+                    "{}",
+                    reply
+                        .error
+                        .unwrap_or_else(|| "window manager command failed".into())
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&reply.data)?);
+            Ok(())
+        }
         Command::Index(args) => cmd_index(&index_dir, args),
         Command::Search(args) => cmd_search(&index_dir, args),
         Command::Status => cmd_status(&index_dir),

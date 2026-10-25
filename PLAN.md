@@ -1,5 +1,36 @@
 # Plan
 
+## Native window management (development branch)
+
+User-requested expansion: a native Rust rebuild of AeroSpace's window-management
+model inside Sift. Branch: `native-window-manager`. The low-memory,
+responsive-search and near-zero-idle principles remain acceptance requirements.
+Shipped as an experimental, opt-in feature in 0.2.0.
+
+- [x] UI-independent tree/workspace engine and native macOS backend
+- [x] Tiles, accordion, floating, nested splits/joins, move/swap, resize/balance
+- [x] Named workspaces, focus history, monitor assignment and disconnection
+- [x] Application/title rules, bundle allow/deny lists, configurable binding modes
+- [x] Window/workspace search, Settings controls, CLI and bundled command client
+- [x] Per-application AX workers, bounded/coalesced geometry requests, no idle polling
+- [x] Recovery journal, restoration on pause/disable/quit, socket ownership
+- [x] Deterministic, randomized, protocol and configuration tests
+- [x] Disabled launcher comparison against 0.1.4 with a real 100k-entry index
+- [x] Isolated native-window acceptance: discovery, frames, focus, workspaces,
+      minimize/restore, stalled-app responsiveness, pause/resume and quit restoration
+- [x] Enabled release launcher comparison with three native fixture windows and a 100k-entry index
+- [ ] Broader application, multi-monitor and physical-gesture compatibility
+- [x] Per-display gap overrides with inherited defaults and selector precedence
+- [x] Bounded optional startup/window/focus/workspace/monitor callback hooks
+- [x] Opt-in focus-follow-mouse, cursor positioning/following, native drag/resize model
+- [ ] AeroSpace configuration-import and exhaustive CLI/third-party compatibility
+
+The implementation uses Sift configuration and IPC, rather than claiming
+drop-in compatibility with every AeroSpace command flag or third-party client.
+See [docs/window-manager.md](docs/window-manager.md) for the implemented command
+surface, reference revision, and checks. Existing milestones below are retained
+as the history of the original launcher/file-search plan.
+
 Roadmap and milestone status. Architecture decisions live in
 [ARCHITECTURE.md](ARCHITECTURE.md); measurements live in
 [BENCHMARKS.md](BENCHMARKS.md).

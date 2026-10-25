@@ -4648,7 +4648,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sift-apps"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "plist",
  "sift-core",
@@ -4659,22 +4659,25 @@ dependencies = [
 
 [[package]]
 name = "sift-calc"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "sift-core",
 ]
 
 [[package]]
 name = "sift-cli"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "serde_json",
  "sift-indexer",
  "sift-search",
+ "sift-state",
  "sift-store",
  "sift-watch",
+ "sift-wm",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -4682,11 +4685,11 @@ dependencies = [
 
 [[package]]
 name = "sift-core"
-version = "0.1.4"
+version = "0.2.0"
 
 [[package]]
 name = "sift-files"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "sift-core",
  "sift-indexer",
@@ -4700,7 +4703,7 @@ dependencies = [
 
 [[package]]
 name = "sift-indexer"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "sift-store",
  "tempfile",
@@ -4710,7 +4713,7 @@ dependencies = [
 
 [[package]]
 name = "sift-launcher"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "futures",
  "global-hotkey",
@@ -4726,6 +4729,7 @@ dependencies = [
  "sift-macos",
  "sift-search",
  "sift-state",
+ "sift-wm",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -4733,7 +4737,7 @@ dependencies = [
 
 [[package]]
 name = "sift-macos"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "block2",
  "libc",
@@ -4741,14 +4745,19 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-quick-look-ui",
+ "serde",
+ "serde_json",
+ "sift-wm",
  "tempfile",
  "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "sift-search"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "memchr",
@@ -4765,11 +4774,12 @@ dependencies = [
 
 [[package]]
 name = "sift-state"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "serde",
  "sift-core",
+ "sift-wm",
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
@@ -4779,7 +4789,7 @@ dependencies = [
 
 [[package]]
 name = "sift-store"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -4788,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "sift-watch"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "dispatch2",
  "libc",
@@ -4797,6 +4807,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "sift-wm"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

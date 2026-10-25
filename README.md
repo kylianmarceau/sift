@@ -9,7 +9,7 @@ you type, with a calculator, snippets, custom commands and an optional
 clipboard history. The file index updates itself as files change. There is
 also a command-line indexer and search tool, `sift`.
 
-**Status:** [0.1.4](https://github.com/kylianmarceau/sift/releases/latest),
+**Status:** [0.2.0](https://github.com/kylianmarceau/sift/releases/tag/v0.2.0),
 an early release. See [PLAN.md](PLAN.md) for the roadmap and
 [CHANGELOG.md](CHANGELOG.md) for what is in each release.
 
@@ -38,6 +38,17 @@ brew install --cask kylianmarceau/sift/sift
 `brew upgrade` then keeps it up to date. Open Sift from Applications and
 see step 3 below.
 
+To upgrade an existing Homebrew installation:
+
+```bash
+brew update
+brew upgrade --cask kylianmarceau/sift/sift
+```
+
+Homebrew also installs the `sift` CLI from the app bundle. Native window
+management is an experimental, opt-in feature in 0.2.0. Enable it in Sift
+Settings → Window Management; see the [setup and controls](docs/window-manager.md).
+
 **Or by hand:**
 
 1. Download `Sift-VERSION-arm64.dmg` (or the `.zip`) from the
@@ -60,9 +71,11 @@ To check a download, compare it with the release's `SHA256SUMS`:
 shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-**Permissions.** Sift has no Dock icon and needs no Accessibility, Full
-Disk Access or other special permission. macOS asks once when you add
-Documents, Desktop or Downloads as a search folder.
+**Permissions.** Launching and file search need no Accessibility or Full
+Disk Access. macOS asks once when you add Documents, Desktop or Downloads.
+The optional native window manager requires Device Control and Data Access
+on macOS 27, or Accessibility on older macOS, when enabled; it is off by default.
+Grant that permission to **Sift** itself. Sift has no Dock icon.
 
 **Open at Login** is off until you turn it on in Sift Settings › General.
 Sift then appears in System Settings › General › Login Items, where you
@@ -194,6 +207,13 @@ second after launch, as choosing it does; for testing), and
 URL, for testing).
 
 ## Building from source
+
+On the `native-window-manager` branch, Settings also offers
+native tiling and workspaces, with searchable open windows (`win`) and
+workspaces (`ws`). See [Window Management](docs/window-manager.md) for setup,
+shortcuts, configuration, CLI commands, and validation status. It requires no
+AeroSpace installation. Available from 0.2.0; it remains experimental and off
+by default while broader application and multi-monitor acceptance continues.
 
 Requirements:
 

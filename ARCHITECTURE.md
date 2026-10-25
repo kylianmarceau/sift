@@ -1,5 +1,11 @@
 # Architecture
 
+The `native-window-manager` branch also adds a native Rust tiling engine
+(`sift-wm`) and per-application macOS AX workers (`sift-macos::wm`). The service
+is opt-in and separate from the search/render paths. See
+[Native window management](docs/window-manager.md) for design, commands,
+recovery, the AeroSpace reference revision, and acceptance status.
+
 This document records the technical decisions behind sift and the
 reasoning for them. It covers what exists today: the indexer and search
 engine (Phase 0), the launcher (Phase 1), live file search in the
@@ -15,10 +21,11 @@ sift/
 │   ├── sift-store/    SQLite persistence: schema, root replacement, path resolution
 │   ├── sift-indexer/  parallel filesystem scanner that writes into the store
 │   ├── sift-search/   name folding, memory-mapped snapshot, matching and ranking
-│   ├── sift-cli/      `sift` binary: index / search / status / remove / bench
+│   ├── sift-cli/      `sift` binary: index / search / status / remove / bench / wm
 │   ├── sift-core/     launcher result types, the Provider trait, query clock, selection
+│   ├── sift-wm/       UI-independent window trees, workspaces, rules, commands and IPC types
 │   ├── sift-apps/     installed-application discovery and the app provider
-│   ├── sift-macos/    AppKit glue: icons, opening apps and files, panel, folder picker
+│   ├── sift-macos/    AppKit glue and native window-management workers
 │   ├── sift-watch/    FSEvents change notifications (objc2-core-services)
 │   ├── sift-files/    file provider, query filters and the live index service
 │   ├── sift-calc/     calculator: expression evaluator and provider
@@ -39,6 +46,11 @@ Dependency directions:
   `calc → core`, `state → core`.
   `sift-apps` reuses only `sift-search`'s folding and name matcher, so
   apps and files rank by the same rules.
+- Window management: `macos → wm`, with `launcher → {wm, macos}` for cached
+  window search and controls; `state → wm` for configuration and `cli → {wm,
+  state}` for its command client. `wm` has no GPUI/AppKit dependency. Opening
+  the panel queues metadata refresh through the model service; it does not
+  enumerate applications or wait on an AX worker before drawing.
 
 `sift-core` holds only UI-free types, so it can be unit-tested without a
 window and shared by future providers. All `unsafe` AppKit code lives in

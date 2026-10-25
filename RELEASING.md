@@ -58,6 +58,11 @@ Without these, a release is ad-hoc signed: it works, but users must click
    - `BUILD-STATUS`: how the build was signed. Put it in the release
      notes.
 
+   The bundle contains the GUI executable `Contents/MacOS/Sift` and standalone
+   CLI `Contents/MacOS/sift-cli`. Their names must differ beyond capitalization
+   on default macOS filesystems. The CLI is signed before the enclosing app;
+   the Homebrew cask links it as `sift`.
+
 4. **Check** the download as a user would get it: copy the `.dmg` to
    another Mac (or another user account), open it, drag Sift to
    Applications and launch it. For a notarized build there should be no

@@ -171,6 +171,8 @@ pub fn tile_color(kind: sift_core::ResultKind) -> Hsla {
         ResultKind::Calculator => rgb(0xff9f0a),
         ResultKind::Snippet => rgb(0xbf5af2),
         ResultKind::Clipboard => rgb(0x30b0c7),
+        ResultKind::Window => rgb(0x0a84ff),
+        ResultKind::Workspace => rgb(0x5e5ce6),
         ResultKind::Application | ResultKind::File | ResultKind::Folder => rgb(0x8e8e93),
     }
     .into()

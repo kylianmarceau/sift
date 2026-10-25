@@ -34,6 +34,12 @@ max_items = 200
 # installed, and nothing about you is sent. Set to false to never check.
 check = true
 
+[window_manager]
+# Native tiling and workspaces. Requires Accessibility permission when on.
+# Off means no window observers, worker threads, or window-management hotkeys.
+enabled = false
+# Optional layout/rule/binding examples: docs/window-manager.md
+
 # Snippets: search by name (or keyword); Enter copies the text.
 # {date}, {time} and {datetime} are replaced when copied.
 #
@@ -62,11 +68,12 @@ check = true
 # shell = "dscacheutil -flushcache"
 "#;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub clipboard: ClipboardConfig,
     pub updates: UpdatesConfig,
+    pub window_manager: sift_wm::Config,
     pub snippets: Vec<Snippet>,
     pub commands: Vec<CustomCommand>,
 }
@@ -188,6 +195,10 @@ impl Config {
             }
         });
         config.clipboard.max_items = config.clipboard.max_items.clamp(1, MAX_CLIP_ITEMS);
+        if let Err(error) = config.window_manager.validate() {
+            problems.push(format!("Window Management: {error}"));
+            config.window_manager.enabled = false;
+        }
         Loaded { config, problems }
     }
 
@@ -221,6 +232,8 @@ pub enum Setting {
     ClipboardMaxItems(usize),
     /// `[updates] check`
     UpdateChecks(bool),
+    /// `[window_manager] enabled`
+    WindowManager(bool),
 }
 
 /// `text` (a `config.toml`) with `setting` applied and everything else
@@ -243,6 +256,7 @@ pub fn apply_setting(text: &str, setting: Setting) -> Result<String, String> {
             (n.clamp(1, MAX_CLIP_ITEMS) as i64).into(),
         ),
         Setting::UpdateChecks(on) => ("updates", "check", on.into()),
+        Setting::WindowManager(on) => ("window_manager", "enabled", on.into()),
     };
     let section = doc
         .as_table_mut()
@@ -318,6 +332,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn window_management_is_opt_in_and_its_settings_do_not_enable_clipboard_history() {
+        assert!(!Config::parse(TEMPLATE).config.window_manager.enabled);
+        let edited = apply_setting(TEMPLATE, Setting::WindowManager(true)).expect("setting");
+        let loaded = Config::parse(&edited);
+        assert!(loaded.problems.is_empty());
+        assert!(loaded.config.window_manager.enabled);
+        assert!(!loaded.config.clipboard.enabled);
+        assert!(loaded.config.updates.check);
+        let broken = "[updates]\ncheck = false\n[window_manager]\nenabled = true\n[[window_manager.rules]]\napp_id = '['\n";
+        let loaded = Config::parse(broken);
+        assert!(!loaded.problems.is_empty());
+        assert!(!loaded.config.window_manager.enabled);
+        assert!(!loaded.config.updates.check);
+    }
+
+    #[test]
     fn template_parses_to_the_defaults() {
         let loaded = Config::parse(TEMPLATE);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
@@ -388,7 +418,7 @@ mod tests {
     fn settings_change_only_their_value() {
         let text = TEMPLATE.replace("max_items = 200", "max_items = 200 # mine");
         let on = apply_setting(&text, Setting::ClipboardEnabled(true)).unwrap();
-        assert_eq!(on, text.replace("enabled = false", "enabled = true"));
+        assert_eq!(on, text.replacen("enabled = false", "enabled = true", 1));
         let fewer = apply_setting(&on, Setting::ClipboardMaxItems(50)).unwrap();
         // The comment after the value stays.
         assert!(fewer.contains("max_items = 50 # mine"), "{fewer}");
@@ -435,7 +465,7 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             written,
-            TEMPLATE.replace("enabled = false", "enabled = true")
+            TEMPLATE.replacen("enabled = false", "enabled = true", 1)
         );
 
         // A dotfiles-style link: the linked file changes, the link stays.

@@ -24,7 +24,9 @@ use sift_files::{Command, RootState, RootStatus};
 use sift_indexer::IndexOptions;
 
 use crate::hotkey::{self, Hotkeys, Recorded, Shortcut};
-use crate::launcher::{IndexStatusChanged, Launcher, UpdateStateChanged, UserDataChanged};
+use crate::launcher::{
+    IndexStatusChanged, Launcher, UpdateStateChanged, UserDataChanged, WindowManagerChanged,
+};
 use crate::theme::Theme;
 use crate::updates::UpdateState;
 use sift_macos::a11y::{self, Urgency};
@@ -146,13 +148,16 @@ impl Settings {
                 cx.subscribe(&launcher, |_, _, _: &IndexStatusChanged, cx| cx.notify()),
                 cx.subscribe(&launcher, |_, _, _: &UpdateStateChanged, cx| cx.notify()),
                 cx.subscribe(&launcher, |_, _, _: &UserDataChanged, cx| cx.notify()),
+                cx.subscribe(&launcher, |_, _, _: &WindowManagerChanged, cx| cx.notify()),
                 cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
                 cx.observe_window_activation(window, |this, window, cx| {
                     if window.is_window_active() {
                         this.login = login_item::status();
                         // Picks up hand edits to config.toml (one `stat`).
-                        this.launcher
-                            .update(cx, |launcher, cx| launcher.reload_config(cx));
+                        this.launcher.update(cx, |launcher, cx| {
+                            launcher.reload_config(cx);
+                            launcher.retry_window_management(cx);
+                        });
                         cx.notify();
                     } else {
                         this.confirm_clear = false;
@@ -716,6 +721,33 @@ impl Settings {
             .into_any_element()
     }
 
+    fn render_window_management(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let launcher = self.launcher.read(cx);
+        let enabled = launcher.window_management_enabled();
+        let status = launcher.window_management_status();
+        div().p(px(14.)).rounded(px(10.)).border_1().border_color(theme.divider).bg(theme.card)
+            .flex().flex_col().gap(px(12.))
+            .child(div().flex().items_center().gap_3()
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(4.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Native Window Management"))
+                    .child(div().text_size(px(12.)).text_color(theme.muted).child(status)))
+                .child(div().id("window-management-enabled").cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.change(Setting::WindowManager(!enabled), cx)))
+                    .child(switch(enabled, theme))))
+            .child(div().h(px(1.)).bg(theme.divider))
+            .child(div().text_size(px(12.)).text_color(theme.muted)
+                .child("Requires window-control permission: Device Control and Data Access on macOS 27, or Accessibility on older macOS. Default shortcuts: Control–Option with H/J/K/L to focus, 1–9 for workspaces; add Shift to move. Search win or ws in Sift. Turning this off restores window positions."))
+            .child(div().flex().gap(px(8.))
+                .child(button("window-management-permission", "Grant Window Control…", Kind::Secondary, theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.launcher.update(cx, |launcher, cx| launcher.request_window_permission(cx));
+                        cx.notify();
+                    })))
+                .child(button("window-management-config", "Edit Rules and Shortcuts…", Kind::Secondary, theme)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_config_file(cx)))))
+            .into_any_element()
+    }
+
     /// "Keyboard Shortcut": the current shortcut as key caps, which start
     /// recording when clicked.
     fn render_shortcut(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1087,6 +1119,8 @@ impl Render for Settings {
                     .flex_col()
                     .child(section_label("General", &theme))
                     .child(div().pb(px(18.)).child(self.render_general(&theme, cx)))
+                    .child(section_label("Window Management", &theme))
+                    .child(div().pb(px(18.)).child(self.render_window_management(&theme, cx)))
                     .child(section_label("Clipboard History", &theme))
                     .child(div().pb(px(18.)).child(self.render_clipboard(&theme, cx)))
                     .child(

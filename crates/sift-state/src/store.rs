@@ -355,7 +355,10 @@ fn is_corruption(error: &rusqlite::Error) -> bool {
 }
 
 fn is_recordable(item: &ResultItem) -> bool {
-    !matches!(item.kind, ResultKind::Calculator | ResultKind::Clipboard)
+    !matches!(
+        item.kind,
+        ResultKind::Calculator | ResultKind::Clipboard | ResultKind::Window | ResultKind::Workspace
+    )
 }
 
 /// 0–7 from a use count and the time since last use: log2 of the count,

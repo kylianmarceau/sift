@@ -17,19 +17,24 @@ BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 
 # Match LSMinimumSystemVersion in packaging/Info.plist.
 export MACOSX_DEPLOYMENT_TARGET=13.0
-cargo build --release --locked -p sift-launcher --manifest-path "$ROOT/Cargo.toml"
+cargo build --release --locked -p sift-launcher -p sift-cli --manifest-path "$ROOT/Cargo.toml"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/release/sift-launcher" "$APP/Contents/MacOS/Sift"
+# Use a distinct name on macOS's case-insensitive filesystems. Homebrew links
+# this helper as `sift`; Sift (the main executable) remains the GUI launcher.
+cp "$ROOT/target/release/sift" "$APP/Contents/MacOS/sift-cli"
 sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" \
     "$ROOT/packaging/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint -s "$APP/Contents/Info.plist"
 cp "$ROOT/packaging/Sift.icns" "$APP/Contents/Resources/Sift.icns"
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+cp "$ROOT/packaging/AeroSpace-LICENSE.txt" "$APP/Contents/Resources/AeroSpace-LICENSE.txt"
 python3 "$ROOT/scripts/third-party-licenses.py" \
     "$APP/Contents/Resources/THIRD_PARTY_LICENSES.txt" >/dev/null
 
+codesign --force --options runtime --sign - "$APP/Contents/MacOS/sift-cli" >/dev/null
 codesign --force --options runtime --sign - "$APP" >/dev/null
 echo "Built $APP ($VERSION, build $BUILD)"
 

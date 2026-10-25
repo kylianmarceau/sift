@@ -129,6 +129,10 @@ impl UserData {
         self.config.clipboard.enabled
     }
 
+    pub fn window_manager_config(&self) -> &sift_wm::Config {
+        &self.config.window_manager
+    }
+
     pub fn clipboard_max_items(&self) -> usize {
         self.config.clipboard.max_items
     }
@@ -257,7 +261,10 @@ impl UserData {
             Action::Run(_) => Some(item),
             // Only snippets and custom commands produce these, and they
             // were resolved above.
-            Action::OpenUrl(_) | Action::CopyText(_) | Action::Shell(_) => None,
+            Action::OpenUrl(_)
+            | Action::CopyText(_)
+            | Action::Shell(_)
+            | Action::WindowCommand(_) => None,
         }
     }
 
@@ -276,7 +283,13 @@ impl UserData {
     /// Returns whether `item` is now a favorite, or `None` if it cannot be
     /// one (calculator results, clipboard entries, no database).
     pub fn toggle_favorite(&mut self, item: &ResultItem) -> Option<bool> {
-        if matches!(item.kind, ResultKind::Calculator | ResultKind::Clipboard) {
+        if matches!(
+            item.kind,
+            ResultKind::Calculator
+                | ResultKind::Clipboard
+                | ResultKind::Window
+                | ResultKind::Workspace
+        ) {
             return None;
         }
         let db = self.db.as_ref()?;

@@ -110,6 +110,11 @@ pub struct Launcher {
     file_search: Search,
     /// Clipboard history only, for `clip …` queries.
     clip_search: Search,
+    window_search: Search,
+    window_manager: Option<sift_macos::wm::Runtime>,
+    window_snapshot: Arc<sift_wm::Snapshot>,
+    window_config: sift_wm::Config,
+    window_error: Option<String>,
     /// Watches the clipboard while clipboard history is enabled.
     clipboard_task: Option<(sift_macos::ClipboardWatcher, Task<()>)>,
     apps: Option<Arc<AppProvider>>,
@@ -291,6 +296,11 @@ impl Launcher {
             search: Search::default(),
             file_search: Search::default(),
             clip_search: Search::default(),
+            window_search: Search::default(),
+            window_manager: None,
+            window_snapshot: Arc::default(),
+            window_config: sift_wm::Config::default(),
+            window_error: None,
             clipboard_task: None,
             apps: None,
             files,
@@ -330,6 +340,7 @@ impl Launcher {
             this.message = Some(notices.join(" ").into());
         }
         this.rebuild_search();
+        this.configure_windows(cx);
         this.watch_clipboard(cx);
         this.refresh_catalog(cx);
         this.run_query(String::new(), cx);
@@ -340,9 +351,17 @@ impl Launcher {
     /// built-in and custom commands, snippets, then files. Usage boosts
     /// (favorites, frequent and recent use) order results within a tier.
     fn rebuild_search(&mut self) {
+        let windows: Option<Arc<dyn Provider>> = self.window_manager.as_ref().map(|_| {
+            Arc::new(crate::window_manager::WindowProvider::new(
+                self.window_snapshot.clone(),
+            )) as Arc<dyn Provider>
+        });
         let mut providers: Vec<Arc<dyn Provider>> = vec![Arc::new(CalculatorProvider)];
         if let Some(apps) = &self.apps {
             providers.push(apps.clone());
+        }
+        if let Some(windows) = &windows {
+            providers.push(windows.clone());
         }
         providers.push(Arc::new(CommandProvider));
         providers.push(self.user.custom_commands());
@@ -352,6 +371,11 @@ impl Launcher {
         self.file_search = Search::new(vec![self.files.clone() as Arc<dyn Provider>])
             .with_boosts(self.user.boosts());
         self.clip_search = Search::new(vec![self.user.clipboard() as Arc<dyn Provider>]);
+        self.window_search = if let Some(windows) = windows {
+            Search::new(vec![windows])
+        } else {
+            Search::default()
+        };
     }
 
     /// Whether applications and the file index have loaded (UI benchmark).
@@ -379,6 +403,7 @@ impl Launcher {
     /// Picks up edits to config.toml (one `stat` when nothing changed).
     pub fn reload_config(&mut self, cx: &mut Context<Self>) {
         if let Reload::Reloaded(problems) = self.user.reload_config() {
+            self.configure_windows(cx);
             self.rebuild_search();
             self.watch_clipboard(cx);
             cx.emit(UserDataChanged);
@@ -511,6 +536,12 @@ impl Launcher {
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reload_config(cx);
+        if self.window_config.enabled && self.window_manager.is_none() {
+            self.configure_windows(cx);
+        }
+        if let Some(runtime) = &self.window_manager {
+            runtime.refresh();
+        }
         self.resize(cx);
         if let Some(panel) = self.panel.clone() {
             panel.show();
@@ -627,7 +658,13 @@ impl Launcher {
             self.set_results(home, same_query, cx);
             return;
         }
-        let search = if self.in_clipboard_scope(&query) {
+        let search = if query == "win"
+            || query.starts_with("win ")
+            || query == "ws"
+            || query.starts_with("ws ")
+        {
+            self.window_search.clone()
+        } else if self.in_clipboard_scope(&query) {
             self.clip_search.clone()
         } else if FileQuery::parse(&query) == Ok(None) {
             self.search.clone()
@@ -892,6 +929,24 @@ impl Launcher {
             Action::OpenUrl(url) => sift_macos::open_url(url, report),
             Action::CopyText(text) => sift_macos::copy_text(text),
             Action::Shell(command) => crate::shell::spawn(command),
+            Action::WindowCommand(text) => {
+                let command = sift_wm::parse(text).map_err(|e| LaunchError::Command(e.to_string()));
+                match (command, self.window_manager.as_ref()) {
+                    (Ok(command), Some(runtime)) => {
+                        // Hide before focusing another app, outside this GPUI
+                        // update, so the launcher cannot steal focus back.
+                        let controller = runtime.controller();
+                        self.hide(cx);
+                        cx.spawn(async move |_, _| {
+                            let _ = controller.execute(command);
+                        })
+                        .detach();
+                        return;
+                    }
+                    (Err(e), _) => Err(e),
+                    (_, None) => Err(LaunchError::Command("Window Management is off".into())),
+                }
+            }
             Action::Run(command) => {
                 self.record_use(&item);
                 self.run_command(command, cx);
@@ -1032,12 +1087,169 @@ impl Launcher {
                 _ => self.check_for_updates(true, cx),
             },
             commands::QUIT => cx.quit(),
+            commands::WINDOWS => {
+                self.input
+                    .update(cx, |input, cx| input.set_text("win ", cx));
+            }
+            commands::WORKSPACES => {
+                self.input.update(cx, |input, cx| input.set_text("ws ", cx));
+            }
             other => tracing::warn!(command = other, "unknown command"),
         }
     }
 
     pub fn update_state(&self) -> &UpdateState {
         &self.update
+    }
+
+    fn configure_windows(&mut self, cx: &mut Context<Self>) {
+        let config = self.user.window_manager_config().clone();
+        if !config.enabled {
+            self.window_manager = None;
+            self.window_snapshot = Arc::default();
+            self.window_error = None;
+        } else if let Err(error) = validate_window_hotkeys(&config) {
+            self.window_error = Some(error);
+            cx.emit(WindowManagerChanged);
+            return;
+        } else if let Some(runtime) = &self.window_manager {
+            self.window_error = None;
+            if config != self.window_config {
+                if let Err(error) = runtime.controller().configure(config.clone()) {
+                    self.window_error = Some(error);
+                }
+            }
+        } else {
+            // Publish only a wake signal. Readers take the latest snapshot,
+            // so a busy UI never accumulates a history of window geometries.
+            let (tx, mut rx) = futures::channel::mpsc::channel::<()>(1);
+            let tx = std::sync::Mutex::new(tx);
+            match sift_macos::wm::Runtime::start(
+                config.clone(),
+                &user_dir(),
+                self.user.config_path(),
+                move |_snapshot| {
+                    let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).try_send(());
+                },
+            ) {
+                Ok(runtime) => {
+                    self.window_snapshot = runtime.controller().snapshot();
+                    let controller = runtime.controller();
+                    self.window_manager = Some(runtime);
+                    self.window_error = None;
+                    cx.spawn(async move |this, cx| {
+                        while let Some(()) = rx.next().await {
+                            let snapshot = controller.snapshot();
+                            if this
+                                .update(cx, |this, cx| {
+                                    if !this.window_manager.as_ref().is_some_and(|runtime| {
+                                        runtime.controller().same_instance(&controller)
+                                    }) {
+                                        return;
+                                    }
+                                    if this.window_manager.as_ref().is_some_and(|runtime| {
+                                        *runtime.controller().config() != this.window_config
+                                    }) {
+                                        this.reload_config(cx);
+                                    }
+                                    this.window_snapshot = snapshot;
+                                    this.sync_window_hotkeys(cx);
+                                    this.rebuild_search();
+                                    if this.is_visible() && !this.query.trim().is_empty() {
+                                        this.run_query(this.query.clone(), cx);
+                                    }
+                                    cx.emit(WindowManagerChanged);
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "cannot enable window management");
+                    self.window_error = Some(error);
+                }
+            }
+        }
+        self.window_config = config;
+        self.sync_window_hotkeys(cx);
+        self.rebuild_search();
+        cx.emit(WindowManagerChanged);
+    }
+
+    pub fn sync_window_hotkeys(&mut self, cx: &mut Context<Self>) {
+        if let Some(runtime) = &mut self.window_manager {
+            if let Err(error) = runtime.sync_mouse_monitor() {
+                self.window_error = Some(error);
+            }
+        }
+        if cx.try_global::<crate::hotkey::Hotkeys>().is_none() {
+            return;
+        }
+        let controller = self.window_manager.as_ref().map(|r| r.controller());
+        let mode = if self.window_snapshot.mode.is_empty() {
+            "main"
+        } else {
+            &self.window_snapshot.mode
+        };
+        if let Err(error) = cx.global_mut::<crate::hotkey::Hotkeys>().configure_windows(
+            &self.window_config,
+            mode,
+            controller,
+        ) {
+            self.window_error = Some(error);
+        }
+    }
+
+    pub fn window_management_enabled(&self) -> bool {
+        self.user.window_manager_config().enabled
+    }
+    pub fn window_management_status(&self) -> String {
+        if let Some(error) = &self.window_error {
+            return error.clone();
+        }
+        if let Some(message) = &self.window_snapshot.message {
+            return message.clone();
+        }
+        if self.window_manager.is_some() {
+            format!(
+                "{} windows · {} workspaces · {} mode{}",
+                self.window_snapshot.windows.len(),
+                self.window_snapshot.workspaces.len(),
+                self.window_snapshot.mode,
+                if self.window_snapshot.enabled {
+                    ""
+                } else {
+                    " · paused"
+                }
+            )
+        } else {
+            "Automatic tiling, keyboard navigation and workspaces. Off by default.".into()
+        }
+    }
+
+    pub fn request_window_permission(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            sift_macos::wm::request_accessibility();
+            let _ = this.update(cx, |this, cx| this.configure_windows(cx));
+        })
+        .detach();
+    }
+
+    pub fn retry_window_management(&mut self, cx: &mut Context<Self>) {
+        if self.window_config.enabled && self.window_manager.is_none() {
+            self.configure_windows(cx);
+        }
+    }
+
+    pub fn stop_window_management(&mut self) -> Option<sift_macos::wm::Controller> {
+        let runtime = self.window_manager.take()?;
+        let controller = runtime.controller();
+        drop(runtime);
+        Some(controller)
     }
 
     pub fn update_checks_enabled(&self) -> bool {
@@ -1376,7 +1588,15 @@ impl Launcher {
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
         let favorite_label = selected
-            .filter(|i| !matches!(i.kind, ResultKind::Calculator | ResultKind::Clipboard))
+            .filter(|i| {
+                !matches!(
+                    i.kind,
+                    ResultKind::Calculator
+                        | ResultKind::Clipboard
+                        | ResultKind::Window
+                        | ResultKind::Workspace
+                )
+            })
             .map(|i| {
                 if self.user.is_favorite(&i.id) {
                     "Unfavorite"
@@ -1387,6 +1607,7 @@ impl Launcher {
         let open_label = match selected.map(|i| &i.action) {
             Some(Action::Run(_) | Action::Shell(_)) => "Run",
             Some(Action::CopyText(_)) => "Copy",
+            Some(Action::WindowCommand(_)) => "Switch",
             _ => "Open",
         };
         let hint = |label: &'static str, keys: &'static [&'static str], primary: bool| {
@@ -1484,6 +1705,8 @@ fn result_icon(kind: ResultKind, icon: Option<Arc<RenderImage>>) -> AnyElement {
         ResultKind::Calculator => Some("="),
         ResultKind::Snippet => Some("¶"),
         ResultKind::Clipboard => None,
+        ResultKind::Window => Some("▣"),
+        ResultKind::Workspace => Some("▦"),
         // Its icon is still being rendered: keep the space.
         ResultKind::Application | ResultKind::File | ResultKind::Folder => {
             return div().flex_none().size(px(ICON_SIZE)).into_any_element();
@@ -1513,6 +1736,19 @@ fn result_icon(kind: ResultKind, icon: Option<Arc<RenderImage>>) -> AnyElement {
         .into_any_element()
 }
 
+fn validate_window_hotkeys(config: &sift_wm::Config) -> Result<(), String> {
+    for (name, mode) in &config.bindings {
+        let mut seen = std::collections::HashSet::new();
+        for shortcut in mode.keys() {
+            let key = crate::hotkey::window_mode_hotkey(shortcut, name)?;
+            if !seen.insert(key.id()) {
+                return Err(format!("Duplicate window shortcut: {shortcut}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Emitted when the file index status changes (the settings window
 /// listens).
 pub struct IndexStatusChanged;
@@ -1520,6 +1756,8 @@ pub struct IndexStatusChanged;
 /// Emitted when an update check starts or ends (the settings window
 /// listens).
 pub struct UpdateStateChanged;
+pub struct WindowManagerChanged;
+impl gpui::EventEmitter<WindowManagerChanged> for Launcher {}
 
 impl gpui::EventEmitter<UpdateStateChanged> for Launcher {}
 

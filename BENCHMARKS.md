@@ -719,3 +719,91 @@ resolve 0.34 ms).
   permission to send the hotkey, which the measuring shell did not have.
   Startup time for Raycast: measuring it would have meant quitting the
   running copy.
+
+## 2026-10-25 — Native window manager, disabled launcher comparison
+
+Apple M2, macOS 27.0.1. Release baseline `ae24681` (0.1.4) versus
+`native-window-manager`, with window management **disabled**. Alternating
+A/B/A/B runs, three typing rounds per run, 100,001 real indexed entries, fresh
+configuration per process, updates and clipboard disabled. Both use the same
+warmed index. Each run measures 177 keystrokes and 30 seconds of hidden idle.
+
+| Measurement | Baseline 1 / 2 | Native branch 1 / 2 |
+| --- | --- | --- |
+| Keystroke → frame median | 14.07 / 14.19 ms | 14.54 / 14.41 ms |
+| Keystroke → frame p95 | 35.90 / 33.22 ms | 32.39 / 34.71 ms |
+| One-character → frame median | 1.41 / 1.37 ms | 1.30 / 1.30 ms |
+| Show → first frame median | 4.66 / 8.47 ms | 8.09 / 4.37 ms |
+| Physical footprint after typing | 40 / 41 MB | 41 / 41 MB |
+| CPU time during 30 seconds hidden | 0.00 / 0.00 s | 0.00 / 0.00 s |
+
+Typing medians increased by 0.22–0.47 ms in these samples; tails, show latency,
+and footprint are similar. These few runs do not establish a zero-regression
+guarantee. CPU-time readings have limited precision. Final backend safety,
+snapshot coalescing and nested-resize corrections followed this comparison;
+those paths do not run with window management disabled.
+
+Reproduce with `scripts/wm-ui-bench.py --baseline SAVED_BINARY --launcher
+NEW_BINARY --index INDEX_DIRECTORY --output RESULTS.json --pairs 2 --rounds 3`.
+The script keeps raw summaries, physical-footprint output and RSS in its JSON.
+The recorded [raw results](docs/benchmarks/native-wm-disabled-2026-10-25.json)
+are retained alongside these measurements.
+
+The isolated Rust layout benchmark (1,000 repetitions, release build) measured:
+
+| Windows | Layout median | Layout p95 |
+| --- | --- | --- |
+| 10 | 1.25 µs | 1.29 µs |
+| 50 | 4.63 µs | 4.75 µs |
+| 200 | 21.21 µs | 21.75 µs |
+| 1,000 | 132.67 µs | 178.21 µs |
+
+This measures layout arithmetic, excluding AX calls, application response time,
+screen drawing, snapshots and journals. The isolated native smoke test now
+passes with permission granted; enabled launcher measurements follow below.
+Do not use this arithmetic-only table to
+claim performance parity with AeroSpace or zero overhead when enabled.
+
+## 2026-10-25 — Release launcher with native management enabled
+
+Same Apple M2/macOS 27.0.1, same release binary for all four alternating
+off/on/off/on runs, 100,001 real indexed entries, three UI rounds (177
+keystrokes) and 30 seconds of hidden idle per run. Each run has a fresh
+temporary configuration/index copy. Enabled runs verify that exactly three
+disposable AppKit fixture windows are managed; disabled runs verify that no
+manager socket exists. Updates, clipboard, callback hooks and mouse options
+are off; window bindings are empty to avoid intercepting the user's keys.
+
+| Measurement | Management off, runs 1 / 2 | Management on, runs 1 / 2 |
+| --- | --- | --- |
+| Show → first frame median | 8.33 / 4.50 ms | 3.71 / 7.07 ms |
+| Show → first frame p95 | 72.27 / 65.83 ms | 63.37 / 66.20 ms |
+| Keystroke → frame median | 16.74 / 16.12 ms | 14.56 / 15.45 ms |
+| Keystroke → frame p95 | 41.05 / 35.25 ms | 33.86 / 35.15 ms |
+| One-character → frame median | 1.32 / 1.34 ms | 1.36 / 1.31 ms |
+| Physical footprint after typing | 44 / 42 MB | 43 / 43 MB |
+| CPU time during 30 seconds hidden | 0.00 / 0.00 s | 0.00 / 0.00 s |
+
+No consistent typing, panel-opening or footprint regression is visible in
+these samples. This does not establish zero overhead or improved performance:
+there are only two paired runs, show timing has three samples per run and
+includes a cold first show, and background load changes the absolute timings.
+CPU-time resolution is limited. These results cover one managed app with
+three windows; more apps/displays, mouse tracking, configured scripts and
+unusual application AX behavior need separate acceptance.
+
+This comparison caught and corrected an earlier panel-opening delay:
+management-on medians had been 20.61 / 22.20 ms versus 5.43 / 5.74 ms off.
+Opening the panel synchronously enumerated every application's native
+metadata. It now queues a refresh using the model's cached app registry;
+activation notifications update only the changed app. The
+[earlier raw measurements](docs/benchmarks/native-wm-enabled-before-show-fix-2026-10-25.json)
+and [corrected raw measurements](docs/benchmarks/native-wm-enabled-2026-10-25.json)
+are retained.
+
+Reproduce using `scripts/bundle-wm-check.sh` followed by
+`SIFT_WM_LAUNCHER=... SIFT_WM_INDEX=... SIFT_WM_BENCH_OUTPUT=... scripts/run-wm-check.sh`;
+see [window-manager validation](docs/window-manager.md#isolation-recovery-and-validation).
+The permission-bearing check bundle launches through Launch Services and keeps
+its identity while helpers are rebuilt. Test configurations use short paths
+because Darwin Unix socket addresses are limited to 104 bytes.
