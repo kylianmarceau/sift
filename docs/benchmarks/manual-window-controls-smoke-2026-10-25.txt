@@ -34,4 +34,9 @@ PASS passive refresh preserves manual positions
 PASS manual shutdown preserves chosen positions
 PASS fresh manual startup preserves window positions
 PASS saved target works after controls restart
+PASS legacy session discovers fixture windows
+PASS legacy session restores manual frames
+PASS already restored legacy journal is acknowledged without an AX change
+PASS native manual move is observed without automatic correction
+PASS manual restart never replays stale tiling positions
 Native window-manager checks passed.

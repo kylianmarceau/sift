@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 (2026-10-25)
+
+- Acknowledge an already-restored tiling recovery entry immediately. A no-op AX
+  frame write emits no notification; waiting for one could retain a stale journal
+  that later restored old positions after manual movement and restart.
+- Native regression coverage for a clean automatic shutdown, manual startup,
+  native manual movement, and another restart without replaying stale positions.
+
 ## 0.2.1 (2026-10-25)
 
 - Separate Window Shortcuts and Controls from Automatic Tiling. Controls now

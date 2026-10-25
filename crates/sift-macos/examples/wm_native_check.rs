@@ -560,6 +560,65 @@ title = '^Sift WM Test 0$'
     });
     drop(restarted);
     assert!(restarted_controller.wait_stopped(Duration::from_secs(4)));
+    // Simulate upgrading after a clean automatic shutdown: its journal exists,
+    // but actual windows are already restored. No-op AX writes send no event.
+    let mut automatic = manual.clone();
+    automatic.automatic_tiling = true;
+    let previous = sift_macos::wm::Runtime::start(automatic, base, &config_path, |_| {})
+        .expect("legacy tiling session");
+    let previous_controller = previous.controller();
+    wait("legacy session discovers fixture windows", &|| {
+        previous_controller.snapshot().windows.len() == 3
+    });
+    previous_controller
+        .execute(Command::Enable(false))
+        .expect("restore legacy positions");
+    wait("legacy session restores manual frames", &|| {
+        matches(&manual_frames)
+    });
+    drop(previous);
+    assert!(previous_controller.wait_stopped(Duration::from_secs(4)));
+    let upgraded = sift_macos::wm::Runtime::start(manual.clone(), base, &config_path, |_| {})
+        .expect("upgraded manual controls");
+    let upgraded_controller = upgraded.controller();
+    wait(
+        "already restored legacy journal is acknowledged without an AX change",
+        &|| {
+            upgraded_controller.snapshot().windows.len() == 3
+                && std::fs::read(base.join("window-manager/recovery.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|value| value == serde_json::json!([]))
+        },
+    );
+    std::fs::write(base.join("fixture-command"), "nudge").expect("native user move");
+    wait(
+        "native manual move is observed without automatic correction",
+        &|| {
+            upgraded_controller.snapshot().windows.iter().any(|window| {
+                manual_frames.iter().any(|(id, frame)| {
+                    *id == window.id && (window.frame.x - frame.x - 25.).abs() < 1.
+                })
+            })
+        },
+    );
+    let nudged: Vec<_> = upgraded_controller
+        .snapshot()
+        .windows
+        .iter()
+        .map(|w| (w.id, w.frame))
+        .collect();
+    drop(upgraded);
+    assert!(upgraded_controller.wait_stopped(Duration::from_secs(4)));
+    let final_runtime = sift_macos::wm::Runtime::start(manual, base, &config_path, |_| {})
+        .expect("manual restart after user move");
+    let final_controller = final_runtime.controller();
+    wait(
+        "manual restart never replays stale tiling positions",
+        &|| final_controller.snapshot().windows.len() == 3 && matches(&nudged),
+    );
+    drop(final_runtime);
+    assert!(final_controller.wait_stopped(Duration::from_secs(4)));
     if std::env::var_os("SIFT_WM_LAUNCHER").is_some_and(|value| !value.is_empty()) {
         launcher_bench::run(base);
     }

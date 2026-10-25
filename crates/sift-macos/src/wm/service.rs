@@ -493,12 +493,17 @@ impl Service {
                         && !window.native_fullscreen
                 }) {
                     let recovery = self.recovery.remove(index);
-                    window.frame = recovery.frame;
                     window.original_frame = recovery.frame;
-                    if let Some(worker) = self.workers.get(&window.pid) {
-                        worker.send(Task::Restore(vec![(window.id, recovery.frame)]));
+                    // The observed frame is already an acknowledgment. A
+                    // no-op AX restore emits no notification, so waiting for
+                    // one would leave a stale automatic claim in manual mode.
+                    if !window.frame.nearly(recovery.frame) {
+                        window.frame = recovery.frame;
+                        if let Some(worker) = self.workers.get(&window.pid) {
+                            worker.send(Task::Restore(vec![(window.id, recovery.frame)]));
+                        }
+                        self.restoring.push(recovery);
                     }
-                    self.restoring.push(recovery);
                 }
                 let _ = self.engine.add_window(window);
             }

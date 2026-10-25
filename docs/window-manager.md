@@ -2,7 +2,7 @@
 
 Sift includes a Rust window-management engine inspired by AeroSpace. It runs
 inside Sift: no AeroSpace installation, subprocess calls for tiling, or separate
-application is required. Available in Sift 0.2.1 on the
+application is required. Available in Sift 0.2.2 on the
 `native-window-manager` branch, it is experimental and off by default. Version
 0.2.1 separates manual shortcuts from optional automatic tiling. Native smoke
 checks pass; broader application/multi-monitor acceptance remains open.

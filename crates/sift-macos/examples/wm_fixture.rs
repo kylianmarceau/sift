@@ -105,6 +105,12 @@ fn main() {
                 }
                 "add" => windows.push(create(windows.len() + 10)),
                 "reopen" => windows.push(create(0)),
+                "nudge" => {
+                    if let Some(window) = windows.first() {
+                        let frame = window.frame();
+                        window.setFrameOrigin(NSPoint::new(frame.origin.x + 25., frame.origin.y));
+                    }
+                }
                 "stall" => {
                     std::fs::write(directory.join("stalled"), "ready").expect("stall marker");
                     std::thread::sleep(std::time::Duration::from_secs(1));
