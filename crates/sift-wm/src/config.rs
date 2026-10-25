@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub enabled: bool,
+    /// Observe windows and register shortcuts without arranging them by default.
+    pub automatic_tiling: bool,
+    pub targets: BTreeMap<String, WindowTarget>,
     pub default_layout: Layout,
     pub default_orientation: Axis,
     pub accordion_padding: f64,
@@ -23,6 +26,29 @@ pub struct Config {
     pub exclude_apps: Vec<String>,
     /// Binding mode -> physical shortcut (e.g. ctrl-alt-h) -> command(s).
     pub bindings: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+}
+
+/// Persistent identity, resolved again on every command (never a saved window ID).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowTarget {
+    /// Exact bundle identifier, also used to launch a missing application.
+    pub app_id: Option<String>,
+    /// Optional regular expressions; all supplied conditions must match.
+    pub app_name: Option<String>,
+    pub title: Option<String>,
+    pub launch: bool,
+}
+
+impl Default for WindowTarget {
+    fn default() -> Self {
+        Self {
+            app_id: None,
+            app_name: None,
+            title: None,
+            launch: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +167,10 @@ impl Default for Config {
             ("ctrl-alt-minus", "resize smart -50"),
             ("ctrl-alt-equal", "resize smart +50"),
             ("ctrl-alt-tab", "workspace-back-and-forth"),
+            ("ctrl-alt-left", "snap left"),
+            ("ctrl-alt-right", "snap right"),
+            ("ctrl-alt-up", "snap maximize"),
+            ("ctrl-alt-down", "snap restore"),
         ] {
             main.insert(key.into(), vec![command.into()]);
         }
@@ -153,6 +183,8 @@ impl Default for Config {
         }
         Self {
             enabled: false,
+            automatic_tiling: false,
+            targets: BTreeMap::new(),
             default_layout: Layout::Tiles,
             default_orientation: Axis::Horizontal,
             accordion_padding: 30.,
@@ -171,6 +203,29 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn bindings_for_mode(&self, mode: &str) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut bindings = self
+            .bindings
+            .get(mode)
+            .cloned()
+            .ok_or_else(|| Error(format!("unknown binding mode {mode:?}")))?;
+        if !self.automatic_tiling {
+            bindings.retain(|_, commands| {
+                commands.iter().all(|text| {
+                    parse(text).is_ok_and(|command| !command.requires_automatic_tiling())
+                })
+            });
+        } else {
+            // Manual snap actions would immediately be undone by tiling.
+            bindings.retain(|_, commands| {
+                commands
+                    .iter()
+                    .all(|text| parse(text).is_ok_and(|command| !command.requires_manual_mode()))
+            });
+        }
+        Ok(bindings)
+    }
+
     pub(crate) fn gaps_for(&self, monitor: &crate::Monitor) -> Gaps {
         let mut gaps = self.gaps;
         if self.monitor_gaps.is_empty() {
@@ -208,6 +263,32 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.targets.len() > 256 {
+            return Err(Error("too many window targets".into()));
+        }
+        for (name, target) in &self.targets {
+            validate_name(name)?;
+            if target.app_id.is_none() && target.app_name.is_none() && target.title.is_none() {
+                return Err(Error(format!(
+                    "target {name:?} needs app_id, app_name, or title"
+                )));
+            }
+            if let Some(app_id) = &target.app_id {
+                if app_id.is_empty()
+                    || app_id.len() > 255
+                    || !app_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+                {
+                    return Err(Error(format!(
+                        "target {name:?} needs an exact application bundle ID"
+                    )));
+                }
+            }
+            for pattern in [&target.app_name, &target.title].into_iter().flatten() {
+                compile(pattern)?;
+            }
+        }
         for commands in self.hooks.groups() {
             if commands.len() > 32
                 || commands.iter().any(|command| {
@@ -273,11 +354,7 @@ impl Config {
                     return Err(Error("a binding needs 1 to 32 commands".into()));
                 }
                 for text in commands {
-                    if let Command::Mode(target) = parse(text)? {
-                        if !self.bindings.contains_key(&target) {
-                            return Err(Error(format!("unknown binding mode {target:?}")));
-                        }
-                    }
+                    self.validate_command(&parse(text)?)?;
                 }
             }
         }
@@ -301,6 +378,32 @@ impl Config {
         for (workspace, selector) in &self.workspace_monitors {
             validate_name(workspace)?;
             validate_name(selector)?;
+        }
+        Ok(())
+    }
+
+    fn validate_command(&self, command: &Command) -> Result<()> {
+        match command {
+            Command::Mode(target) if !self.bindings.contains_key(target) => {
+                return Err(Error(format!("unknown binding mode {target:?}")));
+            }
+            Command::FocusTarget(target) | Command::NamedTarget(target, _)
+                if !self.targets.contains_key(target) =>
+            {
+                return Err(Error(format!("unknown window target {target:?}")));
+            }
+            _ => {}
+        }
+        match command {
+            Command::NamedTarget(_, command) | Command::Target(_, command) => {
+                self.validate_command(command)?
+            }
+            Command::Sequence(commands) => {
+                for command in commands {
+                    self.validate_command(command)?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }

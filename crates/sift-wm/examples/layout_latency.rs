@@ -3,7 +3,10 @@ use std::time::Instant;
 fn main() {
     for count in [10, 50, 200, 1000] {
         let mut engine = Engine::new(
-            Config::default(),
+            Config {
+                automatic_tiling: true,
+                ..Config::default()
+            },
             vec![Monitor {
                 id: 1,
                 name: "benchmark".into(),

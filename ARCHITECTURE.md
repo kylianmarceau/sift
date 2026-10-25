@@ -1,6 +1,6 @@
 # Architecture
 
-The `native-window-manager` branch also adds a native Rust tiling engine
+The `native-window-manager` branch also adds native Rust window controls and a tiling engine
 (`sift-wm`) and per-application macOS AX workers (`sift-macos::wm`). The service
 is opt-in and separate from the search/render paths. See
 [Native window management](docs/window-manager.md) for design, commands,

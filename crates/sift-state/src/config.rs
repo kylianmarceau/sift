@@ -35,9 +35,11 @@ max_items = 200
 check = true
 
 [window_manager]
-# Native tiling and workspaces. Requires Accessibility permission when on.
+# Window shortcuts and manual actions. Requires window-control permission.
 # Off means no window observers, worker threads, or window-management hotkeys.
 enabled = false
+# Leave windows where you put them; automatic tiling is a separate opt-in.
+automatic_tiling = false
 # Optional layout/rule/binding examples: docs/window-manager.md
 
 # Snippets: search by name (or keyword); Enter copies the text.
@@ -234,6 +236,8 @@ pub enum Setting {
     UpdateChecks(bool),
     /// `[window_manager] enabled`
     WindowManager(bool),
+    /// `[window_manager] automatic_tiling`, independent of enabling shortcuts.
+    WindowManagerAutomaticTiling(bool),
 }
 
 /// `text` (a `config.toml`) with `setting` applied and everything else
@@ -257,6 +261,9 @@ pub fn apply_setting(text: &str, setting: Setting) -> Result<String, String> {
         ),
         Setting::UpdateChecks(on) => ("updates", "check", on.into()),
         Setting::WindowManager(on) => ("window_manager", "enabled", on.into()),
+        Setting::WindowManagerAutomaticTiling(on) => {
+            ("window_manager", "automatic_tiling", on.into())
+        }
     };
     let section = doc
         .as_table_mut()
@@ -338,6 +345,7 @@ mod tests {
         let loaded = Config::parse(&edited);
         assert!(loaded.problems.is_empty());
         assert!(loaded.config.window_manager.enabled);
+        assert!(!loaded.config.window_manager.automatic_tiling);
         assert!(!loaded.config.clipboard.enabled);
         assert!(loaded.config.updates.check);
         let broken = "[updates]\ncheck = false\n[window_manager]\nenabled = true\n[[window_manager.rules]]\napp_id = '['\n";
@@ -345,6 +353,34 @@ mod tests {
         assert!(!loaded.problems.is_empty());
         assert!(!loaded.config.window_manager.enabled);
         assert!(!loaded.config.updates.check);
+    }
+
+    #[test]
+    fn enabling_shortcuts_does_not_enable_tiling_or_erase_persistent_targets() {
+        let source = "[window_manager]\nenabled = false\n[window_manager.targets.terminal]\napp_id = 'com.apple.Terminal'\ntitle = '^project'\n[window_manager.bindings.main]\nctrl-alt-t = ['focus --target terminal']\n";
+        let edited = apply_setting(source, Setting::WindowManager(true)).unwrap();
+        let loaded = Config::parse(&edited);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        assert!(loaded.config.window_manager.enabled);
+        assert!(!loaded.config.window_manager.automatic_tiling);
+        assert_eq!(
+            loaded.config.window_manager.targets["terminal"]
+                .title
+                .as_deref(),
+            Some("^project")
+        );
+        let tiling = apply_setting(&edited, Setting::WindowManagerAutomaticTiling(true)).unwrap();
+        assert!(
+            Config::parse(&tiling)
+                .config
+                .window_manager
+                .automatic_tiling
+        );
+        let manual = apply_setting(&tiling, Setting::WindowManagerAutomaticTiling(false)).unwrap();
+        assert_eq!(
+            Config::parse(&manual).config.window_manager.targets,
+            loaded.config.window_manager.targets
+        );
     }
 
     #[test]

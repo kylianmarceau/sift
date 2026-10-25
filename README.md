@@ -9,7 +9,7 @@ you type, with a calculator, snippets, custom commands and an optional
 clipboard history. The file index updates itself as files change. There is
 also a command-line indexer and search tool, `sift`.
 
-**Status:** [0.2.0](https://github.com/kylianmarceau/sift/releases/tag/v0.2.0),
+**Status:** [0.2.1](https://github.com/kylianmarceau/sift/releases/tag/v0.2.1),
 an early release. See [PLAN.md](PLAN.md) for the roadmap and
 [CHANGELOG.md](CHANGELOG.md) for what is in each release.
 
@@ -46,8 +46,10 @@ brew upgrade --cask kylianmarceau/sift/sift
 ```
 
 Homebrew also installs the `sift` CLI from the app bundle. Native window
-management is an experimental, opt-in feature in 0.2.0. Enable it in Sift
-Settings → Window Management; see the [setup and controls](docs/window-manager.md).
+controls are experimental and opt-in. In 0.2.1, enabling Window Shortcuts and
+Controls leaves windows where you put them. Automatic Tiling is a separate
+switch, off by default. Persistent app/title shortcuts can focus or launch
+a target app; see the [setup and controls](docs/window-manager.md).
 
 **Or by hand:**
 
@@ -209,10 +211,11 @@ URL, for testing).
 ## Building from source
 
 On the `native-window-manager` branch, Settings also offers
-native tiling and workspaces, with searchable open windows (`win`) and
-workspaces (`ws`). See [Window Management](docs/window-manager.md) for setup,
+manual window shortcuts, persistent app/title targets, and optional tiling and
+workspaces. Open windows are searchable with `win`; `ws` searches workspaces
+when Automatic Tiling is enabled. See [Window Management](docs/window-manager.md) for setup,
 shortcuts, configuration, CLI commands, and validation status. It requires no
-AeroSpace installation. Available from 0.2.0; it remains experimental and off
+AeroSpace installation. Window controls remain experimental and off
 by default while broader application and multi-monitor acceptance continues.
 
 Requirements:

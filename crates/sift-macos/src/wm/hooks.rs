@@ -221,7 +221,10 @@ mod tests {
             ..Hooks::default()
         };
         let mut engine = Engine::new(
-            Config::default(),
+            Config {
+                automatic_tiling: true,
+                ..Config::default()
+            },
             vec![Monitor {
                 id: 1,
                 name: "Test".into(),

@@ -9,8 +9,14 @@ fn monitor(id: u32, x: f64) -> Monitor {
         main: id == 1,
     }
 }
+fn tiling_config() -> Config {
+    Config {
+        automatic_tiling: true,
+        ..Config::default()
+    }
+}
 fn engine() -> Engine {
-    Engine::new(Config::default(), vec![monitor(1, 0.)]).expect("valid fixture")
+    Engine::new(tiling_config(), vec![monitor(1, 0.)]).expect("valid fixture")
 }
 fn add(e: &mut Engine, id: u32) {
     let mut w = Window::new(id, 100, Rect::new(10., 40., 500., 400.));
@@ -176,7 +182,7 @@ fn resize_and_balance_preserve_total_space() {
 
 #[test]
 fn monitor_unplug_rehomes_workspaces_and_floating_windows() {
-    let mut e = Engine::new(Config::default(), vec![monitor(1, 0.), monitor(2, 1200.)])
+    let mut e = Engine::new(tiling_config(), vec![monitor(1, 0.), monitor(2, 1200.)])
         .expect("valid fixture");
     add(&mut e, 1);
     command(&mut e, "move-node-to-monitor next --focus-follows-window");
@@ -205,7 +211,7 @@ fn regex_rules_route_windows_once_and_respect_check_further() {
                 ..Rule::default()
             },
         ],
-        ..Config::default()
+        ..tiling_config()
     };
     let mut e = Engine::new(config, vec![monitor(1, 0.)]).expect("valid fixture");
     add(&mut e, 1);
@@ -247,13 +253,13 @@ fn command_and_config_validation_reject_bad_input() {
     ] {
         assert!(parse(s).is_err(), "{s}");
     }
-    let mut config = Config::default();
+    let mut config = tiling_config();
     config.rules.push(Rule {
         title: Some("[".into()),
         ..Rule::default()
     });
     assert!(config.validate().is_err());
-    let mut config = Config::default();
+    let mut config = tiling_config();
     config.gaps.inner = f64::NAN;
     assert!(config.validate().is_err());
     assert!(protocol_command(&["exec-and-forget".into(), "echo hi".into()]).is_err());
@@ -442,7 +448,7 @@ fn window_parking_uses_a_free_corner_of_its_own_monitor() {
     let mut right_below = monitor(2, 1200.);
     right_below.frame.y = 800.;
     right_below.usable.y = 824.;
-    let mut e = Engine::new(Config::default(), vec![monitor(1, 0.), right_below]).expect("engine");
+    let mut e = Engine::new(tiling_config(), vec![monitor(1, 0.), right_below]).expect("engine");
     add(&mut e, 1);
     command(&mut e, "move-node-to-workspace 2");
     let parked = e.parking_frame(1).expect("frame");
@@ -455,7 +461,7 @@ fn allowlists_and_exclusions_are_compiled_and_applied() {
     let config = Config {
         include_apps: vec!["^com\\.example\\.".into()],
         exclude_apps: vec!["popup$".into()],
-        ..Config::default()
+        ..tiling_config()
     };
     let e = Engine::new(config, vec![monitor(1, 0.)]).expect("engine");
     assert!(e.manages_app("com.example.editor"));
@@ -466,7 +472,7 @@ fn allowlists_and_exclusions_are_compiled_and_applied() {
 #[test]
 fn floating_windows_translate_when_moved_to_another_monitor() {
     let mut e =
-        Engine::new(Config::default(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("engine");
+        Engine::new(tiling_config(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("engine");
     add(&mut e, 1);
     command(&mut e, "layout floating");
     command(&mut e, "move-node-to-monitor next --focus-follows-window");
@@ -476,8 +482,8 @@ fn floating_windows_translate_when_moved_to_another_monitor() {
 #[test]
 fn reloading_monitor_assignments_rehomes_workspaces() {
     let mut e =
-        Engine::new(Config::default(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("engine");
-    let mut config = Config::default();
+        Engine::new(tiling_config(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("engine");
+    let mut config = tiling_config();
     config
         .workspace_monitors
         .insert("2".into(), "secondary".into());
@@ -568,7 +574,7 @@ fn repeating_pending_split_changes_orientation_without_deepening_the_tree() {
 
 #[test]
 fn monitor_gap_overrides_inherit_global_values_and_specific_ids_take_precedence() {
-    let mut config = Config::default();
+    let mut config = tiling_config();
     config.gaps.inner = 12.;
     config.monitor_gaps.insert(
         "secondary".into(),
@@ -628,7 +634,7 @@ fn native_drag_reorders_tiles_and_clicks_do_not_rearrange_them() {
 #[test]
 fn native_drag_resize_updates_weights_and_cross_monitor_drop_moves_the_workspace() {
     let mut e =
-        Engine::new(Config::default(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("engine");
+        Engine::new(tiling_config(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("engine");
     add(&mut e, 1);
     add(&mut e, 2);
     let before = e.windows[&1].frame;

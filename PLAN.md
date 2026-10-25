@@ -7,6 +7,15 @@ model inside Sift. Branch: `native-window-manager`. The low-memory,
 responsive-search and near-zero-idle principles remain acceptance requirements.
 Shipped as an experimental, opt-in feature in 0.2.0.
 
+User clarification: manual control is the primary workflow. Automatic tiling
+must be a separate opt-in; app/title shortcuts must survive reopening windows
+and launch a missing app when possible.
+
+- [x] Separate manual controls and automatic tiling, with no automatic frame writes in manual mode
+- [x] Persistent named app/title targets and CLI/configurable shortcut access
+- [x] Bounded launch-and-focus for missing targets, with deferred binding sequences
+- [x] Manual snapping, resizing, movement and fullscreen, preserving positions on stop
+
 - [x] UI-independent tree/workspace engine and native macOS backend
 - [x] Tiles, accordion, floating, nested splits/joins, move/swap, resize/balance
 - [x] Named workspaces, focus history, monitor assignment and disconnection

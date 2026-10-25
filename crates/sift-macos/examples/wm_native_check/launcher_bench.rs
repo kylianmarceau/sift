@@ -66,15 +66,20 @@ pub fn run(base: &Path) {
     let index = std::path::PathBuf::from(std::env::var_os("SIFT_WM_INDEX").expect("index path"));
     let output = std::env::var_os("SIFT_WM_BENCH_OUTPUT").expect("benchmark output path");
     let mut results = Vec::<Value>::new();
+    let automatic = std::env::var("SIFT_WM_BENCH_AUTOMATIC_TILING").as_deref() != Ok("false");
     for pair in 1..=2 {
         for enabled in [false, true] {
             let name = format!("wm-{}-{pair}", if enabled { "enabled" } else { "disabled" });
             println!("START launcher benchmark {name}");
             let directory = benchmark_directory.path().join(&name);
+            let originals: Value = serde_json::from_slice(
+                &std::fs::read(base.join("actual.json")).expect("current fixture frames"),
+            )
+            .expect("current frames JSON");
             let config = directory.join("config");
             std::fs::create_dir_all(&config).expect("benchmark configuration directory");
             std::fs::write(config.join("config.toml"), format!(
-                "[updates]\ncheck = false\n[clipboard]\nenabled = false\n[window_manager]\nenabled = {enabled}\ninclude_apps = ['^io\\.github\\.kylianmarceau\\.sift\\.wm-fixture$']\n[window_manager.bindings.main]\n"
+                "[updates]\ncheck = false\n[clipboard]\nenabled = false\n[window_manager]\nenabled = {enabled}\nautomatic_tiling = {automatic}\ninclude_apps = ['^io\\.github\\.kylianmarceau\\.sift\\.wm-fixture$']\n[window_manager.bindings.main]\n"
             )).expect("benchmark configuration");
             let index_copy = directory.join("index");
             copy_index(&index, &index_copy);
@@ -156,7 +161,7 @@ pub fn run(base: &Path) {
             let idle_cpu = cpu(pid) - before;
             let summary =
                 content[content.find("== ui bench").expect("benchmark summary")..].to_owned();
-            let result = json!({"name": name, "enabled": enabled, "managed_windows": windows,
+            let result = json!({"name": name, "enabled": enabled, "automatic_tiling": automatic, "managed_windows": windows,
                 "rounds":3,"rss_mib":rss_mib,"idle_seconds":30,"idle_cpu_seconds":idle_cpu,
                 "footprint":footprint,"summary":summary});
             println!(
@@ -171,10 +176,6 @@ pub fn run(base: &Path) {
                     sift_wm::protocol::request(&config, vec!["enable".into(), "off".into()])
                         .expect("pause");
                 assert!(reply.ok);
-                let originals: Value = serde_json::from_slice(
-                    &std::fs::read(base.join("original.json")).expect("original frames"),
-                )
-                .expect("original JSON");
                 let wait = Instant::now();
                 loop {
                     let actual = std::fs::read(base.join("actual.json"))

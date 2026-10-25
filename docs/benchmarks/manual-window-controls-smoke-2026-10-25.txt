@@ -1,0 +1,37 @@
+PASS fixture launched through Launch Services
+PASS fixture ready
+PASS fixture registered as a regular application
+PASS discover only fixture windows
+PASS actual native windows tiled
+PASS fixture inactive before focus test
+PASS focus native window
+PASS native cursor positioning
+PASS move to hidden workspace
+PASS workspace shows native window
+PASS workspace target is active before minimizing
+PASS minimize leaves tile tree
+PASS unminimize rejoins tile tree
+PASS fixture is stalled
+PASS stalled application does not block status
+PASS pause restores original frames
+PASS resume tiles native windows again
+PASS mouse configuration enabled
+PASS mouse configuration disabled
+PASS mouse configuration enabled
+PASS mouse configuration disabled
+PASS mouse configuration enabled
+PASS mouse configuration disabled
+PASS switching to manual restores original frames
+PASS manual mode releases restored recovery positions
+PASS persistent target focuses native window without tiling
+PASS closed target is removed
+PASS reopened target receives a new window identity
+PASS same binding focuses reopened native window
+PASS target application exits
+PASS shortcut relaunches app and focuses matching window
+PASS manual snap changes only its named target
+PASS passive refresh preserves manual positions
+PASS manual shutdown preserves chosen positions
+PASS fresh manual startup preserves window positions
+PASS saved target works after controls restart
+Native window-manager checks passed.

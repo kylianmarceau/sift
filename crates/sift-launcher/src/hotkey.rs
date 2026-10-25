@@ -492,17 +492,14 @@ impl Hotkeys {
             *self.window_routes.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return Ok(());
         };
-        let bindings = config
-            .bindings
-            .get(mode)
-            .ok_or_else(|| format!("unknown window binding mode {mode}"))?;
+        let bindings = config.bindings_for_mode(mode).map_err(|e| e.to_string())?;
         let signature = (mode.to_owned(), bindings.clone());
         if self.window_signature.as_ref() == Some(&signature) {
             return Ok(());
         }
         let mut keys = Vec::new();
         let mut commands = std::collections::HashMap::new();
-        for (text, values) in bindings {
+        for (text, values) in &bindings {
             let key = window_mode_hotkey(text, mode)?;
             if key == self.current.hotkey {
                 return Err(format!("{text} conflicts with Sift's launcher shortcut"));

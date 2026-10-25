@@ -35,7 +35,28 @@ fn main() {
     let directory = tempfile::tempdir().expect("tempdir");
     let base = directory.path();
     let bundle = base.join("Sift WM Fixture.app/Contents");
+    struct FixtureCleanup(std::path::PathBuf);
+    impl Drop for FixtureCleanup {
+        fn drop(&mut self) {
+            for app in NSWorkspace::sharedWorkspace().runningApplications().iter() {
+                if app
+                    .bundleURL()
+                    .and_then(|url| url.path())
+                    .is_some_and(|path| std::path::Path::new(&path.to_string()) == self.0)
+                {
+                    app.forceTerminate();
+                }
+            }
+        }
+    }
+    let _fixture_cleanup = FixtureCleanup(bundle.parent().expect("fixture bundle").to_path_buf());
     std::fs::create_dir_all(bundle.join("MacOS")).expect("bundle");
+    std::fs::create_dir_all(bundle.join("Resources")).expect("resources");
+    std::fs::write(
+        bundle.join("Resources/fixture-directory"),
+        base.to_string_lossy().as_bytes(),
+    )
+    .expect("fixture directory");
     let binary = std::env::current_exe()
         .expect("executable")
         .parent()
@@ -136,11 +157,12 @@ fn main() {
             .expect("json");
     let config = Config {
         enabled: true,
+        automatic_tiling: true,
         include_apps: vec!["^io\\.github\\.kylianmarceau\\.sift\\.wm-fixture$".into()],
         ..Config::default()
     };
     let config_path = base.join("config.toml");
-    std::fs::write(&config_path, "[window_manager]\nenabled = true\ninclude_apps = ['^io\\.github\\.kylianmarceau\\.sift\\.wm-fixture$']\n").expect("config");
+    std::fs::write(&config_path, "[window_manager]\nenabled = true\nautomatic_tiling = true\ninclude_apps = ['^io\\.github\\.kylianmarceau\\.sift\\.wm-fixture$']\n").expect("config");
     let mut runtime =
         sift_macos::wm::Runtime::start(config, base, &config_path, |_| {}).expect("runtime");
     let controller = runtime.controller();
@@ -274,9 +296,18 @@ fn main() {
                 .frame,
         )])
     });
-    // Minimize the visible window. AppKit may ignore miniaturize while the
-    // target is parked almost entirely offscreen on another workspace.
-    std::fs::write(base.join("fixture-command"), "minimize").expect("command");
+    // Wait for activation as well as geometry. AppKit can ignore miniaturize
+    // during a workspace reveal; exercise the actual AX command path instead.
+    wait("workspace target is active before minimizing", &|| {
+        actual().as_array().is_some_and(|list| {
+            list.iter().any(|w| {
+                w["id"].as_u64() == Some(id as u64) && w["focused"].as_bool() == Some(true)
+            })
+        })
+    });
+    controller
+        .execute(Command::Minimize)
+        .expect("minimize command");
     wait("minimize leaves tile tree", &|| {
         controller
             .snapshot()
@@ -284,7 +315,9 @@ fn main() {
             .iter()
             .any(|w| w.id == id && w.minimized)
     });
-    std::fs::write(base.join("fixture-command"), "restore").expect("command");
+    controller
+        .execute(Command::FocusId(id))
+        .expect("restore minimized target");
     wait("unminimize rejoins tile tree", &|| {
         controller
             .snapshot()
@@ -350,12 +383,183 @@ fn main() {
             .sync_mouse_monitor()
             .expect("remove native mouse listener");
     }
+    let mut manual = original_config.clone();
+    manual.automatic_tiling = false;
+    manual.targets.insert(
+        "fixture".into(),
+        sift_wm::WindowTarget {
+            app_id: Some("io.github.kylianmarceau.sift.wm-fixture".into()),
+            title: Some("^Sift WM Test 0$".into()),
+            ..sift_wm::WindowTarget::default()
+        },
+    );
+    let manual_text = r#"[window_manager]
+enabled = true
+automatic_tiling = false
+include_apps = ['^io\.github\.kylianmarceau\.sift\.wm-fixture$']
+[window_manager.targets.fixture]
+app_id = 'io.github.kylianmarceau.sift.wm-fixture'
+title = '^Sift WM Test 0$'
+"#;
+    std::fs::write(&config_path, manual_text).expect("save persistent configuration");
+    controller
+        .configure(manual.clone())
+        .expect("manual controls");
+    wait("switching to manual restores original frames", &|| {
+        !controller.snapshot().automatic_tiling && matches(&originals)
+    });
+    wait("manual mode releases restored recovery positions", &|| {
+        std::fs::read(base.join("window-manager/recovery.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|value| value == serde_json::json!([]))
+    });
+    let focus_target = sift_wm::parse("focus --target fixture").expect("target command");
+    controller
+        .execute(focus_target.clone())
+        .expect("focus target");
+    wait(
+        "persistent target focuses native window without tiling",
+        &|| {
+            matches(&originals)
+                && actual().as_array().is_some_and(|list| {
+                    list.iter().any(|w| {
+                        w["id"].as_u64() == Some(id as u64) && w["focused"].as_bool() == Some(true)
+                    })
+                })
+        },
+    );
+    std::fs::write(base.join("fixture-command"), "close").expect("close window");
+    wait("closed target is removed", &|| {
+        !controller.snapshot().windows.iter().any(|w| w.id == id)
+    });
+    std::fs::write(base.join("fixture-command"), "reopen").expect("reopen window");
+    wait("reopened target receives a new window identity", &|| {
+        controller
+            .snapshot()
+            .windows
+            .iter()
+            .any(|w| w.title == "Sift WM Test 0" && w.id != id)
+    });
+    controller
+        .execute(focus_target.clone())
+        .expect("focus reopened target");
+    wait("same binding focuses reopened native window", &|| {
+        let target = controller
+            .snapshot()
+            .windows
+            .iter()
+            .find(|w| w.title == "Sift WM Test 0")
+            .map(|w| w.id);
+        actual().as_array().is_some_and(|list| {
+            list.iter().any(|w| {
+                w["id"].as_u64() == target.map(u64::from) && w["focused"].as_bool() == Some(true)
+            })
+        })
+    });
+    std::fs::write(base.join("fixture-command"), "quit").expect("quit fixture");
+    wait("target application exits", &|| {
+        controller.snapshot().windows.is_empty()
+            && NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                .is_none_or(|app| app.isTerminated())
+    });
+    controller
+        .execute(focus_target)
+        .expect("launch missing target");
+    wait(
+        "shortcut relaunches app and focuses matching window",
+        &|| {
+            let snapshot = controller.snapshot();
+            snapshot.windows.len() == 3
+                && snapshot.windows.iter().any(|w| {
+                    w.title == "Sift WM Test 0" && w.pid != pid && snapshot.focused == Some(w.id)
+                })
+                && actual()
+                    .as_array()
+                    .is_some_and(|list| list.iter().any(|w| w["focused"].as_bool() == Some(true)))
+        },
+    );
+    let restarted_pid = controller.snapshot().windows[0].pid;
+    let _restarted_cleanup = Cleanup(
+        NSRunningApplication::runningApplicationWithProcessIdentifier(restarted_pid)
+            .expect("restarted fixture"),
+    );
+    let unchanged: Vec<_> = controller
+        .snapshot()
+        .windows
+        .iter()
+        .filter(|w| w.title != "Sift WM Test 0")
+        .map(|w| (w.id, w.frame))
+        .collect();
+    controller
+        .execute(sift_wm::parse("snap left --target fixture").expect("snap command"))
+        .expect("snap target");
+    wait("manual snap changes only its named target", &|| {
+        let snapshot = controller.snapshot();
+        let target = snapshot
+            .windows
+            .iter()
+            .find(|w| w.title == "Sift WM Test 0")
+            .expect("target");
+        let area = snapshot
+            .monitors
+            .iter()
+            .find(|m| m.main)
+            .expect("main monitor")
+            .usable;
+        target
+            .frame
+            .nearly(Rect::new(area.x, area.y, area.width / 2., area.height))
+            && matches(&[(target.id, target.frame)])
+            && matches(&unchanged)
+    });
+    let manual_frames = desired();
+    runtime.refresh();
+    for _ in 0..25 {
+        spin();
+    }
+    assert!(
+        matches(&manual_frames),
+        "passive refresh moved manual windows"
+    );
+    println!("PASS passive refresh preserves manual positions");
     drop(runtime);
-    wait("shutdown restores original frames", &|| matches(&originals));
     assert!(
         controller.wait_stopped(Duration::from_secs(4)),
         "shutdown did not release ownership"
     );
+    assert!(
+        matches(&manual_frames),
+        "manual shutdown changed window positions"
+    );
+    println!("PASS manual shutdown preserves chosen positions");
+    #[derive(serde::Deserialize)]
+    struct Saved {
+        window_manager: Config,
+    }
+    let saved: Saved =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("saved configuration"))
+            .expect("load saved targets");
+    let restarted =
+        sift_macos::wm::Runtime::start(saved.window_manager, base, &config_path, |_| {})
+            .expect("restart manual controls");
+    let restarted_controller = restarted.controller();
+    wait("fresh manual startup preserves window positions", &|| {
+        restarted_controller.snapshot().windows.len() == 3 && matches(&manual_frames)
+    });
+    restarted_controller
+        .execute(sift_wm::parse("focus --target fixture").expect("saved target"))
+        .expect("focus after restart");
+    wait("saved target works after controls restart", &|| {
+        let snapshot = restarted_controller.snapshot();
+        snapshot
+            .windows
+            .iter()
+            .any(|w| w.title == "Sift WM Test 0" && snapshot.focused == Some(w.id))
+            && matches(&manual_frames)
+    });
+    drop(restarted);
+    assert!(restarted_controller.wait_stopped(Duration::from_secs(4)));
     if std::env::var_os("SIFT_WM_LAUNCHER").is_some_and(|value| !value.is_empty()) {
         launcher_bench::run(base);
     }

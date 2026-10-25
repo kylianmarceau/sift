@@ -37,7 +37,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Control Sift's native window manager. Try `sift wm status` or
+    /// Control Sift's manual window actions and optional tiling. Try `sift wm status` or
     /// `sift wm list-windows`. Sift.app must be running with it enabled.
     Wm {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]

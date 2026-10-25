@@ -10,8 +10,10 @@ mod model;
 pub mod protocol;
 mod tree;
 
-pub use command::{Command, CursorTarget, Direction, LayoutRequest, parse, parse_args};
-pub use config::{Config, Gaps, GapsOverride, Hooks, MouseConfig, Rule};
+pub use command::{
+    Command, CursorTarget, Direction, LayoutRequest, SnapPosition, parse, parse_args,
+};
+pub use config::{Config, Gaps, GapsOverride, Hooks, MouseConfig, Rule, WindowTarget};
 pub use geometry::{Axis, Rect};
 pub use model::{Effect, Engine, Monitor, Snapshot, Window, WindowId, Workspace};
 pub use tree::Layout;
@@ -29,7 +31,7 @@ pub fn protocol_command(args: &[String]) -> Result<Command> {
     fn safe(command: &Command) -> bool {
         match command {
             Command::Exec(_) | Command::Sequence(_) => false,
-            Command::Target(_, command) => safe(command),
+            Command::Target(_, command) | Command::NamedTarget(_, command) => safe(command),
             _ => true,
         }
     }

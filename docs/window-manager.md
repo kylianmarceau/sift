@@ -2,8 +2,10 @@
 
 Sift includes a Rust window-management engine inspired by AeroSpace. It runs
 inside Sift: no AeroSpace installation, subprocess calls for tiling, or separate
-application is required. Available in Sift 0.2.0 on the
-`native-window-manager` branch, it is experimental and off by default. Native
+application is required. Available in Sift 0.2.1 on the
+`native-window-manager` branch, it is experimental and off by default. The
+0.2.1 separates manual shortcuts from optional automatic
+tiling. Native
 smoke checks pass; broader application/multi-monitor acceptance remains open.
 
 Reference: [AeroSpace](https://github.com/nikitabobko/AeroSpace) at
@@ -25,10 +27,18 @@ open -a Sift
 Grant permission to **Sift** itself. A permission granted to the separate
 **Sift WM Check** development harness does not grant it to the installed app.
 
-Open Sift Settings → Window Management. Grant Accessibility to the Sift app,
-return to Settings, and turn Native Window Management on. It starts only when
-enabled and permission has been granted. Turning it off restores original window
-positions. Other launcher features do not need this permission.
+Open Sift Settings → Window Management. Grant window-control permission to Sift,
+return to Settings, and enable **Window Shortcuts and Controls**. Leave
+**Automatic Tiling off** for manual control: windows stay where you put them,
+and only an explicit shortcut or CLI command moves/resizes/focuses a window.
+Discovery, app launches, focus changes and window closure never arrange other
+windows in manual mode. Manual changes stay in place when controls stop or Sift
+quits. Other launcher features do not need window-control permission.
+
+Automatic Tiling is a separate opt-in for AeroSpace-style arrangement and Sift
+workspaces. Turning that option off restores the pre-tiling positions and leaves
+manual controls running. Upgrading from 0.2.0 also defaults to manual control
+unless `automatic_tiling = true` is explicitly configured.
 
 On macOS 27 this permission is named **Device Control and Data Access** under
 Privacy & Security. Older macOS versions call it **Accessibility**.
@@ -38,6 +48,7 @@ The same option can be set in `config.toml`:
 ```toml
 [window_manager]
 enabled = true
+automatic_tiling = false          # manual controls; true enables tiling/workspaces
 default_layout = "tiles"          # tiles or accordion
 default_orientation = "horizontal" # horizontal or vertical
 accordion_padding = 30
@@ -62,15 +73,82 @@ top = 20
 
 Sift reloads hand edits when opened. `sift wm reload-config` explicitly reloads
 window-management rules and bindings; an invalid reload keeps the working
-configuration. Turning the feature off in Settings removes its observers and
-shortcuts. `sift wm enable off` pauses tiling but keeps the control service alive
-so `enable on` can resume it.
+configuration. Turning controls off in Settings removes their observers and
+shortcuts. `sift wm enable off` pauses controls but keeps the control service alive
+so `enable on` can resume it. In manual mode pause/stop never restore or reposition
+windows. Only automatic tiling owns recovery positions.
+
+## Persistent window shortcuts (manual or automatic mode)
+
+Use **Edit Rules and Shortcuts…** to open the actual configuration. Merge these
+sections into it; do not duplicate an existing table. A configured `main` table
+replaces its default bindings, so include every shortcut you want to keep.
+
+```toml
+[window_manager]
+enabled = true
+automatic_tiling = false
+
+[window_manager.targets.terminal]
+app_id = "com.apple.Terminal"
+# Optional regex to select one document/window rather than any Terminal window:
+# title = '(?i)sift|project'
+launch = true
+
+[window_manager.targets.browser]
+app_id = "com.apple.Safari"
+
+[window_manager.bindings.main]
+ctrl-alt-t = ["focus --target terminal"]
+ctrl-alt-b = ["focus --target browser"]
+ctrl-alt-left = ["snap left"]
+ctrl-alt-right = ["snap right"]
+ctrl-alt-up = ["snap maximize"]
+ctrl-alt-down = ["snap restore"]
+```
+
+Save, then run `sift wm reload-config`. `sift wm list-apps` shows app names and
+bundle IDs; `sift wm list-windows` shows current titles. Targets use an **exact
+bundle ID** and optional `app_name`/`title` **regular expressions**. All supplied
+conditions must match. A title-only target is also permitted, but cannot launch
+an app without an `app_id`. Target matching is independent of startup rules.
+
+The same saved target resolves against current window metadata on each press.
+It survives window closure/reopening, app restart and Sift restart; it never
+saves a native window ID. If several windows match, Sift prefers the currently
+focused match, then the most recently focused match, then the lowest native ID.
+Use a title expression to distinguish windows in the same application. Browser
+tabs are not independent native windows, and titles must continue matching.
+
+With `launch = true` (the default), a missing target launches/reopens its app
+through Launch Services (preferring its previously observed bundle path, with
+bundle-ID lookup for first launches or moved apps) and waits up to eight seconds for a matching window.
+Existing matches focus directly without launching a process. A failed launch or
+missing matching title is reported in window-control status; Sift cannot recreate
+a particular document/tab or force an app to open a window. Repeated presses
+coalesce while launching. Reload, pause and shutdown cancel pending actions.
+Closing or minimizing a missing target never launches its app.
+
+```sh
+sift wm focus --target terminal
+sift wm snap left --target terminal
+sift wm resize width +50 --target terminal
+```
+
+An explicit `--target` positions/resizes that window without changing focus.
+To focus and position it, bind `["focus --target terminal", "snap left"]`.
+If launch is needed, the remaining actions wait for the matching window instead
+of running on the previously focused window. Manual snap positions are `left`,
+`right`, `top`, `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right`,
+`center`, `maximize`, and `restore`. They use the monitor's usable screen area.
+Restore remembers the frame before the first snap for that window during this
+Sift session; these temporary restore frames are not persistent bindings.
 
 ## Search and shortcuts
 
 Open windows and workspaces appear in ordinary search while the manager runs.
 Type `win` or `win project` to search windows only, and `ws` or `ws code` for
-workspaces. Enter focuses the window or switches workspace. Window identities
+workspaces (only with Automatic Tiling enabled). Enter focuses the window or switches workspace. Window identities
 are temporary and are not added to recents or favorites.
 
 The default bindings use **Control–Option**, leaving Option–Space for Sift:
@@ -84,6 +162,8 @@ The default bindings use **Control–Option**, leaving Option–Space for Sift:
 | Control–Option–Tab | Previous workspace |
 | Control–Option–F | Toggle Sift fullscreen |
 | Control–Option–Minus/Equal | Shrink/grow selected tile |
+| Control–Option–Left/Right | Snap current window to left/right half (manual) |
+| Control–Option–Up/Down | Maximize/restore current window (manual) |
 | Control–Option–Slash | Cycle tiles/horizontal/vertical |
 | Control–Option–Comma | Cycle accordion/horizontal/vertical |
 
@@ -92,6 +172,11 @@ default binding table for that mode. No hotkeys are registered when the feature
 is off. Shortcut recording temporarily suspends both launcher and window
 shortcuts. A window shortcut conflicting with Sift's launcher shortcut is
 reported; macOS does not reliably report conflicts with other applications.
+Workspace/tree shortcuts are inactive while Automatic Tiling is off. Directional
+focus, move (50-point nudges), resize and fullscreen also work in manual mode.
+Manual fullscreen fills the usable screen and restores the previous frame when
+toggled again. Workspace routing rules, automatic mouse behavior, and automatic
+frame writes are inactive in manual mode.
 
 ```toml
 [window_manager.bindings.main]

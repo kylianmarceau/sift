@@ -33,6 +33,7 @@ pub(crate) struct AppInfo {
     name: String,
     bundle: String,
     hidden: bool,
+    path: Option<std::path::PathBuf>,
 }
 
 pub(crate) enum Event {
@@ -46,6 +47,7 @@ pub(crate) enum Event {
     Hover(u32),
     MouseHold(bool),
     DragEnd(Option<mouse::Drag>),
+    LaunchCompleted(String, u64, Result<(), String>),
     Shutdown,
 }
 
@@ -149,7 +151,11 @@ impl Runtime {
 
     pub fn sync_mouse_monitor(&mut self) -> Result<(), String> {
         MainThreadMarker::new().ok_or("mouse monitor must be updated on the main thread")?;
-        let config = self.controller.config().mouse;
+        let settings = self.controller.config();
+        let mut config = settings.mouse;
+        if !settings.automatic_tiling {
+            config = sift_wm::MouseConfig::default();
+        }
         let enabled = self.controller.snapshot().enabled
             && (config.focus_follows_mouse || config.drag_to_rearrange);
         if enabled
@@ -213,6 +219,10 @@ fn app_info(app: &NSRunningApplication) -> Option<AppInfo> {
         return None;
     }
     Some(AppInfo {
+        path: app
+            .bundleURL()
+            .and_then(|url| url.path())
+            .map(|path| std::path::PathBuf::from(path.to_string())),
         hidden: app.isHidden(),
         pid: app.processIdentifier(),
         name: app

@@ -7,8 +7,19 @@ fn main() {
         NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
-    let directory =
-        std::path::PathBuf::from(std::env::args_os().nth(1).expect("fixture directory"));
+    let directory = std::env::args_os()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let resources = std::env::current_exe()
+                .expect("executable")
+                .parent()
+                .expect("MacOS")
+                .parent()
+                .expect("Contents")
+                .join("Resources/fixture-directory");
+            std::path::PathBuf::from(std::fs::read_to_string(resources).expect("fixture directory"))
+        });
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -93,6 +104,7 @@ fn main() {
                     }
                 }
                 "add" => windows.push(create(windows.len() + 10)),
+                "reopen" => windows.push(create(0)),
                 "stall" => {
                     std::fs::write(directory.join("stalled"), "ready").expect("stall marker");
                     std::thread::sleep(std::time::Duration::from_secs(1));

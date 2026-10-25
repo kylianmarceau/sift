@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 (2026-10-25)
+
+- Separate Window Shortcuts and Controls from Automatic Tiling. Controls now
+  default to manual mode: no automatic tiling, parking, routing or mouse actions.
+- Persistent app/title targets for global shortcuts and `sift wm --target`
+  actions, resolved against current windows after closure/reopening and app restart.
+- Launch a missing target's app when possible and wait for its matching window;
+  bounded/coalesced requests and pending binding sequences avoid acting on an
+  unrelated focused window while an app opens.
+- Manual half/quarter-screen snapping, centering, maximize/restore, movement,
+  resizing, focus and fullscreen. Manual positions persist when controls stop.
+- Turning Automatic Tiling off restores its positions while retaining manual
+  shortcuts; prior manual positions become the next tiling session's originals.
+
 ## 0.2.0 (2026-10-25)
 
 - Optional native Rust window management: nested tiles and accordion layouts,

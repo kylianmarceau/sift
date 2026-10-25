@@ -724,19 +724,28 @@ impl Settings {
     fn render_window_management(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let launcher = self.launcher.read(cx);
         let enabled = launcher.window_management_enabled();
+        let automatic = launcher.automatic_tiling_enabled();
         let status = launcher.window_management_status();
         div().p(px(14.)).rounded(px(10.)).border_1().border_color(theme.divider).bg(theme.card)
             .flex().flex_col().gap(px(12.))
             .child(div().flex().items_center().gap_3()
                 .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(4.))
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Native Window Management"))
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Window Shortcuts and Controls"))
                     .child(div().text_size(px(12.)).text_color(theme.muted).child(status)))
                 .child(div().id("window-management-enabled").cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.change(Setting::WindowManager(!enabled), cx)))
                     .child(switch(enabled, theme))))
             .child(div().h(px(1.)).bg(theme.divider))
+            .child(div().flex().items_center().gap_3()
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(4.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Automatic Tiling"))
+                    .child(div().text_size(px(12.)).text_color(theme.muted).child("Automatically arrange windows and use Sift workspaces. Off leaves positions alone until you use a shortcut.")))
+                .child(div().id("window-management-automatic-tiling").cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.change(Setting::WindowManagerAutomaticTiling(!automatic), cx)))
+                    .child(switch(automatic, theme))))
+            .child(div().h(px(1.)).bg(theme.divider))
             .child(div().text_size(px(12.)).text_color(theme.muted)
-                .child("Requires window-control permission: Device Control and Data Access on macOS 27, or Accessibility on older macOS. Default shortcuts: Control–Option with H/J/K/L to focus, 1–9 for workspaces; add Shift to move. Search win or ws in Sift. Turning this off restores window positions."))
+                .child("Requires Device Control and Data Access on macOS 27, or Accessibility on older macOS. Control–Option with H/J/K/L focuses windows; arrow keys snap the selected window. Configure persistent app/title shortcuts in Edit Rules and Shortcuts. Manual changes stay in place when controls are turned off."))
             .child(div().flex().gap(px(8.))
                 .child(button("window-management-permission", "Grant Window Control…", Kind::Secondary, theme)
                     .on_click(cx.listener(|this, _, _, cx| {

@@ -1207,6 +1207,9 @@ impl Launcher {
     pub fn window_management_enabled(&self) -> bool {
         self.user.window_manager_config().enabled
     }
+    pub fn automatic_tiling_enabled(&self) -> bool {
+        self.user.window_manager_config().automatic_tiling
+    }
     pub fn window_management_status(&self) -> String {
         if let Some(error) = &self.window_error {
             return error.clone();
@@ -1215,6 +1218,18 @@ impl Launcher {
             return message.clone();
         }
         if self.window_manager.is_some() {
+            if !self.window_snapshot.automatic_tiling {
+                return format!(
+                    "Manual control · {} windows · {} mode{}",
+                    self.window_snapshot.windows.len(),
+                    self.window_snapshot.mode,
+                    if self.window_snapshot.enabled {
+                        ""
+                    } else {
+                        " · paused"
+                    }
+                );
+            }
             format!(
                 "{} windows · {} workspaces · {} mode{}",
                 self.window_snapshot.windows.len(),
@@ -1227,7 +1242,7 @@ impl Launcher {
                 }
             )
         } else {
-            "Automatic tiling, keyboard navigation and workspaces. Off by default.".into()
+            "Window shortcuts and manual actions. Automatic tiling is off by default.".into()
         }
     }
 

@@ -11,6 +11,7 @@ echo "Native check logs: $CHECK_LOGS"
     --env "SIFT_WM_LAUNCHER=${SIFT_WM_LAUNCHER:-}" \
     --env "SIFT_WM_INDEX=${SIFT_WM_INDEX:-}" \
     --env "SIFT_WM_BENCH_OUTPUT=${SIFT_WM_BENCH_OUTPUT:-}" \
+    --env "SIFT_WM_BENCH_AUTOMATIC_TILING=${SIFT_WM_BENCH_AUTOMATIC_TILING:-true}" \
     --stdout "$CHECK_LOGS/stdout.log" --stderr "$CHECK_LOGS/stderr.log"
 cat "$CHECK_LOGS/stdout.log" "$CHECK_LOGS/stderr.log"
 # open reports launch success, not the helper's exit status. Require the test's

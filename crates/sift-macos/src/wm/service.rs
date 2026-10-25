@@ -97,6 +97,16 @@ struct Service {
     available_apps: Vec<AppInfo>,
     hooks: Option<super::hooks::Runner>,
     mouse_held: bool,
+    pending_launches: BTreeMap<String, PendingLaunch>,
+    launch_serial: u64,
+    restoring: Vec<RecoveryFrame>,
+    known_apps: BTreeMap<String, PathBuf>,
+}
+
+struct PendingLaunch {
+    command: Command,
+    deadline: Instant,
+    serial: u64,
 }
 
 pub(super) fn start(
@@ -165,18 +175,22 @@ pub(super) fn start(
         snapshot,
         publish: Box::new(publish),
         journal,
-        recovery,
+        recovery: recovery.clone(),
         parked: BTreeSet::new(),
         frontmost: applications.1,
         message: None,
         last_published: None,
-        last_journal: Vec::new(),
+        last_journal: recovery.clone(),
         stopping: stopping.clone(),
         config_path: config_path.to_path_buf(),
         shared_config,
         available_apps: Vec::new(),
         hooks: None,
         mouse_held: false,
+        pending_launches: BTreeMap::new(),
+        launch_serial: 0,
+        restoring: Vec::new(),
+        known_apps: BTreeMap::new(),
     };
     let socket_copy = socket.clone();
     let ipc_thread = std::thread::Builder::new()
@@ -190,7 +204,27 @@ pub(super) fn start(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 service.applications(applications.0, true);
                 service.publish();
-                while let Ok(event) = rx.recv() {
+                loop {
+                    // Only a user-requested app launch creates a one-shot wait.
+                    // Once it completes or expires the service blocks indefinitely.
+                    let event = if let Some(deadline) =
+                        service.pending_launches.values().map(|p| p.deadline).min()
+                    {
+                        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                            Ok(event) => event,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                service.finish_launches();
+                                service.publish();
+                                continue;
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match rx.recv() {
+                            Ok(event) => event,
+                            Err(_) => break,
+                        }
+                    };
                     if service.stopping.load(Ordering::Acquire) || matches!(event, Event::Shutdown)
                     {
                         break;
@@ -234,6 +268,20 @@ pub(super) fn start(
                             }
                         }
                         Event::Reports => {}
+                        Event::LaunchCompleted(name, serial, result) => {
+                            if service
+                                .pending_launches
+                                .get(&name)
+                                .is_some_and(|p| p.serial == serial)
+                            {
+                                if let Err(error) = result {
+                                    service.pending_launches.remove(&name);
+                                    service.message = Some(error);
+                                } else {
+                                    service.applications(service.available_apps.clone(), true);
+                                }
+                            }
+                        }
                         Event::Hover(id) => {
                             if service.engine.enabled
                                 && service.engine.config.mouse.focus_follows_mouse
@@ -272,6 +320,7 @@ pub(super) fn start(
                         Event::Shutdown => break,
                     }
                     service.reports();
+                    service.finish_launches();
                     service.apply(Vec::new());
                     service.publish();
                     tracing::debug!(
@@ -318,6 +367,22 @@ pub(super) fn start(
 
 impl Service {
     fn applications(&mut self, apps: Vec<AppInfo>, refresh_all: bool) {
+        let targets: BTreeSet<_> = self
+            .engine
+            .config
+            .targets
+            .values()
+            .filter_map(|target| target.app_id.as_deref())
+            .collect();
+        self.known_apps
+            .retain(|app_id, _| targets.contains(app_id.as_str()));
+        for app in &apps {
+            if targets.contains(app.bundle.as_str()) {
+                if let Some(path) = &app.path {
+                    self.known_apps.insert(app.bundle.clone(), path.clone());
+                }
+            }
+        }
         let considered = apps.len();
         self.available_apps = apps.clone();
         let apps: Vec<_> = apps
@@ -330,7 +395,11 @@ impl Service {
             "window-manager application discovery"
         );
         let alive: BTreeSet<_> = apps.iter().map(|a| a.pid).collect();
-        for (pid, worker) in self.workers.iter().filter(|(pid, _)| !alive.contains(pid)) {
+        for (pid, worker) in self
+            .workers
+            .iter()
+            .filter(|(pid, _)| !alive.contains(pid) && self.engine.config.automatic_tiling)
+        {
             let frames: Vec<_> = self
                 .engine
                 .windows
@@ -355,7 +424,9 @@ impl Service {
                     });
                 }
             }
-            worker.send(Task::Restore(frames));
+            if self.engine.config.automatic_tiling {
+                worker.send(Task::Restore(frames));
+            }
         }
         let gone: Vec<_> = self
             .engine
@@ -402,8 +473,13 @@ impl Service {
             }
             for id in remove_absent(&mut self.engine, &report) {
                 self.parked.remove(&id);
+                self.restoring.retain(|r| r.id != id || r.pid != report.pid);
+                self.recovery.retain(|r| r.id != id || r.pid != report.pid);
             }
             for mut window in report.windows {
+                self.restoring.retain(|r| {
+                    !(r.id == window.id && r.pid == window.pid && window.frame.nearly(r.frame))
+                });
                 // Recovery matching requires both pid and native window id,
                 // plus the bundle id. Never restore unrelated new windows.
                 if let Some(index) = self.recovery.iter().position(|r| {
@@ -413,6 +489,8 @@ impl Service {
                         && r.process_started.is_some()
                         && r.process_started == self.workers.get(&window.pid).map(|w| w.identity)
                         && r.frame.valid()
+                        && !window.minimized
+                        && !window.native_fullscreen
                 }) {
                     let recovery = self.recovery.remove(index);
                     window.frame = recovery.frame;
@@ -420,6 +498,7 @@ impl Service {
                     if let Some(worker) = self.workers.get(&window.pid) {
                         worker.send(Task::Restore(vec![(window.id, recovery.frame)]));
                     }
+                    self.restoring.push(recovery);
                 }
                 let _ = self.engine.add_window(window);
             }
@@ -429,6 +508,13 @@ impl Service {
                 if let Some(id) = report.focused {
                     let _ = self.engine.observed_focus(id);
                 }
+            }
+        }
+        if !self.engine.config.automatic_tiling {
+            let mut frames = self.recovery.clone();
+            frames.extend(self.restoring.iter().cloned());
+            if let Err(error) = self.write_journal(frames) {
+                self.message = Some(format!("Could not update window recovery journal: {error}"));
             }
         }
     }
@@ -480,6 +566,27 @@ impl Service {
             return Ok(());
         }
         let hooks_changed = config.hooks != self.engine.config.hooks;
+        let leaving_tiling = self.engine.config.automatic_tiling && !config.automatic_tiling;
+        config.validate().map_err(|e| e.to_string())?;
+        if leaving_tiling {
+            self.restore();
+            // Native fullscreen/minimized windows are restored only after
+            // macOS returns control of their frames.
+            for frame in &self.last_journal {
+                if self
+                    .engine
+                    .windows
+                    .get(&frame.id)
+                    .is_some_and(|w| w.pid == frame.pid && (w.minimized || w.native_fullscreen))
+                    && !self
+                        .recovery
+                        .iter()
+                        .any(|r| r.id == frame.id && r.pid == frame.pid)
+                {
+                    self.recovery.push(frame.clone());
+                }
+            }
+        }
         self.engine
             .reconfigure(config.clone())
             .map_err(|e| e.to_string())?;
@@ -487,6 +594,7 @@ impl Service {
             self.hooks = None;
         }
         self.mouse_held = false;
+        self.pending_launches.clear();
         self.engine.enabled = config.enabled;
         *self
             .shared_config
@@ -498,13 +606,20 @@ impl Service {
 
     fn apply(&mut self, effects: Vec<Effect>) {
         if !self.engine.enabled {
+            self.pending_launches.clear();
             self.restore();
             return;
         }
         let mut by_pid: BTreeMap<i32, Vec<Effect>> = BTreeMap::new();
         let mut effects = effects;
         effects.extend(self.engine.reflow());
-        if let Some(target) = self.engine.config.mouse.follows_focus {
+        if let Some(target) = self
+            .engine
+            .config
+            .mouse
+            .follows_focus
+            .filter(|_| self.engine.config.automatic_tiling)
+        {
             if self.last_published.as_ref().is_some_and(|previous| {
                 previous.focused != self.engine.focused
                     || previous.active_monitor != self.engine.active_monitor
@@ -516,7 +631,27 @@ impl Service {
         }
         // Persist original positions before the first destructive operation.
         // On a write failure leave every window where it was.
-        if let Err(e) = self.save_journal() {
+        if let Err(e) = if self.engine.config.automatic_tiling {
+            self.save_journal()
+        } else {
+            // An explicit manual move supersedes an in-flight restoration.
+            // Never let an old automatic journal undo it at the next startup.
+            let moved: BTreeSet<_> = effects
+                .iter()
+                .filter_map(|e| {
+                    if let Effect::Frame(id, _) = e {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            self.recovery.retain(|r| !moved.contains(&r.id));
+            self.restoring.retain(|r| !moved.contains(&r.id));
+            let mut frames = self.recovery.clone();
+            frames.extend(self.restoring.iter().cloned());
+            self.write_journal(frames)
+        } {
             self.message = Some(format!(
                 "Window layout was not changed: cannot save recovery positions: {e}"
             ));
@@ -548,6 +683,14 @@ impl Service {
         effects.reverse();
         for effect in effects {
             let id = match effect {
+                Effect::LaunchTarget {
+                    name,
+                    app_id,
+                    command,
+                } => {
+                    self.launch_target(name, app_id, *command);
+                    continue;
+                }
                 Effect::Exec(ref shell) => {
                     spawn_shell(shell);
                     continue;
@@ -579,6 +722,9 @@ impl Service {
     }
 
     fn restore(&mut self) {
+        if !self.engine.config.automatic_tiling {
+            return;
+        }
         for (pid, worker) in &self.workers {
             let frames: Vec<_> = self
                 .engine
@@ -607,11 +753,117 @@ impl Service {
                     )
                 })
                 .collect();
+            for (id, frame) in &frames {
+                if let Some(window) = self.engine.windows.get(id) {
+                    self.restoring.retain(|r| r.id != *id || r.pid != *pid);
+                    self.restoring.push(RecoveryFrame {
+                        id: *id,
+                        pid: *pid,
+                        app_id: window.app_id.clone(),
+                        process_started: Some(worker.identity),
+                        frame: *frame,
+                    });
+                }
+            }
             worker.send(Task::Restore(frames));
         }
         self.parked.clear();
         // Keep the journal until next startup confirms that the windows are
         // back. This also covers a shutdown during a blocked AX call.
+    }
+
+    fn launch_target(&mut self, name: String, app_id: String, command: Command) {
+        if let Some(pending) = self.pending_launches.get_mut(&name) {
+            pending.command = command;
+            return;
+        }
+        if self.pending_launches.len() >= 32 {
+            self.message = Some("Too many pending application launches".into());
+            return;
+        }
+        self.launch_serial = self.launch_serial.wrapping_add(1);
+        let serial = self.launch_serial;
+        self.pending_launches.insert(
+            name.clone(),
+            PendingLaunch {
+                command,
+                deadline: Instant::now() + Duration::from_secs(8),
+                serial,
+            },
+        );
+        self.message = Some(format!("Opening {app_id} for target {name:?}…"));
+        let tx = self.tx.clone();
+        let target = name.clone();
+        let path = self.known_apps.get(&app_id).cloned();
+        // Launch Services via a fixed executable and separate arguments; no shell,
+        // per-keystroke process, or main-thread work for an existing match.
+        let result = std::thread::Builder::new()
+            .name("sift-wm-open".into())
+            .spawn(move || {
+                let open = |path: Option<&Path>| {
+                    let mut process = std::process::Command::new("/usr/bin/open");
+                    if let Some(path) = path {
+                        process.arg("-a").arg(path);
+                    } else {
+                        process.args(["-b", &app_id]);
+                    }
+                    process
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .output()
+                        .map_err(|e| format!("Could not open {app_id}: {e}"))
+                        .and_then(|output| {
+                            if output.status.success() {
+                                Ok(())
+                            } else {
+                                let detail: String = String::from_utf8_lossy(&output.stderr)
+                                    .trim()
+                                    .chars()
+                                    .take(512)
+                                    .collect();
+                                Err(format!("Could not open {app_id}: {detail}"))
+                            }
+                        })
+                };
+                // Prefer the exact copy previously observed. Bundle-ID lookup
+                // remains available for first launches or moved applications.
+                let result = match path {
+                    Some(path) => open(Some(&path)).or_else(|_| open(None)),
+                    None => open(None),
+                };
+                let _ = tx.send(Event::LaunchCompleted(target, serial, result));
+            });
+        if let Err(error) = result {
+            self.pending_launches.remove(&name);
+            self.message = Some(format!("Could not start application launch: {error}"));
+        }
+    }
+
+    fn finish_launches(&mut self) {
+        let ready: Vec<_> = self
+            .pending_launches
+            .iter()
+            .filter_map(|(name, pending)| {
+                let matched = self.engine.resolve_target(name).ok().flatten().is_some();
+                (matched || Instant::now() >= pending.deadline).then(|| (name.clone(), matched))
+            })
+            .collect();
+        for (name, matched) in ready {
+            let pending = self.pending_launches.remove(&name).expect("pending launch");
+            if matched {
+                match self.engine.execute(pending.command) {
+                    Ok(effects) => {
+                        self.message = None;
+                        self.apply(effects);
+                    }
+                    Err(error) => self.message = Some(error.to_string()),
+                }
+            } else {
+                self.message = Some(format!(
+                    "No window matched target {name:?} after opening its app. Sift cannot recreate a particular document or tab."
+                ));
+            }
+        }
     }
 
     fn save_journal(&mut self) -> std::io::Result<()> {
@@ -637,6 +889,10 @@ impl Service {
                 })
                 .cloned(),
         );
+        self.write_journal(frames)
+    }
+
+    fn write_journal(&mut self, mut frames: Vec<RecoveryFrame>) -> std::io::Result<()> {
         frames.sort_by_key(|r| (r.pid, r.id));
         if frames.len() == self.last_journal.len()
             && frames.iter().zip(&self.last_journal).all(|(a, b)| {
@@ -839,6 +1095,7 @@ mod tests {
         publish: impl Fn(Arc<Snapshot>) + Send + 'static,
     ) -> Controller {
         let config = Config {
+            automatic_tiling: true,
             enabled: true,
             ..Config::default()
         };
@@ -874,6 +1131,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("hook-started");
         let config = Config {
+            automatic_tiling: true,
             enabled: true,
             hooks: sift_wm::Hooks {
                 after_startup: vec![format!(

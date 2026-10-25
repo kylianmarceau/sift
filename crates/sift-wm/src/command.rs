@@ -42,6 +42,9 @@ pub enum Command {
     MoveMouse(CursorTarget),
     Focus(Direction),
     FocusId(WindowId),
+    FocusTarget(String),
+    NamedTarget(String, Box<Command>),
+    Snap(SnapPosition),
     FocusBack,
     Move(Direction),
     Swap(Direction),
@@ -82,6 +85,22 @@ pub enum Command {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum SnapPosition {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Center,
+    Maximize,
+    Restore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CursorTarget {
     WindowCenter,
     WindowLazyCenter,
@@ -99,6 +118,39 @@ impl CursorTarget {
 }
 
 impl Command {
+    pub fn requires_manual_mode(&self) -> bool {
+        match self {
+            Self::Snap(_) => true,
+            Self::Target(_, command) | Self::NamedTarget(_, command) => {
+                command.requires_manual_mode()
+            }
+            Self::Sequence(commands) => commands.iter().any(Self::requires_manual_mode),
+            _ => false,
+        }
+    }
+
+    pub fn requires_automatic_tiling(&self) -> bool {
+        match self {
+            Self::Layout(_, _)
+            | Self::Workspace(_)
+            | Self::WorkspaceBack
+            | Self::MoveToWorkspace(_, _)
+            | Self::MoveWorkspaceToMonitor(_)
+            | Self::SummonWorkspace(_)
+            | Self::Split(_)
+            | Self::Join(_)
+            | Self::Swap(_)
+            | Self::Balance
+            | Self::Flatten
+            | Self::CloseOthers => true,
+            Self::Target(_, command) | Self::NamedTarget(_, command) => {
+                command.requires_automatic_tiling()
+            }
+            Self::Sequence(commands) => commands.iter().any(Self::requires_automatic_tiling),
+            _ => false,
+        }
+    }
+
     pub fn is_query(&self) -> bool {
         matches!(
             self,
@@ -187,6 +239,16 @@ pub fn parse(text: &str) -> Result<Command> {
 
 pub fn parse_args(args: &[String]) -> Result<Command> {
     let mut args = args.to_vec();
+    let named = if let Some(index) = args.iter().position(|s| s == "--target") {
+        if index + 1 >= args.len() {
+            return Err(Error("--target needs a saved target name".into()));
+        }
+        let name = args.remove(index + 1);
+        args.remove(index);
+        Some(name)
+    } else {
+        None
+    };
     let target = if let Some(index) = args.iter().position(|s| s == "--window-id") {
         if index + 1 >= args.len() {
             return Err(Error("--window-id needs an id".into()));
@@ -200,6 +262,18 @@ pub fn parse_args(args: &[String]) -> Result<Command> {
     } else {
         None
     };
+    if let Some(name) = named {
+        if target.is_some() {
+            return Err(Error("use either --target or --window-id".into()));
+        }
+        if args.as_slice() == ["focus"] {
+            return Ok(Command::FocusTarget(name));
+        }
+        return Ok(Command::NamedTarget(
+            name,
+            Box::new(parse_simple_args(&args)?),
+        ));
+    }
     if args.as_slice() == ["focus"] {
         if let Some(id) = target {
             return Ok(Command::FocusId(id));
@@ -258,6 +332,25 @@ fn parse_simple_args(args: &[String]) -> Result<Command> {
             })
     };
     match name {
+        "snap" => {
+            Ok(Command::Snap(match single()? {
+                "left" => SnapPosition::Left,
+                "right" => SnapPosition::Right,
+                "top" => SnapPosition::Top,
+                "bottom" => SnapPosition::Bottom,
+                "top-left" => SnapPosition::TopLeft,
+                "top-right" => SnapPosition::TopRight,
+                "bottom-left" => SnapPosition::BottomLeft,
+                "bottom-right" => SnapPosition::BottomRight,
+                "center" => SnapPosition::Center,
+                "maximize" => SnapPosition::Maximize,
+                "restore" => SnapPosition::Restore,
+                _ => return Err(Error(
+                    "snap expects left, right, top, bottom, a corner, center, maximize, or restore"
+                        .into(),
+                )),
+            }))
+        }
         "move-mouse" => Ok(Command::MoveMouse(match single()? {
             "window-center" => CursorTarget::WindowCenter,
             "window-lazy-center" => CursorTarget::WindowLazyCenter,

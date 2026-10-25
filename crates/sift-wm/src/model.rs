@@ -4,6 +4,9 @@ use crate::{Axis, Command, Config, Direction, Error, LayoutRequest, Rect, Result
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "manual.rs"]
+mod manual;
+
 pub type WindowId = u32;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +73,8 @@ pub struct Workspace {
 pub struct Snapshot {
     pub revision: u64,
     pub enabled: bool,
+    #[serde(default)]
+    pub automatic_tiling: bool,
     pub mode: String,
     pub focused: Option<WindowId>,
     pub active_monitor: u32,
@@ -82,6 +87,11 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
+    LaunchTarget {
+        name: String,
+        app_id: String,
+        command: Box<Command>,
+    },
     Cursor(Rect, bool),
     Frame(WindowId, Rect),
     Focus(WindowId),
@@ -129,6 +139,17 @@ pub struct Engine {
     rules: Vec<CompiledRule>,
     include_apps: Vec<regex::Regex>,
     exclude_apps: Vec<regex::Regex>,
+    targets: BTreeMap<String, CompiledTarget>,
+    focus_order: BTreeMap<WindowId, u64>,
+    focus_serial: u64,
+    manual_restore: BTreeMap<WindowId, Rect>,
+    manual_fullscreen: BTreeMap<WindowId, Rect>,
+}
+
+struct CompiledTarget {
+    app_id: Option<String>,
+    app_name: Option<regex::Regex>,
+    title: Option<regex::Regex>,
 }
 
 impl Engine {
@@ -150,6 +171,11 @@ impl Engine {
             rules: Vec::new(),
             include_apps: Vec::new(),
             exclude_apps: Vec::new(),
+            targets: BTreeMap::new(),
+            focus_order: BTreeMap::new(),
+            focus_serial: 0,
+            manual_restore: BTreeMap::new(),
+            manual_fullscreen: BTreeMap::new(),
         };
         engine.compile_rules()?;
         engine.set_monitors(monitors)?;
@@ -157,6 +183,21 @@ impl Engine {
     }
 
     fn compile_rules(&mut self) -> Result<()> {
+        self.targets = self
+            .config
+            .targets
+            .iter()
+            .map(|(name, target)| {
+                Ok((
+                    name.clone(),
+                    CompiledTarget {
+                        app_id: target.app_id.clone(),
+                        app_name: target.app_name.as_deref().map(compile).transpose()?,
+                        title: target.title.as_deref().map(compile).transpose()?,
+                    },
+                ))
+            })
+            .collect::<Result<_>>()?;
         self.include_apps = self
             .config
             .include_apps
@@ -189,9 +230,35 @@ impl Engine {
 
     pub fn reconfigure(&mut self, config: Config) -> Result<()> {
         config.validate()?;
+        let was_automatic = self.config.automatic_tiling;
+        let automatic = config.automatic_tiling;
+        if automatic != was_automatic {
+            self.manual_restore.clear();
+            self.manual_fullscreen.clear();
+            for window in self.windows.values_mut() {
+                if automatic {
+                    // Tiling takes ownership of the current manual positions.
+                    window.original_frame = window.frame;
+                } else {
+                    window.frame = window.original_frame;
+                }
+            }
+        }
         self.config = config;
         self.compile_rules()?;
         self.set_monitors(self.monitors.values().cloned().collect())?;
+        if automatic && !was_automatic {
+            let windows = std::mem::take(&mut self.windows);
+            for workspace in self.workspaces.values_mut() {
+                workspace.tree =
+                    Node::container(self.config.default_orientation, self.config.default_layout);
+                workspace.focused = None;
+                workspace.fullscreen = None;
+            }
+            for window in windows.into_values() {
+                self.add_window(window)?;
+            }
+        }
         self.mode = "main".into();
         self.revision = self.revision.wrapping_add(1);
         Ok(())
@@ -265,7 +332,11 @@ impl Engine {
             self.visible.insert(id, name);
         }
         // A display may have vanished while a floating window was there.
-        for window in self.windows.values_mut().filter(|w| w.floating) {
+        for window in self
+            .windows
+            .values_mut()
+            .filter(|w| w.floating && self.config.automatic_tiling)
+        {
             if let Some(m) = self
                 .workspaces
                 .get(&window.workspace)
@@ -331,6 +402,9 @@ impl Engine {
             .cloned()
             .unwrap_or(self.current_name()?);
         for rule in &self.rules {
+            if !self.config.automatic_tiling {
+                break;
+            }
             if rule.matches(&window) {
                 if let Some(w) = &rule.workspace {
                     target.clone_from(w);
@@ -369,8 +443,8 @@ impl Engine {
         old.native_fullscreen = observed.native_fullscreen;
         old.hidden = observed.hidden;
         let is_tiled = old.is_tiled();
-        if old.floating
-            && self.visible.values().any(|n| n == &old.workspace)
+        if (!self.config.automatic_tiling
+            || (old.floating && self.visible.values().any(|n| n == &old.workspace)))
             && observed.frame.valid()
         {
             old.frame = observed.frame;
@@ -385,6 +459,9 @@ impl Engine {
     }
 
     pub fn remove_window(&mut self, id: WindowId) {
+        self.focus_order.remove(&id);
+        self.manual_restore.remove(&id);
+        self.manual_fullscreen.remove(&id);
         let Some(window) = self.windows.remove(&id) else {
             return;
         };
@@ -401,11 +478,14 @@ impl Engine {
             self.previous_window = None;
         }
         if self.focused == Some(id) {
-            self.focused = self
-                .current_name()
-                .ok()
-                .and_then(|n| self.workspaces.get(&n))
-                .and_then(|w| w.focused);
+            self.focused = if self.config.automatic_tiling {
+                self.current_name()
+                    .ok()
+                    .and_then(|n| self.workspaces.get(&n))
+                    .and_then(|w| w.focused)
+            } else {
+                None
+            };
         }
     }
 
@@ -416,7 +496,11 @@ impl Engine {
         };
         let workspace = window.workspace.clone();
         // Activation via Dock or another launcher reveals the owning workspace.
-        self.switch_workspace(&workspace)?;
+        if self.config.automatic_tiling {
+            self.switch_workspace(&workspace)?;
+        } else {
+            self.active_monitor = self.window_monitor(id)?;
+        }
         self.set_focus(id);
         if previous != Some(id) {
             self.previous_window = previous;
@@ -450,7 +534,13 @@ impl Engine {
         x: f64,
         y: f64,
     ) -> Result<Vec<Effect>> {
-        if !self.enabled || !before.valid() || !after.valid() || !x.is_finite() || !y.is_finite() {
+        if !self.enabled
+            || !self.config.automatic_tiling
+            || !before.valid()
+            || !after.valid()
+            || !x.is_finite()
+            || !y.is_finite()
+        {
             return Ok(Vec::new());
         }
         let Some(window) = self.windows.get(&id) else {
@@ -520,6 +610,8 @@ impl Engine {
     }
 
     fn set_focus(&mut self, id: WindowId) {
+        self.focus_serial = self.focus_serial.wrapping_add(1);
+        self.focus_order.insert(id, self.focus_serial);
         if self.focused != Some(id) {
             self.previous_window = self.focused;
             self.focused = Some(id);
@@ -685,6 +777,15 @@ impl Engine {
     }
 
     pub fn execute(&mut self, command: Command) -> Result<Vec<Effect>> {
+        if let Command::FocusTarget(name) = &command {
+            return self.execute_named(name.clone(), None);
+        }
+        if let Command::NamedTarget(name, inner) = &command {
+            return self.execute_named(name.clone(), Some((**inner).clone()));
+        }
+        if !self.config.automatic_tiling {
+            return self.execute_manual(command);
+        }
         let previous_focus = self.focused;
         let explicit_focus = matches!(
             &command,
@@ -741,16 +842,15 @@ impl Engine {
                 });
             }
             Command::Sequence(commands) => {
-                if commands.len() > 32 {
-                    return Err(Error("too many commands".into()));
-                }
-                for command in commands {
-                    effects.extend(self.execute(command)?);
-                }
-                return Ok(effects);
+                return self.execute_sequence(commands);
             }
             Command::Enable(enabled) => {
                 self.enabled = enabled;
+            }
+            Command::Snap(_) => {
+                return Err(Error(
+                    "snap requires manual mode; turn Automatic Tiling off".into(),
+                ));
             }
             Command::Mode(mode) => {
                 if !self.config.bindings.contains_key(&mode) {
@@ -1130,7 +1230,7 @@ impl Engine {
     /// windows and journals recovery frames before doing so.
     pub fn reflow(&mut self) -> Vec<Effect> {
         let mut frames = Vec::new();
-        if !self.enabled {
+        if !self.enabled || !self.config.automatic_tiling {
             return frames;
         }
         for name in self.visible.values() {
@@ -1185,7 +1285,7 @@ impl Engine {
     }
 
     pub fn hidden(&self) -> Vec<WindowId> {
-        if !self.enabled {
+        if !self.enabled || !self.config.automatic_tiling {
             return Vec::new();
         }
         self.windows
@@ -1234,6 +1334,7 @@ impl Engine {
         Snapshot {
             revision: self.revision,
             enabled: self.enabled,
+            automatic_tiling: self.config.automatic_tiling,
             mode: self.mode.clone(),
             focused: self.focused,
             active_monitor: self.active_monitor,

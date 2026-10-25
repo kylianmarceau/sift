@@ -30,13 +30,24 @@ impl WindowProvider {
                     w.title.clone()
                 }
                 .into(),
-                subtitle: Some(format!("{} · Workspace {}", w.app_name, w.workspace).into()),
+                subtitle: Some(
+                    if snapshot.automatic_tiling {
+                        format!("{} · Workspace {}", w.app_name, w.workspace)
+                    } else {
+                        w.app_name.clone()
+                    }
+                    .into(),
+                ),
                 score: 0,
                 action: Action::WindowCommand(format!("focus --window-id {}", w.id).into()),
             };
             items.push((item, folded));
         }
-        for w in &snapshot.workspaces {
+        for w in snapshot
+            .workspaces
+            .iter()
+            .filter(|_| snapshot.automatic_tiling)
+        {
             let title = format!("Workspace {}", w.name);
             let folded = fold(title.as_bytes()).into_boxed_slice();
             // Double quotes preserve spaces, apostrophes and escaped backslashes.
