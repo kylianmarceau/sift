@@ -1,0 +1,50 @@
+[
+  {
+    "automatic_tiling": false,
+    "enabled": false,
+    "footprint": "sift-launcher [91487]: 64-bit    Footprint: 42 MB (16384 bytes per page)\n 912 KB        0 B          0 B         22    Owned physical footprint (unmapped) (graphics)\n    0 B        0 B      1024 KB         15    Owned physical footprint (unmapped)\n    phys_footprint: 42 MB\n    phys_footprint_peak: 52 MB",
+    "idle_cpu_seconds": 0.009999999999999787,
+    "idle_seconds": 30,
+    "managed_windows": 0,
+    "name": "wm-disabled-1",
+    "rounds": 3,
+    "rss_mib": 90.265625,
+    "summary": "== ui bench\nshow to first frame                    n=3    median   8.68 ms  p95  30.54 ms  max  30.54 ms\nkeystroke to results, all              n=177  median   4.77 ms  p95  31.15 ms  max  77.30 ms\nkeystroke to frame, all                n=177  median   5.04 ms  p95  31.22 ms  max  77.33 ms\nresults to frame (waiting to draw)     n=177  median   0.12 ms  p95   1.74 ms  max   2.55 ms\nkeystroke to frame, one character      n=21   median   2.00 ms  p95   4.89 ms  max   5.15 ms\nkeystroke to frame, files searched     n=156  median   5.56 ms  p95  33.17 ms  max  77.33 ms\n  \u201csafari\u201d (full query)                n=3    median   8.21 ms  p95  33.17 ms  max  33.17 ms\n  \u201cterminal\u201d (full query)              n=3    median   1.98 ms  p95  39.46 ms  max  39.46 ms\n  \u201cthesis\u201d (full query)                n=3    median   9.96 ms  p95  13.40 ms  max  13.40 ms\n  \u201cmockup screenshot\u201d (full query)     n=3    median   1.65 ms  p95   4.95 ms  max   4.95 ms\n  \u201cdsc\u201d (full query)                   n=3    median   5.56 ms  p95   7.23 ms  max   7.23 ms\n  \u201crport\u201d (full query)                 n=3    median   8.26 ms  p95  13.40 ms  max  13.40 ms\n  \u201cmonday ext:pdf\u201d (full query)        n=3    median   6.71 ms  p95  28.39 ms  max  28.39 ms\nkeystrokes with no results: 9 of 177\nui bench done\n"
+  },
+  {
+    "automatic_tiling": false,
+    "enabled": true,
+    "footprint": "sift-launcher [91725]: 64-bit    Footprint: 42 MB (16384 bytes per page)\n 464 KB        0 B          0 B         12    Owned physical footprint (unmapped) (graphics)\n    0 B        0 B      1024 KB          8    Owned physical footprint (unmapped)\n    phys_footprint: 42 MB\n    phys_footprint_peak: 52 MB",
+    "idle_cpu_seconds": 0.0,
+    "idle_seconds": 30,
+    "managed_windows": 3,
+    "name": "wm-enabled-1",
+    "rounds": 3,
+    "rss_mib": 97.0625,
+    "summary": "== ui bench\nshow to first frame                    n=3    median   7.25 ms  p95  30.70 ms  max  30.70 ms\nkeystroke to results, all              n=177  median   4.40 ms  p95  15.98 ms  max  34.12 ms\nkeystroke to frame, all                n=177  median   4.50 ms  p95  16.06 ms  max  34.22 ms\nresults to frame (waiting to draw)     n=177  median   0.10 ms  p95   1.57 ms  max   2.14 ms\nkeystroke to frame, one character      n=21   median   1.91 ms  p95   7.17 ms  max   8.58 ms\nkeystroke to frame, files searched     n=156  median   4.86 ms  p95  19.60 ms  max  34.22 ms\n  \u201csafari\u201d (full query)                n=3    median   2.47 ms  p95   3.25 ms  max   3.25 ms\n  \u201cterminal\u201d (full query)              n=3    median   1.44 ms  p95   1.64 ms  max   1.64 ms\n  \u201cthesis\u201d (full query)                n=3    median   6.54 ms  p95  14.25 ms  max  14.25 ms\n  \u201cmockup screenshot\u201d (full query)     n=3    median   1.70 ms  p95   4.38 ms  max   4.38 ms\n  \u201cdsc\u201d (full query)                   n=3    median   3.76 ms  p95   4.86 ms  max   4.86 ms\n  \u201crport\u201d (full query)                 n=3    median   6.40 ms  p95  23.99 ms  max  23.99 ms\n  \u201cmonday ext:pdf\u201d (full query)        n=3    median   4.95 ms  p95   9.54 ms  max   9.54 ms\nkeystrokes with no results: 9 of 177\nui bench done\n"
+  },
+  {
+    "automatic_tiling": false,
+    "enabled": false,
+    "footprint": "sift-launcher [91915]: 64-bit    Footprint: 41 MB (16384 bytes per page)\n 592 KB        0 B          0 B         12    Owned physical footprint (unmapped) (graphics)\n    0 B        0 B      2048 KB         16    Owned physical footprint (unmapped)\n    phys_footprint: 41 MB\n    phys_footprint_peak: 66 MB",
+    "idle_cpu_seconds": 0.009999999999999787,
+    "idle_seconds": 30,
+    "managed_windows": 0,
+    "name": "wm-disabled-2",
+    "rounds": 3,
+    "rss_mib": 96.953125,
+    "summary": "== ui bench\nshow to first frame                    n=3    median  11.87 ms  p95  26.01 ms  max  26.01 ms\nkeystroke to results, all              n=177  median   4.33 ms  p95  16.52 ms  max  35.99 ms\nkeystroke to frame, all                n=177  median   4.55 ms  p95  16.67 ms  max  36.07 ms\nresults to frame (waiting to draw)     n=177  median   0.12 ms  p95   1.92 ms  max   2.64 ms\nkeystroke to frame, one character      n=21   median   2.27 ms  p95   4.41 ms  max   6.64 ms\nkeystroke to frame, files searched     n=156  median   4.93 ms  p95  17.76 ms  max  36.07 ms\n  \u201csafari\u201d (full query)                n=3    median   3.38 ms  p95   8.68 ms  max   8.68 ms\n  \u201cterminal\u201d (full query)              n=3    median   1.79 ms  p95   4.30 ms  max   4.30 ms\n  \u201cthesis\u201d (full query)                n=3    median   9.70 ms  p95  12.80 ms  max  12.80 ms\n  \u201cmockup screenshot\u201d (full query)     n=3    median   5.12 ms  p95   8.29 ms  max   8.29 ms\n  \u201cdsc\u201d (full query)                   n=3    median   2.85 ms  p95  21.24 ms  max  21.24 ms\n  \u201crport\u201d (full query)                 n=3    median   7.64 ms  p95  15.37 ms  max  15.37 ms\n  \u201cmonday ext:pdf\u201d (full query)        n=3    median   4.60 ms  p95   5.87 ms  max   5.87 ms\nkeystrokes with no results: 9 of 177\nui bench done\n"
+  },
+  {
+    "automatic_tiling": false,
+    "enabled": true,
+    "footprint": "sift-launcher [92186]: 64-bit    Footprint: 42 MB (16384 bytes per page)\n1168 KB        0 B          0 B         22    Owned physical footprint (unmapped) (graphics)\n    0 B        0 B      4096 KB         32    Owned physical footprint (unmapped)\n    phys_footprint: 42 MB\n    phys_footprint_peak: 70 MB",
+    "idle_cpu_seconds": 0.0,
+    "idle_seconds": 30,
+    "managed_windows": 3,
+    "name": "wm-enabled-2",
+    "rounds": 3,
+    "rss_mib": 95.5,
+    "summary": "== ui bench\nshow to first frame                    n=3    median   6.68 ms  p95  20.64 ms  max  20.64 ms\nkeystroke to results, all              n=177  median   4.03 ms  p95   8.80 ms  max  18.01 ms\nkeystroke to frame, all                n=177  median   4.12 ms  p95   8.91 ms  max  18.04 ms\nresults to frame (waiting to draw)     n=177  median   0.12 ms  p95   1.64 ms  max   1.90 ms\nkeystroke to frame, one character      n=21   median   1.82 ms  p95   2.52 ms  max   2.59 ms\nkeystroke to frame, files searched     n=156  median   4.50 ms  p95   8.93 ms  max  18.04 ms\n  \u201csafari\u201d (full query)                n=3    median   2.95 ms  p95   5.28 ms  max   5.28 ms\n  \u201cterminal\u201d (full query)              n=3    median   1.45 ms  p95   4.44 ms  max   4.44 ms\n  \u201cthesis\u201d (full query)                n=3    median   5.70 ms  p95   8.19 ms  max   8.19 ms\n  \u201cmockup screenshot\u201d (full query)     n=3    median   1.95 ms  p95   2.07 ms  max   2.07 ms\n  \u201cdsc\u201d (full query)                   n=3    median   2.09 ms  p95   2.63 ms  max   2.63 ms\n  \u201crport\u201d (full query)                 n=3    median   5.06 ms  p95   8.36 ms  max   8.36 ms\n  \u201cmonday ext:pdf\u201d (full query)        n=3    median   5.93 ms  p95   6.37 ms  max   6.37 ms\nkeystrokes with no results: 9 of 177\nui bench done\n"
+  }
+]

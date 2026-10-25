@@ -807,3 +807,35 @@ see [window-manager validation](docs/window-manager.md#isolation-recovery-and-va
 The permission-bearing check bundle launches through Launch Services and keeps
 its identity while helpers are rebuilt. Test configurations use short paths
 because Darwin Unix socket addresses are limited to 104 bytes.
+
+## 2026-10-25 — Manual window controls in 0.2.1
+
+Alternating off/manual/off/manual runs of the optimized 0.2.1 launcher against
+the same warmed 100k-entry index. Each run uses a fresh temporary configuration,
+three UI benchmark rounds (177 keystrokes), and 30 seconds hidden idle. Enabled
+runs must discover exactly three disposable fixture windows; disabled runs must
+have no control socket. Automatic tiling, mouse behavior, callbacks, clipboard
+history and update checks are off. Bindings are empty to avoid intercepting the
+user's keys; this measures the observation/search path, not shortcut dispatch.
+
+| run | show median / p95 (ms) | typing-to-frame median / p95 (ms) | physical footprint | RSS (MiB) | hidden CPU time / 30 s |
+| --- | --- | --- | --- | --- | --- |
+| off 1 | 8.68 / 30.54 | 5.04 / 31.22 | 42 MB | 90.27 | 0.01 s |
+| manual 1 | 7.25 / 30.70 | 4.50 / 16.06 | 42 MB | 97.06 | 0.00 s |
+| off 2 | 11.87 / 26.01 | 4.55 / 16.67 | 41 MB | 96.95 | 0.01 s |
+| manual 2 | 6.68 / 20.64 | 4.12 / 8.91 | 42 MB | 95.50 | 0.00 s |
+
+These small paired samples show comparable launcher responsiveness and physical
+footprint, with near-zero measured hidden idle CPU. They do not establish a speed
+improvement or guarantee zero overhead. `ps` CPU time is rounded to hundredths of
+a second. There are only three show samples per run. Two monitors were connected
+(built-in Retina and LC24RG50); this differs from the earlier single-display
+setup, so these absolute timings should not be compared directly with 0.2.0.
+The fixture windows remained on the main monitor; this is not broad native
+multi-display acceptance. Named-target resolution, opening/reopening and manual
+actions are covered by the native smoke check separately.
+
+[Raw measurements](docs/benchmarks/manual-window-controls-0.2.1-2026-10-25.json)
+and [native smoke output](docs/benchmarks/manual-window-controls-smoke-2026-10-25.txt)
+are retained. Reproduce with the existing native benchmark command and
+`SIFT_WM_BENCH_AUTOMATIC_TILING=false`.

@@ -3,10 +3,9 @@
 Sift includes a Rust window-management engine inspired by AeroSpace. It runs
 inside Sift: no AeroSpace installation, subprocess calls for tiling, or separate
 application is required. Available in Sift 0.2.1 on the
-`native-window-manager` branch, it is experimental and off by default. The
-0.2.1 separates manual shortcuts from optional automatic
-tiling. Native
-smoke checks pass; broader application/multi-monitor acceptance remains open.
+`native-window-manager` branch, it is experimental and off by default. Version
+0.2.1 separates manual shortcuts from optional automatic tiling. Native smoke
+checks pass; broader application/multi-monitor acceptance remains open.
 
 Reference: [AeroSpace](https://github.com/nikitabobko/AeroSpace) at
 `74a1bf17e82d70e0a21945ba04bb4f590bf19f83`. Its MIT notice is retained in
@@ -124,7 +123,9 @@ With `launch = true` (the default), a missing target launches/reopens its app
 through Launch Services (preferring its previously observed bundle path, with
 bundle-ID lookup for first launches or moved apps) and waits up to eight seconds for a matching window.
 Existing matches focus directly without launching a process. A failed launch or
-missing matching title is reported in window-control status; Sift cannot recreate
+missing matching title is reported in window-control status. The CLI acknowledges
+a queued launch immediately; the service completes the pending action asynchronously.
+Sift cannot recreate
 a particular document/tab or force an app to open a window. Repeated presses
 coalesce while launching. Reload, pause and shutdown cancel pending actions.
 Closing or minimizing a missing target never launches its app.
@@ -135,7 +136,8 @@ sift wm snap left --target terminal
 sift wm resize width +50 --target terminal
 ```
 
-An explicit `--target` positions/resizes that window without changing focus.
+For an existing window, `--target` positions/resizes it without changing focus.
+Launching a missing application can activate it through macOS.
 To focus and position it, bind `["focus --target terminal", "snap left"]`.
 If launch is needed, the remaining actions wait for the matching window instead
 of running on the previously focused window. Manual snap positions are `left`,
@@ -375,6 +377,13 @@ acceptance before describing Sift as a daily-driver replacement.
 
 ## Isolation, recovery and validation
 
+Manual controls in 0.2.1 have native acceptance coverage for matching a named
+target, closing/reopening its window, relaunching its application, snapping only
+the named window, passive refresh, preserving chosen positions on shutdown,
+and loading the saved target after controls restart. The complete workspace has
+271 passing tests. [Native output](benchmarks/manual-window-controls-smoke-2026-10-25.txt)
+is retained alongside the earlier automatic-mode measurements.
+
 - `sift-wm` is independent of GPUI and AppKit. It models trees, layouts, focus,
   workspaces, monitors, rules and commands. Searches consume a cached snapshot.
 - Each application has an AX worker/run loop with 50 ms messaging timeouts.
@@ -449,6 +458,9 @@ SIFT_WM_INDEX=/path/to/test/index \
 SIFT_WM_BENCH_OUTPUT=/tmp/sift-wm-enabled-performance.json \
 scripts/run-wm-check.sh
 ```
+
+Set `SIFT_WM_BENCH_AUTOMATIC_TILING=false` for the same comparison with manual
+controls enabled instead of automatic tiling.
 
 It alternates off/on/off/on with fresh temporary configurations, three UI
 benchmark rounds and 30 seconds of hidden idle per run. Enabled runs must
