@@ -28,6 +28,9 @@ read their full text in a tooltip.
 and use **Assign App…** to save app assignments before granting window-control
 permission or enabling tiling. These setup actions do not move windows or launch
 apps. With workspace control running, **Add and Open App…** also opens the app.
+Saved assignments appear under **Assigned Apps** and have checkmarks in the app
+picker. Saving while controls are unavailable opens a confirmation explaining
+that no window moved.
 
 Turn on **Window Management → Automatic Tiling and Workspaces**. This also enables
 Window Shortcuts and Controls. macOS window-control permission must be granted
@@ -52,6 +55,12 @@ Under **Workspace Apps and Windows → Workspace N**:
 **Add Workspace N** saves the next unused positive number. Use it again to add
 more workspaces. **Edit Workspace Names and Rules…** opens `config.toml` for
 custom names, keyboard bindings, or removing saved assignments.
+
+If a custom `[window_manager.bindings.main]` table replaced the numbered
+shortcuts, choose **Add Missing Workspace Shortcuts**. This adds Ctrl–Option–1…9,
+their Shift variants for moving windows, and Ctrl–Option–Tab where those keys are
+missing. Existing bindings are preserved. With controls enabled but unavailable
+or paused, pressing a configured shortcut opens an explanation in the launcher.
 
 Assignments are exact bundle-ID routing rules at the beginning of
 `[[window_manager.rules]]`. An explicit menu assignment takes precedence over

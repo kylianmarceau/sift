@@ -28,6 +28,7 @@ enum Action {
         open: Option<PathBuf>,
     },
     AddWorkspace(String),
+    AddWorkspaceShortcuts,
     Reload,
     Permission,
     Login(bool),
@@ -106,11 +107,33 @@ fn short(text: &str, limit: usize) -> String {
     }
 }
 
+fn assignment_notice(app: &str, workspace: &str, active: bool) -> String {
+    if active {
+        format!("{app} assigned to Workspace {workspace}.")
+    } else {
+        format!(
+            "{app} assigned to Workspace {workspace}. Nothing moved: window controls need permission or must be enabled."
+        )
+    }
+}
+
+fn saved_assignment<'a>(config: &'a sift_wm::Config, app_id: &str) -> Option<&'a str> {
+    let exact = format!("^{}$", regex::escape(app_id));
+    config
+        .rules
+        .iter()
+        .find(|r| {
+            r.app_id.as_deref() == Some(exact.as_str()) && r.title.is_none() && r.app_name.is_none()
+        })
+        .and_then(|r| r.workspace.as_deref())
+}
+
 struct State {
     native: Option<MenuBar>,
     launcher: Entity<Launcher>,
     window: WindowHandle<Launcher>,
     error: Option<String>,
+    notice: Option<String>,
     key: Option<u64>,
     login: sift_macos::login_item::Status,
     _subscriptions: Vec<Subscription>,
@@ -171,6 +194,7 @@ pub(crate) fn install(window: WindowHandle<Launcher>, cx: &mut App) {
             launcher: launcher.clone(),
             window,
             error: None,
+            notice: None,
             key: None,
             login: sift_macos::login_item::status(),
             _subscriptions: vec![
@@ -197,11 +221,19 @@ impl State {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if let Some(native) = &self.native {
             let launcher = self.launcher.read(cx);
-            let key = menu_key(launcher, self.error.as_deref(), self.login);
+            let mut key = menu_key(launcher, self.error.as_deref(), self.login);
+            if let Some(notice) = &self.notice {
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                (key, notice).hash(&mut hash);
+                key = hash.finish();
+            }
             if self.key == Some(key) {
                 return;
             }
-            let (title, items) = model(launcher, self.error.as_deref(), self.login);
+            let (title, mut items) = model(launcher, self.error.as_deref(), self.login);
+            if let Some(notice) = &self.notice {
+                items.insert(1, Item::label(notice));
+            }
             native.update(
                 title,
                 format!(
@@ -215,6 +247,7 @@ impl State {
         }
     }
     fn perform(&mut self, action: Action, cx: &mut Context<Self>) -> Result<(), String> {
+        self.notice = None;
         if action == Action::ClearError {
             self.error = None;
             return Ok(());
@@ -250,6 +283,19 @@ impl State {
             open,
         } = &action
         {
+            let app_name = self
+                .launcher
+                .read(cx)
+                .apps
+                .as_ref()
+                .and_then(|apps| {
+                    apps.catalog()
+                        .apps()
+                        .iter()
+                        .find(|app| app.bundle_id.as_deref() == Some(app_id.as_str()))
+                })
+                .map(|app| app.name.to_string())
+                .unwrap_or_else(|| app_id.clone());
             self.launcher
                 .update(cx, |launcher, cx| -> Result<(), String> {
                     sift_state::Config::save_workspace(
@@ -269,10 +315,12 @@ impl State {
             self.window
                 .update(cx, |launcher, _, cx| launcher.hide(cx))
                 .map_err(|e| e.to_string())?;
-            if let Some(controller) = controller.filter(|c| {
+            let controller = controller.filter(|c| {
                 let snapshot = c.snapshot();
                 snapshot.enabled && snapshot.automatic_tiling
-            }) {
+            });
+            let active = controller.is_some();
+            if let Some(controller) = controller {
                 // Queue after configuration and after the UI update. Existing
                 // windows move now; later windows use the persisted rule.
                 let mut commands: Vec<_> = controller
@@ -296,6 +344,20 @@ impl State {
                     let _ = failures.unbounded_send(e);
                 })
                 .map_err(|e| e.to_string())?;
+            }
+            let message = assignment_notice(&app_name, workspace, active);
+            tracing::info!(app = %app_id, workspace, active, "workspace assignment saved");
+            self.notice = Some(message.clone());
+            if !active {
+                let window = self.window;
+                // Clear-query events from hide() must finish before the
+                // confirmation is shown, or they can erase it immediately.
+                cx.defer(move |cx| {
+                    let _ = window.update(cx, |launcher, window, cx| {
+                        launcher.show(window, cx);
+                        launcher.show_info(message, cx);
+                    });
+                });
             }
             return Ok(());
         }
@@ -335,6 +397,12 @@ impl State {
                             None,
                         )?;
                         launcher.reload_config(cx);
+                    }
+                    Action::AddWorkspaceShortcuts => {
+                        let count = sift_state::Config::save_workspace_shortcuts(launcher.user.config_path())?;
+                        launcher.reload_config(cx);
+                        launcher.show(window, cx);
+                        launcher.show_info(format!("Added {count} missing workspace shortcuts. Existing bindings were kept. Ctrl–Option–1…9 switches workspaces when window controls are running."), cx);
                     }
                     Action::AssignApp { .. } => unreachable!("handled after the window update"),
                     Action::Reload => {
@@ -682,6 +750,22 @@ fn manage_workspaces(
             .filter(|w| &w.workspace == name)
             .collect();
         let mut children = vec![Item::label(format!("{} windows", windows.len()))];
+        if let Some(apps) = apps {
+            let assigned: Vec<_> = apps
+                .catalog()
+                .apps()
+                .iter()
+                .filter(|app| {
+                    app.bundle_id
+                        .as_deref()
+                        .is_some_and(|id| saved_assignment(config, id) == Some(name.as_str()))
+                })
+                .map(|app| Item::label(app.name.as_ref()))
+                .collect();
+            if !assigned.is_empty() {
+                children.push(submenu("Assigned Apps", assigned));
+            }
+        }
         if can_control {
             if let Some(focused) = snapshot
                 .windows
@@ -726,14 +810,16 @@ fn manage_workspaces(
                     .unwrap_or('#')
                     .to_uppercase()
                     .to_string();
-                groups.entry(group).or_default().push(action(
+                let mut entry = action(
                     app.name.as_ref(),
                     Action::AssignApp {
                         workspace: name.clone(),
                         app_id: app_id.clone(),
                         open: can_control.then(|| app.path.clone()),
                     },
-                ));
+                );
+                entry.checked = saved_assignment(config, app_id) == Some(name.as_str());
+                groups.entry(group).or_default().push(entry);
             }
             children.push(submenu(
                 if can_control {
@@ -782,6 +868,10 @@ fn manage_workspaces(
     workspaces.push(builtin(
         "Edit Workspace Names and Rules…",
         commands::EDIT_CONFIG,
+    ));
+    workspaces.push(action(
+        "Add Missing Workspace Shortcuts",
+        Action::AddWorkspaceShortcuts,
     ));
     submenu("Workspace Apps and Windows", workspaces)
 }
@@ -997,5 +1087,47 @@ mod tests {
                 .iter()
                 .any(|i| i.title == "Move Focused Window Here")
         );
+    }
+    #[test]
+    fn saved_apps_are_visible_and_checked_without_a_running_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = dir.path().join("Editor.app/Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::write(contents.join("Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.editor</string></dict></plist>"#).unwrap();
+        let apps = sift_apps::AppProvider::new(sift_apps::AppCatalog::discover(&[
+            sift_apps::Location::Folder(dir.path().into()),
+        ]));
+        let edited = sift_state::Config::parse(
+            "[[window_manager.rules]]\napp_id = '^com\\.example\\.editor$'\nworkspace = '1'\n",
+        );
+        assert!(edited.problems.is_empty());
+        let menu = manage_workspaces(
+            &Snapshot::default(),
+            &edited.config.window_manager,
+            Some(&apps),
+            false,
+        );
+        let workspace = menu
+            .children
+            .iter()
+            .find(|i| i.title == "Workspace 1")
+            .unwrap();
+        assert_eq!(
+            workspace
+                .children
+                .iter()
+                .find(|i| i.title == "Assigned Apps")
+                .unwrap()
+                .children[0]
+                .title,
+            "Editor"
+        );
+        let picker = workspace
+            .children
+            .iter()
+            .find(|i| i.title == "Assign App…")
+            .unwrap();
+        assert!(picker.children[0].children[0].checked);
+        assert!(assignment_notice("Editor", "1", false).contains("Nothing moved"));
     }
 }

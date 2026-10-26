@@ -479,12 +479,16 @@ pub struct Hotkeys {
     dir: PathBuf,
     window_keys: Vec<HotKey>,
     window_routes: Arc<Mutex<Option<WindowRoutes>>>,
-    window_signature: Option<(String, std::collections::BTreeMap<String, Vec<String>>)>,
+    window_signature: Option<(
+        String,
+        bool,
+        std::collections::BTreeMap<String, Vec<String>>,
+    )>,
     paused: Arc<AtomicBool>,
 }
 
 struct WindowRoutes {
-    controller: sift_macos::wm::Controller,
+    controller: Option<sift_macos::wm::Controller>,
     commands: std::collections::HashMap<u32, sift_wm::Command>,
 }
 
@@ -516,7 +520,16 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<(Slot, Instant)>, cx: &mut
                     let _ = presses.unbounded_send((*slot, Instant::now()));
                 } else if let Some(routes) = &*routes.lock().unwrap_or_else(|e| e.into_inner()) {
                     if let Some(command) = routes.commands.get(&event.id) {
-                        let _ = routes.controller.execute(command.clone());
+                        let result = match &routes.controller {
+                            Some(controller) if controller.snapshot().enabled => controller.execute(command.clone()),
+                            Some(_) => Err("Window controls are paused. Resume them from Sift's menu.".into()),
+                            None => Err("Window controls are unavailable. Grant permission for this Sift app, then choose Retry Window Controls.".into()),
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "window shortcut blocked");
+                            let _ = crate::launch_failures()
+                                .unbounded_send(sift_macos::LaunchError::Command(error));
+                        }
                     }
                 }
             }));
@@ -569,7 +582,7 @@ impl Hotkeys {
         mode: &str,
         controller: Option<sift_macos::wm::Controller>,
     ) -> Result<(), String> {
-        let Some(controller) = controller else {
+        if !config.enabled {
             if let Some(manager) = &self.manager {
                 for key in self.window_keys.drain(..) {
                     let _ = manager.unregister(key);
@@ -578,10 +591,18 @@ impl Hotkeys {
             self.window_signature = None;
             *self.window_routes.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return Ok(());
-        };
+        }
         let bindings = config.bindings_for_mode(mode).map_err(|e| e.to_string())?;
-        let signature = (mode.to_owned(), bindings.clone());
+        let signature = (mode.to_owned(), controller.is_some(), bindings.clone());
         if self.window_signature.as_ref() == Some(&signature) {
+            if let Some(routes) = self
+                .window_routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+            {
+                routes.controller = controller;
+            }
             return Ok(());
         }
         let mut keys = Vec::new();
@@ -641,6 +662,12 @@ impl Hotkeys {
         }
         self.window_keys = keys;
         self.window_signature = Some(signature);
+        tracing::info!(
+            mode,
+            shortcuts = self.window_keys.len(),
+            controls_running = controller.is_some(),
+            "window shortcuts configured"
+        );
         *self.window_routes.lock().unwrap_or_else(|e| e.into_inner()) = Some(WindowRoutes {
             controller,
             commands,

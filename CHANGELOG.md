@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Show saved app assignments and confirmations, including an explanation when
+  window controls cannot move an app. Report blocked window shortcuts in the
+  launcher and add missing numbered bindings without replacing custom shortcuts.
 - Bound menu row text by its rendered width, preserve full descriptions in
   tooltips, and show the app build number to distinguish preview versions.
 - Keep workspace creation and app assignment visible before window-control

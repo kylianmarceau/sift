@@ -179,6 +179,21 @@ pub struct Loaded {
 }
 
 impl Config {
+    /// Adds only missing numbered workspace bindings, keeping custom shortcuts.
+    pub fn save_workspace_shortcuts(path: &Path) -> Result<usize, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        let (edited, count) = apply_workspace_shortcuts(&text)?;
+        if edited != text {
+            write_replacing(path, &edited)
+                .map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
+        }
+        Ok(count)
+    }
+
     /// Adds a workspace or saves an app-wide routing rule from the menu bar.
     /// Existing comments and unrelated rules survive; malformed configuration
     /// and invalid window-manager configuration are never written back.
@@ -328,6 +343,64 @@ pub fn apply_workspace(text: &str, name: &str, app_id: Option<&str>) -> Result<S
     Ok(edited)
 }
 
+pub fn apply_workspace_shortcuts(text: &str) -> Result<(String, usize), String> {
+    use toml_edit::{Array, DocumentMut};
+    let original: Config = toml::from_str(text).map_err(|e| e.to_string())?;
+    original
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    let bindings = original
+        .window_manager
+        .bindings
+        .get("main")
+        .ok_or("Missing main binding mode")?;
+    let mut wanted = Vec::new();
+    for n in 1..=9 {
+        if original
+            .window_manager
+            .workspaces
+            .iter()
+            .any(|name| name == &n.to_string())
+        {
+            wanted.push((format!("ctrl-alt-{n}"), format!("workspace {n}")));
+            wanted.push((
+                format!("ctrl-alt-shift-{n}"),
+                format!("move-node-to-workspace {n}"),
+            ));
+        }
+    }
+    wanted.push(("ctrl-alt-tab".into(), "workspace-back-and-forth".into()));
+    wanted.retain(|(key, _)| !bindings.contains_key(key));
+    if wanted.is_empty() {
+        return Ok((text.to_owned(), 0));
+    }
+    let count = wanted.len();
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for name in ["window_manager", "bindings", "main"] {
+        table = table
+            .entry(name)
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .ok_or_else(|| format!("{name} is not a table"))?;
+    }
+    for (key, command) in wanted {
+        let mut commands = Array::new();
+        commands.push(command);
+        table.insert(&key, toml_edit::value(commands));
+    }
+    let edited = doc.to_string();
+    let checked: Config = toml::from_str(&edited).map_err(|e| e.to_string())?;
+    checked
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    Ok((edited, count))
+}
+
 /// An option the settings window can change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
@@ -439,6 +512,23 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_shortcuts_preserve_custom_bindings_and_are_idempotent() {
+        let source = "# mine\n[window_manager.bindings.main]\nctrl-alt-t = ['focus --target terminal'] # keep\nctrl-alt-1 = ['focus left']\n[window_manager.targets.terminal]\napp_id = 'com.apple.Terminal'\n";
+        let (edited, count) = super::apply_workspace_shortcuts(source).unwrap();
+        assert_eq!(count, 18);
+        assert!(edited.contains("# keep"));
+        let config = super::Config::parse(&edited).config;
+        let main = &config.window_manager.bindings["main"];
+        assert_eq!(main["ctrl-alt-1"], ["focus left"]);
+        assert_eq!(main["ctrl-alt-2"], ["workspace 2"]);
+        assert_eq!(main["ctrl-alt-shift-9"], ["move-node-to-workspace 9"]);
+        assert_eq!(main["ctrl-alt-t"], ["focus --target terminal"]);
+        let (again, added) = super::apply_workspace_shortcuts(&edited).unwrap();
+        assert_eq!(added, 0);
+        assert_eq!(again, edited);
+        assert!(super::apply_workspace_shortcuts("[broken").is_err());
+    }
     #[test]
     fn menu_assignments_preserve_config_and_route_apps_after_reloading() {
         let source = "# my configuration\n[updates]\ncheck = false # keep this\n[[snippets]]\nname = 'hello'\ntext = 'world'\n[[window_manager.rules]]\ntitle = '(?i)settings'\nfloating = true\n";

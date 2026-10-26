@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 serde.workspace = true
+regex.workspace = true
 sift-wm.workspace = true
 sift-calc.workspace = true
 sift-core.workspace = true
