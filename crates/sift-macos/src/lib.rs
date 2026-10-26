@@ -15,10 +15,12 @@
 //! - [`Panel`]: show, hide, position and resize the launcher window.
 //! - [`QuickLook`]: preview the selected file with the system Quick Look
 //!   panel.
+//! - [`paste`]: press ⌘V in the frontmost app, for paste-and-pop.
 //!
 //! Launcher integrations use public AppKit APIs without special permissions.
-//! The opt-in [`wm`] backend requires Accessibility and dynamically resolves
-//! a private AX window-id bridge; it is never started for ordinary search.
+//! [`paste`] and the opt-in [`wm`] backend require Accessibility. [`wm`]
+//! also dynamically resolves a private AX window-id bridge; it is never
+//! started for ordinary search.
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +75,8 @@ mod imp;
 pub mod key_capture;
 #[cfg(target_os = "macos")]
 pub mod login_item;
+#[cfg(target_os = "macos")]
+pub mod paste;
 #[cfg(target_os = "macos")]
 mod quicklook;
 #[cfg(target_os = "macos")]
