@@ -228,8 +228,10 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("down", SelectNext, Some("Launcher")),
         KeyBinding::new("ctrl-n", SelectNext, Some("Launcher")),
+        KeyBinding::new("ctrl-j", SelectNext, Some("Launcher")),
         KeyBinding::new("up", SelectPrevious, Some("Launcher")),
         KeyBinding::new("ctrl-p", SelectPrevious, Some("Launcher")),
+        KeyBinding::new("ctrl-k", SelectPrevious, Some("Launcher")),
         KeyBinding::new("enter", Confirm, Some("Launcher")),
         KeyBinding::new("cmd-enter", RevealSelected, Some("Launcher")),
         KeyBinding::new("cmd-d", ToggleFavorite, Some("Launcher")),
