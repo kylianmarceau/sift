@@ -125,7 +125,7 @@ data too, except `~/.config/sift`). Otherwise:
 
 - Type to search apps, files and folders (files need two characters).
   With nothing typed, the panel lists your favorites and recent items.
-- **↑/↓** (or Ctrl-P/Ctrl-N) to move.
+- **↑/↓** (or Ctrl-P/Ctrl-N, or Ctrl-K/Ctrl-J) to move.
 - **Enter** to open (or copy, for calculator results, snippets and
   clipboard entries).
 - **⌘Enter** to show the selection in Finder.
