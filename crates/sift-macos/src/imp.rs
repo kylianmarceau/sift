@@ -284,6 +284,27 @@ impl Drop for ClipboardWatcher {
     }
 }
 
+/// The app in front, which is usually the one that just copied: macOS
+/// does not say which app wrote to the clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontApp {
+    /// The name shown in the menu bar ("Safari").
+    pub name: String,
+    pub bundle_id: Option<String>,
+}
+
+/// The frontmost app, unless it is Sift itself (its settings window).
+pub fn frontmost_app() -> Option<FrontApp> {
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    if app.processIdentifier() == std::process::id() as libc::pid_t {
+        return None;
+    }
+    Some(FrontApp {
+        name: app.localizedName()?.to_string(),
+        bundle_id: app.bundleIdentifier().map(|id| id.to_string()),
+    })
+}
+
 /// What [`clipboard_text`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardText {

@@ -160,7 +160,9 @@ Changes apply the next time the panel opens.
 Clipboard History (or set `enabled = true` under `[clipboard]` in the
 config), then type `clip` (or `clip invoice`) to search what you copied.
 **⌘D** pins the selected entry (★): pinned entries are listed first and
-kept until you unpin them. **Ctrl-X** deletes the selected entry. Settings also chooses how many other entries
+kept until you unpin them. **Ctrl-X** deletes the selected entry. Each
+entry shows the app it was copied in; `clip from:slack` lists only what
+you copied in Slack. Settings also chooses how many other entries
 to keep. Text that password managers mark as concealed is never kept.
 *Clear History* in Settings, or the *Clear Clipboard History* command,
 deletes everything kept except pinned entries.

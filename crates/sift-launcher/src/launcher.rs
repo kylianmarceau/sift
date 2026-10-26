@@ -117,6 +117,9 @@ pub struct Launcher {
     window_error: Option<String>,
     /// Watches the clipboard while clipboard history is enabled.
     clipboard_task: Option<(sift_macos::ClipboardWatcher, Task<()>)>,
+    /// The clipboard's change count after Sift last copied to it, so that
+    /// copying an entry back is not credited to the app in front.
+    own_copy: Option<isize>,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -302,6 +305,7 @@ impl Launcher {
             window_config: sift_wm::Config::default(),
             window_error: None,
             clipboard_task: None,
+            own_copy: None,
             apps: None,
             files,
             file_index,
@@ -519,7 +523,15 @@ impl Launcher {
     fn clipboard_changed(&mut self, text: sift_macos::ClipboardText, cx: &mut Context<Self>) {
         match text {
             sift_macos::ClipboardText::Text(text) => {
-                if self.user.record_clipboard(&text) {
+                let source = if self.own_copy == Some(sift_macos::clipboard_change_count()) {
+                    None
+                } else {
+                    sift_macos::frontmost_app().map(|app| sift_state::ClipSource {
+                        name: app.name.into(),
+                        bundle_id: app.bundle_id.map(Into::into),
+                    })
+                };
+                if self.user.record_clipboard(&text, source.as_ref()) {
                     self.rebuild_search();
                     cx.emit(UserDataChanged);
                     if clipboard::scope(&self.query).is_some() {
@@ -927,7 +939,9 @@ impl Launcher {
             Action::OpenApplication(path) => sift_macos::open_application(path, report),
             Action::OpenPath(path) => sift_macos::open_path(path, report),
             Action::OpenUrl(url) => sift_macos::open_url(url, report),
-            Action::CopyText(text) => sift_macos::copy_text(text),
+            Action::CopyText(text) => sift_macos::copy_text(text).inspect(|()| {
+                self.own_copy = Some(sift_macos::clipboard_change_count());
+            }),
             Action::Shell(command) => crate::shell::spawn(command),
             Action::WindowCommand(text) => {
                 let command = sift_wm::parse(text).map_err(|e| LaunchError::Command(e.to_string()));

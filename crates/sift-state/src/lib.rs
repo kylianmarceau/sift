@@ -13,7 +13,7 @@ pub use config::{
     ClipboardConfig, CommandAction, Config, CustomCommand, Loaded, MAX_CLIP_ITEMS, Setting,
     Snippet, TEMPLATE, UpdatesConfig, apply_setting, expand_tilde,
 };
-pub use store::{ClipEntry, FAVORITE_BOOST, MAX_CLIP_BYTES, MAX_USAGE_ROWS, StateDb};
+pub use store::{ClipEntry, ClipSource, FAVORITE_BOOST, MAX_CLIP_BYTES, MAX_USAGE_ROWS, StateDb};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {

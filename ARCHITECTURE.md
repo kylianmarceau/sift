@@ -618,6 +618,14 @@ Opt-in (`[clipboard] enabled = true`).
   Sift refuses a newer schema and the copy is the way back.
 - **Deleting one entry.** ⌃X, which removes other results from recents,
   deletes the selected entry, pinned or not.
+- **Source app.** macOS does not say which app wrote to the pasteboard,
+  so an entry records the frontmost app when the change is noticed
+  (`sift_macos::frontmost_app`; name and bundle id, schema 3). That is
+  the copying app unless the user switched apps within the 750 ms poll.
+  Sift itself is never a source: its settings window is skipped, and a
+  copy Sift made (Enter on an entry) is recognised by the change count
+  right after writing, and keeps the entry's old source. `from:` in a
+  `clip` search matches the app name.
 - **Searching.** Entries are searched only after a `clip` prefix, never
   mixed into ordinary results, and Enter copies an entry back.
 - **No auto-paste.** Automatic pasting would need synthetic key events,

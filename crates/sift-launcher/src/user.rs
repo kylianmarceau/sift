@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use sift_core::{Action, Boosts, Provider, ResultItem, ResultKind};
 use sift_search::{NameMatcher, fold};
-use sift_state::{CommandAction, Config, CustomCommand, Snippet, StateDb};
+use sift_state::{ClipSource, CommandAction, Config, CustomCommand, Snippet, StateDb};
 
 use crate::clipboard::ClipboardProvider;
 use crate::commands;
@@ -160,14 +160,15 @@ impl UserData {
         self.clipboard = Arc::new(ClipboardProvider::new(entries));
     }
 
-    /// Keeps `text` in the clipboard history (if enabled). Returns whether
-    /// it was kept (blank and very large text is not).
-    pub fn record_clipboard(&mut self, text: &str) -> bool {
+    /// Keeps `text`, copied in `source`, in the clipboard history (if
+    /// enabled). Returns whether it was kept (blank and very large text is
+    /// not).
+    pub fn record_clipboard(&mut self, text: &str, source: Option<&ClipSource>) -> bool {
         let (Some(db), true) = (&self.db, self.config.clipboard.enabled) else {
             return false;
         };
         let max = self.config.clipboard.max_items;
-        match db.clipboard_add(text, sift_state::now(), max) {
+        match db.clipboard_add(text, source, sift_state::now(), max) {
             Ok(true) => {
                 self.reload_clipboard();
                 true
@@ -647,14 +648,14 @@ mod tests {
     fn clipboard_history_is_kept_only_when_enabled() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
-        assert!(!user.record_clipboard("secret"));
+        assert!(!user.record_clipboard("secret", None));
         assert_eq!(user.clipboard().len(), 0);
 
         write_config(dir.path(), "[clipboard]\nenabled = true\nmax_items = 2\n");
         user.reload_config();
-        assert!(user.record_clipboard("one"));
-        assert!(user.record_clipboard("two"));
-        assert!(user.record_clipboard("three"));
+        assert!(user.record_clipboard("one", None));
+        assert!(user.record_clipboard("two", None));
+        assert!(user.record_clipboard("three", None));
         let titles: Vec<String> = user
             .clipboard()
             .search("clip", 10)

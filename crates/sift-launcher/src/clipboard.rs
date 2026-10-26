@@ -10,6 +10,16 @@ use sift_state::ClipEntry;
 /// Characters of an entry shown as its title.
 const TITLE_CHARS: usize = 100;
 const ID_PREFIX: &str = "clip:";
+/// `clip from:safari invoice`: only entries copied in an app whose name
+/// contains "safari".
+const FROM: &str = "from:";
+
+fn copied_in(entry: &ClipEntry, apps: &[&str]) -> bool {
+    entry.source.as_ref().is_some_and(|source| {
+        let name = source.name.to_lowercase();
+        apps.iter().any(|app| name.contains(app))
+    })
+}
 
 /// The history entry a result stands for.
 pub fn entry_id(item: &ResultItem) -> Option<i64> {
@@ -86,10 +96,19 @@ impl Provider for ClipboardProvider {
         let Some(words) = scope(query) else {
             return Vec::new();
         };
-        let words: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+        let (apps, words): (Vec<String>, Vec<String>) = words
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .partition(|w| w.starts_with(FROM));
+        let apps: Vec<&str> = apps
+            .iter()
+            .map(|a| &a[FROM.len()..])
+            .filter(|a| !a.is_empty())
+            .collect();
         let now = sift_state::now();
         self.entries
             .iter()
+            .filter(|(entry, _)| apps.is_empty() || copied_in(entry, &apps))
             .filter(|(_, lower)| words.iter().all(|w| lower.contains(w.as_str())))
             .take(limit)
             .enumerate()
@@ -135,10 +154,14 @@ fn subtitle(entry: &ClipEntry, now: i64) -> String {
     };
     let lines = entry.text.lines().count();
     let chars = entry.text.chars().count();
-    if lines > 1 {
-        format!("{when} · {lines} lines · {chars} characters")
+    let size = if lines > 1 {
+        format!("{lines} lines · {chars} characters")
     } else {
-        format!("{when} · {chars} characters")
+        format!("{chars} characters")
+    };
+    match &entry.source {
+        Some(source) => format!("{when} in {} · {size}", source.name),
+        None => format!("{when} · {size}"),
     }
 }
 
@@ -152,6 +175,7 @@ mod tests {
             text: text.into(),
             copied_at,
             pinned: false,
+            source: None,
         }
     }
 
@@ -187,6 +211,33 @@ mod tests {
         );
         assert_eq!(provider.search("clip", 10).len(), 3);
         assert!(provider.search("invoice", 10).is_empty());
+    }
+
+    #[test]
+    fn from_narrows_to_the_app_it_was_copied_in() {
+        let now = sift_state::now();
+        let mut slack = entry(2, "standup notes", now - 120);
+        slack.source = Some(sift_state::ClipSource {
+            name: "Slack".into(),
+            bundle_id: None,
+        });
+        let provider = ClipboardProvider::new(vec![slack, entry(1, "notes", now)]);
+        let titles = |q: &str| -> Vec<String> {
+            provider
+                .search(q, 10)
+                .into_iter()
+                .map(|r| r.title.to_string())
+                .collect()
+        };
+        assert_eq!(titles("clip from:sla"), ["standup notes"]);
+        assert_eq!(titles("clip FROM:slack notes"), ["standup notes"]);
+        assert!(titles("clip from:safari").is_empty());
+        // A bare "from:" filters nothing.
+        assert_eq!(titles("clip from:").len(), 2);
+        assert_eq!(
+            provider.search("clip standup", 1)[0].subtitle.as_deref(),
+            Some("Copied 2 min ago in Slack · 13 characters")
+        );
     }
 
     #[test]

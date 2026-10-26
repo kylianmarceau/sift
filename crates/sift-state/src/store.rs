@@ -13,7 +13,7 @@ use sift_core::{Action, ResultItem, ResultKind};
 
 use crate::StateError;
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE usage (
@@ -38,7 +38,9 @@ CREATE TABLE clipboard (
     id        INTEGER PRIMARY KEY,
     text      TEXT NOT NULL UNIQUE,
     copied_at INTEGER NOT NULL,
-    pinned_at INTEGER
+    pinned_at INTEGER,
+    source_name TEXT,
+    source_bundle TEXT
 );
 CREATE INDEX clipboard_copied_at ON clipboard (copied_at);
 ";
@@ -48,6 +50,9 @@ CREATE INDEX clipboard_copied_at ON clipboard (copied_at);
 const MIGRATIONS: &[&str] = &[
     // 2: pinned clipboard entries.
     "ALTER TABLE clipboard ADD COLUMN pinned_at INTEGER;",
+    // 3: the app each clipboard entry was copied in.
+    "ALTER TABLE clipboard ADD COLUMN source_name TEXT;
+     ALTER TABLE clipboard ADD COLUMN source_bundle TEXT;",
 ];
 
 /// Usage rows kept; older ones are dropped.
@@ -70,6 +75,17 @@ pub struct ClipEntry {
     pub copied_at: i64,
     /// Pinned entries are listed first and kept until unpinned or deleted.
     pub pinned: bool,
+    /// The app it was copied in, if known.
+    pub source: Option<ClipSource>,
+}
+
+/// The app a clipboard entry was copied in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipSource {
+    /// "Safari".
+    pub name: Arc<str>,
+    /// "com.apple.Safari".
+    pub bundle_id: Option<Arc<str>>,
 }
 
 pub struct StateDb {
@@ -311,13 +327,16 @@ impl StateDb {
         Ok(())
     }
 
-    /// Adds `text` to clipboard history, keeping the newest `max_items`
-    /// unpinned entries (pinned ones do not count and are always kept).
-    /// Copying something already in the history moves it to the top.
-    /// Blank and oversized text is ignored; returns whether it was kept.
+    /// Adds `text`, copied in `source`, to clipboard history, keeping the
+    /// newest `max_items` unpinned entries (pinned ones do not count and
+    /// are always kept). Copying something already in the history moves
+    /// it to the top; a copy with no known source (Sift copying an entry
+    /// back) keeps the source it had. Blank and oversized text is ignored;
+    /// returns whether it was kept.
     pub fn clipboard_add(
         &self,
         text: &str,
+        source: Option<&ClipSource>,
         now: i64,
         max_items: usize,
     ) -> Result<bool, StateError> {
@@ -325,9 +344,19 @@ impl StateDb {
             return Ok(false);
         }
         self.conn.execute(
-            "INSERT INTO clipboard (text, copied_at) VALUES (?1, ?2)
-             ON CONFLICT (text) DO UPDATE SET copied_at = excluded.copied_at",
-            params![text, now],
+            "INSERT INTO clipboard (text, copied_at, source_name, source_bundle)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (text) DO UPDATE SET
+                copied_at = excluded.copied_at,
+                source_bundle = CASE WHEN excluded.source_name IS NULL
+                    THEN source_bundle ELSE excluded.source_bundle END,
+                source_name = coalesce(excluded.source_name, source_name)",
+            params![
+                text,
+                now,
+                source.map(|s| &*s.name),
+                source.and_then(|s| s.bundle_id.as_deref())
+            ],
         )?;
         self.conn.execute(
             "DELETE FROM clipboard WHERE pinned_at IS NULL AND id NOT IN
@@ -342,18 +371,23 @@ impl StateDb {
     /// then the newest `limit` others, newest first.
     pub fn clipboard(&self, limit: usize) -> Result<Vec<ClipEntry>, StateError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, text, copied_at, pinned_at FROM clipboard
+            "SELECT id, text, copied_at, pinned_at, source_name, source_bundle FROM clipboard
              WHERE pinned_at IS NOT NULL OR id IN
                 (SELECT id FROM clipboard WHERE pinned_at IS NULL
                  ORDER BY copied_at DESC, id DESC LIMIT ?1)
              ORDER BY pinned_at IS NULL, pinned_at, copied_at DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
+            let bundle_id = r.get::<_, Option<String>>(5)?;
             Ok(ClipEntry {
                 id: r.get(0)?,
                 text: r.get::<_, String>(1)?.into(),
                 copied_at: r.get(2)?,
                 pinned: r.get::<_, Option<i64>>(3)?.is_some(),
+                source: r.get::<_, Option<String>>(4)?.map(|name| ClipSource {
+                    name: name.into(),
+                    bundle_id: bundle_id.map(Into::into),
+                }),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -568,14 +602,14 @@ mod tests {
     #[test]
     fn clipboard_dedupes_caps_and_skips_blank_or_huge_text() {
         let db = StateDb::open_in_memory().unwrap();
-        assert!(db.clipboard_add("one", 1, 3).unwrap());
-        assert!(db.clipboard_add("two", 2, 3).unwrap());
-        assert!(db.clipboard_add("three", 3, 3).unwrap());
-        assert!(db.clipboard_add("one", 4, 3).unwrap()); // moves to top
-        assert!(db.clipboard_add("four", 5, 3).unwrap()); // drops "two"
-        assert!(!db.clipboard_add("   \n", 6, 3).unwrap());
+        assert!(db.clipboard_add("one", None, 1, 3).unwrap());
+        assert!(db.clipboard_add("two", None, 2, 3).unwrap());
+        assert!(db.clipboard_add("three", None, 3, 3).unwrap());
+        assert!(db.clipboard_add("one", None, 4, 3).unwrap()); // moves to top
+        assert!(db.clipboard_add("four", None, 5, 3).unwrap()); // drops "two"
+        assert!(!db.clipboard_add("   \n", None, 6, 3).unwrap());
         assert!(
-            !db.clipboard_add(&"x".repeat(MAX_CLIP_BYTES + 1), 7, 3)
+            !db.clipboard_add(&"x".repeat(MAX_CLIP_BYTES + 1), None, 7, 3)
                 .unwrap()
         );
         let texts: Vec<_> = db
@@ -609,9 +643,9 @@ mod tests {
     #[test]
     fn pinned_clipboard_entries_come_first_and_outlive_the_cap_and_clearing() {
         let db = StateDb::open_in_memory().unwrap();
-        db.clipboard_add("old", 1, 2).unwrap();
-        db.clipboard_add("keep", 2, 2).unwrap();
-        db.clipboard_add("also", 3, 2).unwrap();
+        db.clipboard_add("old", None, 1, 2).unwrap();
+        db.clipboard_add("keep", None, 2, 2).unwrap();
+        db.clipboard_add("also", None, 3, 2).unwrap();
         assert!(
             db.clipboard_set_pinned(clip_id(&db, "keep"), true, 10)
                 .unwrap()
@@ -621,13 +655,13 @@ mod tests {
                 .unwrap()
         );
         // Pins are in the order they were made; the cap counts only the rest.
-        db.clipboard_add("a", 4, 2).unwrap();
-        db.clipboard_add("b", 5, 2).unwrap();
-        db.clipboard_add("c", 6, 2).unwrap();
+        db.clipboard_add("a", None, 4, 2).unwrap();
+        db.clipboard_add("b", None, 5, 2).unwrap();
+        db.clipboard_add("c", None, 6, 2).unwrap();
         assert_eq!(clip_texts(&db), ["keep", "also", "c", "b"]);
         assert!(db.clipboard(100).unwrap()[0].pinned);
         // Copying a pinned entry again keeps it pinned.
-        db.clipboard_add("keep", 7, 2).unwrap();
+        db.clipboard_add("keep", None, 7, 2).unwrap();
         assert!(db.clipboard(100).unwrap()[0].pinned);
 
         db.clipboard_clear().unwrap();
@@ -643,6 +677,29 @@ mod tests {
         assert!(db.clipboard_delete(clip_id(&db, "keep")).unwrap());
         assert!(clip_texts(&db).is_empty());
         assert!(!db.clipboard_delete(1).unwrap());
+    }
+
+    #[test]
+    fn clipboard_entries_remember_where_they_were_copied() {
+        let db = StateDb::open_in_memory().unwrap();
+        let safari = ClipSource {
+            name: "Safari".into(),
+            bundle_id: Some("com.apple.Safari".into()),
+        };
+        let notes = ClipSource {
+            name: "Notes".into(),
+            bundle_id: None,
+        };
+        db.clipboard_add("link", Some(&safari), 1, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, Some(safari.clone()));
+        // Sift copying the entry back keeps its source.
+        db.clipboard_add("link", None, 2, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, Some(safari));
+        // Copying it again elsewhere replaces it.
+        db.clipboard_add("link", Some(&notes), 3, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, Some(notes));
+        db.clipboard_add("other", None, 4, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, None);
     }
 
     #[test]
