@@ -304,6 +304,10 @@ impl Settings {
                 self.shortcut_note = shortcut
                     .system_conflict()
                     .map(|note| (slot, note.into(), false));
+                if slot == Slot::Pop && !sift_macos::wm::trusted() {
+                    // Apple's prompt, after the user chose to use it.
+                    sift_macos::wm::request_accessibility();
+                }
             }
             (Ok(()), None) => {
                 tracing::info!(?slot, "keyboard shortcut removed");
@@ -615,6 +619,7 @@ impl Settings {
         };
         let hairline = || div().h(px(1.)).bg(theme.divider);
         let shortcut_row = self.render_shortcut(Slot::Clipboard, theme, cx);
+        let pop_row = self.render_shortcut(Slot::Pop, theme, cx);
 
         let detail = if on {
             "Type clip in the panel to search text you copied, or clip and a word. \
@@ -744,6 +749,8 @@ impl Settings {
                     )
                     .child(hairline())
                     .child(shortcut_row)
+                    .child(hairline())
+                    .child(pop_row)
             })
             .child(hairline())
             .child(
@@ -802,7 +809,7 @@ impl Settings {
             .unwrap_or((None, false));
         let shortcut = match slot {
             Slot::Panel => Some(shortcut.unwrap_or_default()),
-            Slot::Clipboard => shortcut,
+            Slot::Clipboard | Slot::Pop => shortcut,
         };
         let recording = matches!(&self.recording, Some((s, _)) if *s == slot);
         let note = self
@@ -828,6 +835,24 @@ impl Settings {
                 }
                 (Slot::Clipboard, None) => (
                     "Open the panel on your clipboard history with a shortcut of its own.".into(),
+                    false,
+                ),
+                (Slot::Pop, Some(_)) if !sift_macos::wm::trusted() => (
+                    "Needs Accessibility to paste: allow Sift in System Settings › Privacy & \
+                     Security."
+                        .into(),
+                    true,
+                ),
+                (Slot::Pop, Some(_)) => (
+                    "Pastes the newest entry into the app in front and removes it, leaving \
+                     the one before on the clipboard."
+                        .into(),
+                    false,
+                ),
+                (Slot::Pop, None) => (
+                    "Paste the newest entry and remove it, so the next paste gets the one \
+                     before: a stack. Needs Accessibility."
+                        .into(),
                     false,
                 ),
             },
@@ -890,16 +915,16 @@ impl Settings {
                     this.use_shortcut(Slot::Panel, Some(Shortcut::default()), cx);
                 })),
             ),
-            (Slot::Clipboard, Some(_)) => Some(
+            (Slot::Clipboard | Slot::Pop, Some(_)) => Some(
                 button(
                     ("shortcut-reset", slot as usize),
                     "Remove",
                     Kind::Link,
                     theme,
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, _, cx| {
                     this.stop_recording(cx);
-                    this.use_shortcut(Slot::Clipboard, None, cx);
+                    this.use_shortcut(slot, None, cx);
                 })),
             ),
             _ => None,
@@ -915,11 +940,10 @@ impl Settings {
                     .flex_1()
                     .min_w(px(0.))
                     .gap(px(2.))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Keyboard Shortcut"),
-                    )
+                    .child(div().font_weight(FontWeight::MEDIUM).child(match slot {
+                        Slot::Panel | Slot::Clipboard => "Keyboard Shortcut",
+                        Slot::Pop => "Paste and Pop",
+                    }))
                     .child(
                         div()
                             .text_size(px(12.))

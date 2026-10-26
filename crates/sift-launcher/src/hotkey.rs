@@ -1,10 +1,11 @@
-//! The keyboard shortcuts: one shows and hides the panel, and another,
-//! optional one opens the panel on clipboard history ([`Slot`]).
+//! The keyboard shortcuts ([`Slot`]): one shows and hides the panel, and
+//! two optional ones open the panel on clipboard history, or paste the
+//! newest clipboard entry and pop it.
 //!
 //! The panel's is Option+Space unless the user records another one in
-//! Settings; clipboard history has none until one is recorded. Each choice
-//! is kept in a two-line file in the support directory (`hotkey`,
-//! `clipboard-hotkey`): the shortcut in `global-hotkey`'s notation
+//! Settings; the others have none until one is recorded. Each choice is
+//! kept in a two-line file in the support directory (`hotkey`,
+//! `clipboard-hotkey`, `paste-pop-hotkey`): the shortcut in `global-hotkey`'s notation
 //! ("alt+Space"), then the key's label as the keyboard layout showed it
 //! when recorded ("Space", "K", "É"). A missing or unreadable file means
 //! the default, and an empty one means no shortcut.
@@ -31,10 +32,12 @@ pub enum Slot {
     Panel,
     /// Opens the panel on clipboard history.
     Clipboard,
+    /// Pastes the newest clipboard entry and pops it.
+    Pop,
 }
 
 impl Slot {
-    const ALL: [Slot; 2] = [Slot::Panel, Slot::Clipboard];
+    const ALL: [Slot; 3] = [Slot::Panel, Slot::Clipboard, Slot::Pop];
 
     fn index(self) -> usize {
         self as usize
@@ -44,6 +47,7 @@ impl Slot {
         match self {
             Slot::Panel => "hotkey",
             Slot::Clipboard => "clipboard-hotkey",
+            Slot::Pop => "paste-pop-hotkey",
         }
     }
 
@@ -52,6 +56,7 @@ impl Slot {
         match self {
             Slot::Panel => "shows the panel",
             Slot::Clipboard => "opens clipboard history",
+            Slot::Pop => "pastes and pops",
         }
     }
 
@@ -60,6 +65,7 @@ impl Slot {
         match self {
             Slot::Panel => "launcher",
             Slot::Clipboard => "clipboard",
+            Slot::Pop => "paste-and-pop",
         }
     }
 }
@@ -469,7 +475,7 @@ struct Binding {
 pub struct Hotkeys {
     manager: Option<GlobalHotKeyManager>,
     /// By [`Slot::index`].
-    bindings: [Binding; 2],
+    bindings: [Binding; 3],
     dir: PathBuf,
     window_keys: Vec<HotKey>,
     window_routes: Arc<Mutex<Option<WindowRoutes>>>,
@@ -487,7 +493,7 @@ impl Global for Hotkeys {}
 /// Registers the saved shortcuts (Option+Space for the panel if its own
 /// fails) and sends each press, with its time, to `presses`.
 pub fn install(dir: PathBuf, presses: UnboundedSender<(Slot, Instant)>, cx: &mut App) {
-    let bindings = [Binding::default(), Binding::default()];
+    let bindings: [Binding; 3] = Default::default();
     let window_routes: Arc<Mutex<Option<WindowRoutes>>> = Arc::default();
     let paused = Arc::new(AtomicBool::new(false));
     let manager = match GlobalHotKeyManager::new() {
@@ -540,14 +546,17 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<(Slot, Instant)>, cx: &mut
         hotkeys.bindings[Slot::Panel.index()].shortcut = Some(Shortcut::default());
         let _ = hotkeys.register(Slot::Panel);
     }
-    // A clipboard shortcut that the panel's fallback took is dropped.
-    let clipboard = load_slot(&hotkeys.dir, Slot::Clipboard).filter(|s| {
-        hotkeys
-            .current(Slot::Panel)
-            .is_none_or(|panel| panel.hotkey != s.hotkey)
-    });
-    hotkeys.bindings[Slot::Clipboard.index()].shortcut = clipboard;
-    let _ = hotkeys.register(Slot::Clipboard);
+    // An optional shortcut that one before it (or the panel's fallback)
+    // took is dropped.
+    for slot in [Slot::Clipboard, Slot::Pop] {
+        let shortcut = load_slot(&hotkeys.dir, slot).filter(|s| {
+            !Slot::ALL
+                .iter()
+                .any(|&o| hotkeys.current(o).is_some_and(|c| c.hotkey == s.hotkey))
+        });
+        hotkeys.bindings[slot.index()].shortcut = shortcut;
+        let _ = hotkeys.register(slot);
+    }
     cx.set_global(hotkeys);
 }
 
@@ -720,7 +729,7 @@ impl Hotkeys {
     }
 
     /// Replaces the slot's shortcut (`None` removes it, except for the
-    /// panel) and saves it. If the other slot or a window command uses it,
+    /// panel) and saves it. If another slot or a window command uses it,
     /// or macOS refuses it, the previous one stays and the reason is
     /// returned.
     pub fn set(&mut self, slot: Slot, shortcut: Option<Shortcut>) -> Result<(), String> {
@@ -731,8 +740,10 @@ impl Hotkeys {
             if self.window_keys.contains(&new.hotkey) {
                 return Err("This shortcut is assigned to a window-management command.".into());
             }
-            if let Some(other) = Slot::ALL.into_iter().find(|&s| s != slot)
-                && self.current(other).is_some_and(|s| s.hotkey == new.hotkey)
+            if let Some(other) = Slot::ALL
+                .into_iter()
+                .filter(|&s| s != slot)
+                .find(|&o| self.current(o).is_some_and(|s| s.hotkey == new.hotkey))
             {
                 return Err(format!("That shortcut already {}.", other.purpose()));
             }
@@ -929,6 +940,18 @@ mod tests {
             std::fs::read_to_string(state_path(dir.path(), Slot::Clipboard)).expect("read"),
             ""
         );
+    }
+
+    #[test]
+    fn each_slot_is_saved_in_its_own_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clip = shortcut(interpret(&press(0x09, "⌃⌥", "v")));
+        let pop = shortcut(interpret(&press(0x09, "⌃⌥⇧", "v")));
+        save_slot(dir.path(), Slot::Clipboard, Some(&clip)).expect("save");
+        save_slot(dir.path(), Slot::Pop, Some(&pop)).expect("save");
+        assert_eq!(load_slot(dir.path(), Slot::Clipboard), Some(clip));
+        assert_eq!(load_slot(dir.path(), Slot::Pop), Some(pop));
+        assert!(load(dir.path()).is_default());
     }
 
     #[test]
