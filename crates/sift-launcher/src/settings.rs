@@ -629,10 +629,16 @@ impl Settings {
                 }));
 
         let kept: SharedString = match (on, count) {
-            (false, _) => "Deletes what was kept while history was on.".into(),
+            (false, _) => {
+                "Deletes what was kept while history was on, except pinned entries.".into()
+            }
             (true, 0) => "Nothing kept yet.".into(),
-            (true, 1) => "1 entry kept on this Mac.".into(),
-            (true, n) => format!("{} entries kept on this Mac.", thousands(n as u64)).into(),
+            (true, 1) => "1 entry kept on this Mac. Pinned entries are not deleted.".into(),
+            (true, n) => format!(
+                "{} entries kept on this Mac. Pinned entries are not deleted.",
+                thousands(n as u64)
+            )
+            .into(),
         };
         let clear: AnyElement = if self.confirm_clear {
             div()
@@ -668,13 +674,16 @@ impl Settings {
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.confirm_clear = true;
-                speak("Delete the clipboard history? Choose Delete History or Cancel.");
+                speak(
+                    "Delete the clipboard history, except pinned entries? Choose Delete \
+                     History or Cancel.",
+                );
                 cx.notify();
             }))
             .into_any_element()
         };
         let kept: SharedString = if self.confirm_clear {
-            "Delete every entry? This cannot be undone.".into()
+            "Delete every entry that is not pinned? This cannot be undone.".into()
         } else {
             kept
         };
@@ -704,7 +713,9 @@ impl Settings {
                         .gap_3()
                         .child(row(
                             "History Size",
-                            "The newest entries are kept; older ones are deleted.".into(),
+                            "The newest entries are kept; older ones are deleted. \
+                             Pinned entries (⌘D in the panel) do not count."
+                                .into(),
                         ))
                         .child(choices),
                 )

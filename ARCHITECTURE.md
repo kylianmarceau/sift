@@ -610,12 +610,18 @@ Opt-in (`[clipboard] enabled = true`).
 - **What is kept.** Plain text only, deduplicated (copying again moves an
   entry to the top), capped at `max_items`. Blank text and text over
   64 KiB are skipped.
+- **Pinning.** ⌘D sets `clipboard.pinned_at` (schema 2). Pinned entries
+  come first, in the order they were pinned, and do not count towards
+  `max_items`; *Clear History* leaves them. Schema 2 was the first
+  in-place upgrade of `state.db`: before migrating, `StateDb` copies the
+  file to `state.db.schema-<old>` with `VACUUM INTO`, because an older
+  Sift refuses a newer schema and the copy is the way back.
 - **Searching.** Entries are searched only after a `clip` prefix, never
   mixed into ordinary results, and Enter copies an entry back.
 - **No auto-paste.** Automatic pasting would need synthetic key events,
   which need the Accessibility permission.
 - **Turning it off** stops the task and hides the history.
-  *Clear Clipboard History* deletes it.
+  *Clear Clipboard History* deletes it, except pinned entries.
 - **Tests** use private, uniquely named pasteboards and never touch the
   user's clipboard.
 

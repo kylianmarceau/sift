@@ -976,10 +976,20 @@ impl Launcher {
         self.rebuild_search();
     }
 
+    /// ⌘D: favorites an item, or pins a clipboard entry.
     fn toggle_favorite(&mut self, _: &ToggleFavorite, _: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.selected().cloned() else {
             return;
         };
+        if let Some(id) = clipboard::entry_id(&item) {
+            if self.user.toggle_pin(id).is_some() {
+                self.rebuild_search();
+                cx.emit(UserDataChanged);
+                // Pinned entries move to the top; the selection follows.
+                self.run_query(self.query.clone(), cx);
+            }
+            return;
+        }
         if self.user.toggle_favorite(&item).is_some() {
             self.rebuild_search();
             // Re-rank; the selection stays on the same item.
@@ -1438,7 +1448,7 @@ impl Launcher {
         // Shares the result's strings rather than copying them every frame.
         let title = SharedString::new(item.title.clone());
         let subtitle = item.subtitle.clone().map(SharedString::new);
-        let favorite = self.user.is_favorite(&item.id);
+        let favorite = self.user.is_favorite(&item.id) || self.user.clipboard().is_pinned(item);
         let kind = item.kind;
         let item = item.clone();
         let icon = self.icon(&item, cx);
@@ -1602,23 +1612,13 @@ impl Launcher {
         let (dot, status) = self.status_line();
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
-        let favorite_label = selected
-            .filter(|i| {
-                !matches!(
-                    i.kind,
-                    ResultKind::Calculator
-                        | ResultKind::Clipboard
-                        | ResultKind::Window
-                        | ResultKind::Workspace
-                )
-            })
-            .map(|i| {
-                if self.user.is_favorite(&i.id) {
-                    "Unfavorite"
-                } else {
-                    "Favorite"
-                }
-            });
+        let favorite_label = selected.and_then(|i| match i.kind {
+            ResultKind::Calculator | ResultKind::Window | ResultKind::Workspace => None,
+            ResultKind::Clipboard if self.user.clipboard().is_pinned(i) => Some("Unpin"),
+            ResultKind::Clipboard => Some("Pin"),
+            _ if self.user.is_favorite(&i.id) => Some("Unfavorite"),
+            _ => Some("Favorite"),
+        });
         let open_label = match selected.map(|i| &i.action) {
             Some(Action::Run(_) | Action::Shell(_)) => "Run",
             Some(Action::CopyText(_)) => "Copy",

@@ -66,7 +66,7 @@ const COMMANDS: &[Spec] = &[
     Spec {
         id: CLEAR_CLIPBOARD,
         title: "Clear Clipboard History",
-        subtitle: "Delete every entry Sift has kept",
+        subtitle: "Delete every entry Sift has kept, except pinned ones",
         aliases: &["delete clipboard history"],
     },
     Spec {

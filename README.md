@@ -159,9 +159,11 @@ Changes apply the next time the panel opens.
 **Clipboard history** is off by default. Turn it on in Sift Settings ›
 Clipboard History (or set `enabled = true` under `[clipboard]` in the
 config), then type `clip` (or `clip invoice`) to search what you copied.
-Settings also chooses how many entries to keep. Text that password
-managers mark as concealed is never kept. *Clear History* in Settings,
-or the *Clear Clipboard History* command, deletes everything kept.
+**⌘D** pins the selected entry (★): pinned entries are listed first and
+kept until you unpin them. Settings also chooses how many other entries
+to keep. Text that password managers mark as concealed is never kept.
+*Clear History* in Settings, or the *Clear Clipboard History* command,
+deletes everything kept except pinned entries.
 
 Sift follows the system's light or dark appearance and your accent colour
 (System Settings › Appearance).

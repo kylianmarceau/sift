@@ -180,6 +180,25 @@ impl UserData {
         }
     }
 
+    /// Pins or unpins clipboard entry `id`. Returns whether it is now
+    /// pinned, or `None` if it is not in the history.
+    pub fn toggle_pin(&mut self, id: i64) -> Option<bool> {
+        let db = self.db.as_ref()?;
+        let pinned = !self.clipboard.entry(id)?.pinned;
+        match db.clipboard_set_pinned(id, pinned, sift_state::now()) {
+            Ok(true) => {
+                self.reload_clipboard();
+                Some(pinned)
+            }
+            Ok(false) => None,
+            Err(error) => {
+                tracing::warn!(%error, "cannot pin clipboard entry");
+                None
+            }
+        }
+    }
+
+    /// Deletes the unpinned clipboard entries.
     pub fn clear_clipboard(&mut self) {
         if let Some(db) = &self.db
             && let Err(error) = db.clipboard_clear()

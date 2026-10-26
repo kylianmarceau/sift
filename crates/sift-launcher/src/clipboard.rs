@@ -2,11 +2,22 @@
 //! starts with `clip` (`clip`, `clip invoice`), never mixed into ordinary
 //! results: copied text can be private.
 
+use std::collections::HashMap;
+
 use sift_core::{Action, Provider, ResultItem, ResultKind, top_score};
 use sift_state::ClipEntry;
 
 /// Characters of an entry shown as its title.
 const TITLE_CHARS: usize = 100;
+const ID_PREFIX: &str = "clip:";
+
+/// The history entry a result stands for.
+pub fn entry_id(item: &ResultItem) -> Option<i64> {
+    if item.kind != ResultKind::Clipboard {
+        return None;
+    }
+    item.id.strip_prefix(ID_PREFIX)?.parse().ok()
+}
 
 /// The words to look for if `query` is a clipboard search: `clip` alone
 /// gives `Some("")`, `clip foo bar` gives `Some("foo bar")`, and anything
@@ -27,12 +38,16 @@ pub fn scope(query: &str) -> Option<&str> {
 
 #[derive(Default)]
 pub struct ClipboardProvider {
-    /// Entries newest first, with a lowercased copy for matching.
+    /// Pinned entries, then the others newest first, each with a
+    /// lowercased copy for matching.
     entries: Vec<(ClipEntry, String)>,
+    /// Position in `entries` by entry id.
+    by_id: HashMap<i64, usize>,
 }
 
 impl ClipboardProvider {
     pub fn new(entries: Vec<ClipEntry>) -> Self {
+        let by_id = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
         Self {
             entries: entries
                 .into_iter()
@@ -41,11 +56,24 @@ impl ClipboardProvider {
                     (e, lower)
                 })
                 .collect(),
+            by_id,
         }
     }
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The entry with this id, if it is in the history.
+    pub fn entry(&self, id: i64) -> Option<&ClipEntry> {
+        self.by_id.get(&id).map(|&i| &self.entries[i].0)
+    }
+
+    /// Whether `item` is a pinned entry.
+    pub fn is_pinned(&self, item: &ResultItem) -> bool {
+        entry_id(item)
+            .and_then(|id| self.entry(id))
+            .is_some_and(|e| e.pinned)
     }
 }
 
@@ -66,11 +94,12 @@ impl Provider for ClipboardProvider {
             .take(limit)
             .enumerate()
             .map(|(rank, (entry, _))| ResultItem {
-                id: format!("clip:{}", entry.id).into(),
+                id: format!("{ID_PREFIX}{}", entry.id).into(),
                 kind: ResultKind::Clipboard,
                 title: title(&entry.text).into(),
                 subtitle: Some(subtitle(entry, now).into()),
-                // Newest first, above everything else.
+                // In history order (pinned, then newest), above everything
+                // else.
                 score: top_score().saturating_sub(rank as u64),
                 action: Action::CopyText(entry.text.clone()),
             })
@@ -158,6 +187,22 @@ mod tests {
         );
         assert_eq!(provider.search("clip", 10).len(), 3);
         assert!(provider.search("invoice", 10).is_empty());
+    }
+
+    #[test]
+    fn results_name_their_entry() {
+        let mut pinned = entry(7, "keep me", sift_state::now());
+        pinned.pinned = true;
+        let provider = ClipboardProvider::new(vec![pinned, entry(3, "other", 0)]);
+        let results = provider.search("clip", 10);
+        assert_eq!(entry_id(&results[0]), Some(7));
+        assert!(provider.is_pinned(&results[0]));
+        assert!(!provider.is_pinned(&results[1]));
+        let snippet = ResultItem {
+            kind: ResultKind::Snippet,
+            ..results[0].clone()
+        };
+        assert_eq!(entry_id(&snippet), None);
     }
 
     #[test]
