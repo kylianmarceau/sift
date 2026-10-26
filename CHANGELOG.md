@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-10-26)
+
+- Pin clipboard entries with ⌘D, preserving them beyond the history limit and
+  Clear History; delete individual entries with Ctrl-X.
+- Record the source app, filter with `clip from:`, and exclude apps using
+  `[clipboard].ignore_apps`.
+- Search clipboard history with loose matches and preview selected entries,
+  including content icons, colour swatches, and actions for links and paths.
+- Configure a dedicated clipboard-history shortcut and a Paste and Pop shortcut
+  that pastes into the frontmost app and advances to the previous unpinned entry.
+- Keep the system clipboard in sync when deleting or clearing its current entry.
+- Upgrade the state database with a backup of the previous schema for rollback.
+- Navigate results with Ctrl-J/Ctrl-K alongside the existing arrow and Ctrl-N/P keys.
+- Stop ignoring obsolete graphify output.
+
 ## 0.2.2 (2026-10-25)
 
 - Acknowledge an already-restored tiling recovery entry immediately. A no-op AX
