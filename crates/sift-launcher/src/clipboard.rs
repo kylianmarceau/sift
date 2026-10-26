@@ -122,6 +122,7 @@ mod tests {
             id,
             text: text.into(),
             copied_at,
+            pinned: false,
         }
     }
 
