@@ -616,6 +616,8 @@ Opt-in (`[clipboard] enabled = true`).
   in-place upgrade of `state.db`: before migrating, `StateDb` copies the
   file to `state.db.schema-<old>` with `VACUUM INTO`, because an older
   Sift refuses a newer schema and the copy is the way back.
+- **Deleting one entry.** ⌃X, which removes other results from recents,
+  deletes the selected entry, pinned or not.
 - **Searching.** Entries are searched only after a `clip` prefix, never
   mixed into ordinary results, and Enter copies an entry back.
 - **No auto-paste.** Automatic pasting would need synthetic key events,

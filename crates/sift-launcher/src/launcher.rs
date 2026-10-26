@@ -997,11 +997,21 @@ impl Launcher {
         }
     }
 
-    /// Removes the selected item from recents and favorites.
+    /// ⌃X: removes the selected item from recents and favorites, or
+    /// deletes a clipboard entry.
     fn forget_selected(&mut self, _: &ForgetSelected, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.selected().map(|item| item.id.clone()) else {
+        let Some(item) = self.selected() else {
             return;
         };
+        if let Some(clip) = clipboard::entry_id(item) {
+            if self.user.delete_clip(clip) {
+                self.rebuild_search();
+                cx.emit(UserDataChanged);
+                self.run_query(self.query.clone(), cx);
+            }
+            return;
+        }
+        let id = item.id.clone();
         self.user.forget(&id);
         self.rebuild_search();
         self.run_query(self.query.clone(), cx);
@@ -1612,6 +1622,7 @@ impl Launcher {
         let (dot, status) = self.status_line();
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
+        let clipping = selected.is_some_and(|i| i.kind == ResultKind::Clipboard);
         let favorite_label = selected.and_then(|i| match i.kind {
             ResultKind::Calculator | ResultKind::Window | ResultKind::Workspace => None,
             ResultKind::Clipboard if self.user.clipboard().is_pinned(i) => Some("Unpin"),
@@ -1656,6 +1667,9 @@ impl Launcher {
                 })
                 .when_some(favorite_label, |row, label| {
                     row.child(hint(label, &["⌘", "D"], false))
+                })
+                .when(clipping, |row| {
+                    row.child(hint("Delete", &["⌃", "X"], false))
                 })
                 .when(!can_reveal && favorite_label.is_none(), |row| {
                     row.child(hint("Close", &["esc"], false))

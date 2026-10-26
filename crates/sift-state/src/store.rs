@@ -373,6 +373,14 @@ impl StateDb {
         Ok(changed > 0)
     }
 
+    /// Deletes entry `id`, pinned or not; returns whether it existed.
+    pub fn clipboard_delete(&self, id: i64) -> Result<bool, StateError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM clipboard WHERE id = ?1", [id])?
+            > 0)
+    }
+
     /// Deletes the unpinned entries; pinned ones stay until unpinned.
     pub fn clipboard_clear(&self) -> Result<(), StateError> {
         self.conn
@@ -631,6 +639,10 @@ mod tests {
         assert!(!db.clipboard_set_pinned(9999, true, 12).unwrap());
         db.clipboard_clear().unwrap();
         assert_eq!(clip_texts(&db), ["keep"]);
+        // Deleting one entry removes it even when pinned.
+        assert!(db.clipboard_delete(clip_id(&db, "keep")).unwrap());
+        assert!(clip_texts(&db).is_empty());
+        assert!(!db.clipboard_delete(1).unwrap());
     }
 
     #[test]

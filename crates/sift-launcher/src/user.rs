@@ -198,6 +198,23 @@ impl UserData {
         }
     }
 
+    /// Deletes clipboard entry `id`; returns whether it was there.
+    pub fn delete_clip(&mut self, id: i64) -> bool {
+        let Some(db) = &self.db else {
+            return false;
+        };
+        match db.clipboard_delete(id) {
+            Ok(deleted) => {
+                self.reload_clipboard();
+                deleted
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot delete clipboard entry");
+                false
+            }
+        }
+    }
+
     /// Deletes the unpinned clipboard entries.
     pub fn clear_clipboard(&mut self) {
         if let Some(db) = &self.db
