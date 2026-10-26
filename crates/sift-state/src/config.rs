@@ -179,6 +179,19 @@ pub struct Loaded {
 }
 
 impl Config {
+    /// Adds a workspace or saves an app-wide routing rule from the menu bar.
+    /// Existing comments and unrelated rules survive; malformed configuration
+    /// and invalid window-manager configuration are never written back.
+    pub fn save_workspace(path: &Path, name: &str, app_id: Option<&str>) -> Result<(), String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        let edited = apply_workspace(&text, name, app_id)?;
+        write_replacing(path, &edited).map_err(|e| format!("Cannot save {}: {e}", path.display()))
+    }
+
     /// Loads `path`. A missing file gives the defaults; a malformed one
     /// gives the defaults plus the parse error; invalid commands are
     /// dropped with a problem each.
@@ -241,6 +254,78 @@ impl Config {
         }
         write_replacing(path, &edited).map_err(|e| format!("Cannot save {}: {e}", path.display()))
     }
+}
+
+pub fn apply_workspace(text: &str, name: &str, app_id: Option<&str>) -> Result<String, String> {
+    use toml_edit::{Array, ArrayOfTables, DocumentMut, Table};
+    let original: Config = toml::from_str(text)
+        .map_err(|e| format!("config.toml was not changed: {}", e.message()))?;
+    original
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    let mut names = original.window_manager.workspaces;
+    if !names.iter().any(|w| w == name) {
+        names.push(name.to_owned());
+    }
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let wm = doc
+        .as_table_mut()
+        .entry("window_manager")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or("[window_manager] is not a table")?;
+    let mut array = Array::new();
+    for name in names {
+        array.push(name);
+    }
+    if let Some(existing) = wm.get_mut("workspaces").and_then(|v| v.as_array_mut()) {
+        if !existing.iter().any(|v| v.as_str() == Some(name)) {
+            existing.push(name);
+        }
+    } else {
+        wm.insert("workspaces", toml_edit::value(array));
+    }
+    if let Some(app_id) = app_id {
+        if app_id.is_empty() {
+            return Err("The application has no bundle identifier".into());
+        }
+        let exact = format!("^{}$", regex::escape(app_id));
+        let rules = wm
+            .entry("rules")
+            .or_insert_with(|| toml_edit::Item::ArrayOfTables(ArrayOfTables::new()))
+            .as_array_of_tables_mut()
+            .ok_or("window_manager.rules is not an array of tables")?;
+        // Replace only a simple app-wide assignment. Specific title/floating
+        // rules remain intact. The explicit app assignment takes precedence.
+        let mut previous = std::mem::take(rules);
+        previous.retain(|rule| {
+            !(rule.get("app_id").and_then(|v| v.as_str()) == Some(exact.as_str())
+                && !rule.contains_key("title")
+                && !rule.contains_key("app_name")
+                && !rule.contains_key("floating")
+                && !rule
+                    .get("check_further")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false))
+        });
+        let mut rule = Table::new();
+        rule.insert("app_id", toml_edit::value(exact));
+        rule.insert("workspace", toml_edit::value(name));
+        rules.push(rule);
+        for rule in previous {
+            rules.push(rule);
+        }
+    }
+    let edited = doc.to_string();
+    let config: Config = toml::from_str(&edited).map_err(|e| e.to_string())?;
+    config
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    Ok(edited)
 }
 
 /// An option the settings window can change.
@@ -354,6 +439,49 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn menu_assignments_preserve_config_and_route_apps_after_reloading() {
+        let source = "# my configuration\n[updates]\ncheck = false # keep this\n[[snippets]]\nname = 'hello'\ntext = 'world'\n[[window_manager.rules]]\ntitle = '(?i)settings'\nfloating = true\n";
+        let added = super::apply_workspace(source, "10", Some("com.example.Editor+Beta")).unwrap();
+        assert!(added.contains("# keep this"));
+        assert!(added.contains("# my configuration"));
+        let moved = super::apply_workspace(&added, "11", Some("com.example.Editor+Beta")).unwrap();
+        let loaded = super::Config::parse(&moved);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(loaded.config.snippets.len(), 1);
+        assert!(!loaded.config.updates.check);
+        let wm = loaded.config.window_manager;
+        assert!(wm.workspaces.iter().any(|w| w == "10"));
+        assert!(wm.workspaces.iter().any(|w| w == "11"));
+        assert_eq!(wm.rules.len(), 2);
+        assert_eq!(wm.rules[0].workspace.as_deref(), Some("11"));
+        let pattern = regex::Regex::new(wm.rules[0].app_id.as_ref().unwrap()).unwrap();
+        assert!(pattern.is_match("com.example.Editor+Beta"));
+        assert!(!pattern.is_match("comXexampleXEditorBeta"));
+        assert_eq!(wm.rules[1].floating, Some(true));
+    }
+
+    #[test]
+    fn menu_workspace_edits_leave_invalid_files_and_symlinks_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("config.toml");
+        std::fs::write(&real, "# mine\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        super::Config::save_workspace(&link, "10", None).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read_to_string(&real).unwrap().contains("10"));
+        assert!(super::Config::save_workspace(&link, "", None).is_err());
+        std::fs::write(&real, "[broken\n").unwrap();
+        assert!(super::Config::save_workspace(&link, "11", None).is_err());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "[broken\n");
+    }
+
     use super::*;
 
     #[test]

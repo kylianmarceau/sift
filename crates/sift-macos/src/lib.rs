@@ -80,6 +80,8 @@ pub mod paste;
 #[cfg(target_os = "macos")]
 mod quicklook;
 #[cfg(target_os = "macos")]
+pub mod status_bar;
+#[cfg(target_os = "macos")]
 pub mod wm;
 
 #[cfg(target_os = "macos")]

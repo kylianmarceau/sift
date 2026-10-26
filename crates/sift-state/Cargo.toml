@@ -10,6 +10,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+regex.workspace = true
 sift-wm.workspace = true
 sift-core.workspace = true
 rusqlite.workspace = true

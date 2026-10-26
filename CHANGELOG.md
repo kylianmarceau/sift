@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Native menu bar icon for Sift with launcher, settings, clipboard, file-index,
+  login, update, configuration, help, logs and quit actions.
+- Show the active workspace or paused state beside the icon. Switch workspaces,
+  focus their windows, move the focused window, and add numbered workspaces.
+- Add and open installed apps in a workspace, or save an app-wide workspace
+  assignment for existing and future windows across restarts.
+- Manual window snapping and tiling/fullscreen controls, plus pause/resume and
+  independent controls/automatic-tiling switches directly in the menu.
+
 ## 0.3.0 (2026-10-26)
 
 - Pin clipboard entries with ⌘D, preserving them beyond the history limit and

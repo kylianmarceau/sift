@@ -130,6 +130,7 @@ fn main() {
             let (hotkey_tx, mut hotkey_rx) = unbounded::<(hotkey::Slot, Instant)>();
             hotkey::install(launcher::user_dir(), hotkey_tx, cx);
             let _ = window.update(cx, |launcher, _, cx| launcher.sync_window_hotkeys(cx));
+            launcher::menu_bar::install(window, cx);
             cx.spawn(async move |cx| {
                 while let Some((slot, pressed_at)) = hotkey_rx.next().await {
                     let _ = window.update(cx, |launcher, window, cx| match slot {

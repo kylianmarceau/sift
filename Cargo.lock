@@ -4720,6 +4720,7 @@ dependencies = [
  "gpui",
  "raw-window-handle",
  "resvg",
+ "serde",
  "serde_json",
  "sift-apps",
  "sift-calc",
@@ -4776,6 +4777,7 @@ dependencies = [
 name = "sift-state"
 version = "0.3.0"
 dependencies = [
+ "regex",
  "rusqlite",
  "serde",
  "sift-core",

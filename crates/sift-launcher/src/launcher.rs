@@ -114,6 +114,9 @@ pub fn scroll_to_show(top: usize, selected: usize, visible: usize) -> usize {
     }
 }
 
+#[path = "menu_bar.rs"]
+pub(crate) mod menu_bar;
+
 pub struct Launcher {
     focus_handle: FocusHandle,
     input: Entity<SearchInput>,
@@ -751,6 +754,7 @@ impl Launcher {
                 free_textures(dropped, cx);
                 this.catalog_loaded_at = Some(Instant::now());
                 this.catalog_task = None;
+                cx.emit(UserDataChanged);
                 // Re-run the current query against the fresh catalog.
                 this.run_query(this.query.clone(), cx);
             })

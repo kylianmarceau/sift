@@ -459,8 +459,8 @@ pub fn activate_app() {
     }
 }
 
-/// Runs the app as an accessory: no Dock icon and no menu bar, like
-/// Spotlight. Bundles get the same from `LSUIElement`; this also covers
+/// Runs the app as an accessory: no Dock icon or ordinary application menu.
+/// A status item can still appear in the menu bar. Bundles get the same from `LSUIElement`; this also covers
 /// running the bare binary during development. Main thread only.
 pub fn use_accessory_activation_policy() -> bool {
     let Some(mtm) = MainThreadMarker::new() else {

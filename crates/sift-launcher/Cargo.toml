@@ -17,6 +17,7 @@ name = "sift-launcher"
 path = "src/main.rs"
 
 [dependencies]
+serde.workspace = true
 sift-wm.workspace = true
 sift-calc.workspace = true
 sift-core.workspace = true
