@@ -137,6 +137,7 @@ fn main() {
                         hotkey::Slot::Clipboard => {
                             launcher.toggle_clipboard(pressed_at, window, cx)
                         }
+                        hotkey::Slot::Pop => launcher.paste_and_pop(cx),
                     });
                 }
             })

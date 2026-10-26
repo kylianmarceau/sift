@@ -77,6 +77,8 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 Disk Access. macOS asks once when you add Documents, Desktop or Downloads.
 The optional native window manager requires Device Control and Data Access
 on macOS 27, or Accessibility on older macOS, when enabled; it is off by default.
+So does the optional paste-and-pop shortcut for clipboard history, which
+presses ⌘V for you.
 Grant that permission to **Sift** itself. Sift has no Dock icon.
 
 **Open at Login** is off until you turn it on in Sift Settings › General.
@@ -171,7 +173,16 @@ was the one on the clipboard, the next newest takes its place. Each
 entry shows the app it was copied in; `clip from:slack` lists only what
 you copied in Slack. To never keep copies from some apps, list them by
 name or bundle id under `[clipboard]`, as in
-`ignore_apps = ["Terminal", "com.1password.1password"]`. Settings also chooses how many other entries
+`ignore_apps = ["Terminal", "com.1password.1password"]`.
+
+The history works as a stack: each copy is pushed on top, and the
+clipboard holds the top, so ⌘V pastes the newest entry as usual.
+Settings › Clipboard History can record a **Paste and Pop** shortcut
+that pastes the top entry into the app in front and removes it, leaving
+the one before on the clipboard. Pressing it repeatedly pastes your
+last copies newest first. Pinned entries are never popped. It needs the
+Accessibility permission, which Sift asks for when you record it.
+Settings also chooses how many other entries
 to keep. Text that password managers mark as concealed is never kept.
 *Clear History* in Settings, or the *Clear Clipboard History* command,
 deletes everything kept except pinned entries, and empties the clipboard

@@ -74,6 +74,12 @@ const ICON_PX: u32 = 64;
 /// How often the clipboard's change counter is read while clipboard
 /// history is enabled.
 const CLIPBOARD_POLL: Duration = Duration::from_millis(750);
+/// Paste-and-pop presses ⌘V once the shortcut's own modifier keys are let
+/// go, or after this long anyway.
+const PASTE_KEYS_WAIT: Duration = Duration::from_secs(1);
+/// How long the frontmost app gets to read the clipboard after ⌘V, before
+/// the next entry replaces it.
+const PASTE_SETTLE: Duration = Duration::from_millis(300);
 /// How long to wait, after losing focus while a preview is open, before
 /// deciding whether the user left the launcher.
 const QUICK_LOOK_SETTLE: Duration = Duration::from_millis(150);
@@ -129,6 +135,10 @@ pub struct Launcher {
     /// The clipboard's change count after Sift put the newest entry back
     /// on it, so that this is not recorded as a new copy.
     restored: Option<isize>,
+    /// A paste-and-pop is under way; presses made meanwhile are counted in
+    /// `pops_queued` and run after it.
+    popping: bool,
+    pops_queued: usize,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -316,6 +326,8 @@ impl Launcher {
             clipboard_task: None,
             own_copy: None,
             restored: None,
+            popping: false,
+            pops_queued: 0,
             apps: None,
             files,
             file_index,
@@ -505,6 +517,70 @@ impl Launcher {
             self.show(window, cx);
         }
         self.run_command(commands::CLIPBOARD, cx);
+    }
+
+    /// The paste-and-pop shortcut: pastes the newest unpinned clipboard
+    /// entry into the frontmost app, then deletes it, which leaves the next
+    /// one on the clipboard. Presses made meanwhile wait their turn.
+    pub fn paste_and_pop(&mut self, cx: &mut Context<Self>) {
+        if self.popping {
+            self.pops_queued += 1;
+            return;
+        }
+        let Some(top) = self.user.clipboard().top().cloned() else {
+            tracing::info!("paste and pop: nothing in clipboard history");
+            return;
+        };
+        if !sift_macos::wm::trusted() {
+            // ⌘V cannot be pressed for the user without it.
+            tracing::warn!("paste and pop needs Accessibility");
+            sift_macos::wm::request_accessibility();
+            return;
+        }
+        // The clipboard holds the top already, unless it was copied in an
+        // ignored app or holds a pinned entry.
+        if sift_macos::clipboard_text() != sift_macos::ClipboardText::Text(top.text.to_string()) {
+            if let Err(error) = sift_macos::copy_text(&top.text) {
+                tracing::warn!(%error, "paste and pop: cannot write to the clipboard");
+                return;
+            }
+            self.restored = Some(sift_macos::clipboard_change_count());
+        }
+        let pasted = sift_macos::clipboard_change_count();
+        if self.is_visible() {
+            // The panel never activates Sift, so the app behind it gets ⌘V.
+            self.hide(cx);
+        }
+        self.popping = true;
+        let key = sift_macos::paste::paste_key();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move { sift_macos::paste::press_paste(key, PASTE_KEYS_WAIT) })
+                .await;
+            cx.background_executor().timer(PASTE_SETTLE).await;
+            let _ = this.update(cx, |this, cx| this.popped(top.id, pasted, cx));
+        })
+        .detach();
+    }
+
+    /// After a paste-and-pop pasted entry `id`: deletes it and, unless
+    /// something was copied meanwhile, puts the next one on the clipboard.
+    fn popped(&mut self, id: i64, pasted: isize, cx: &mut Context<Self>) {
+        self.popping = false;
+        if self.user.delete_clip(id) {
+            if sift_macos::clipboard_change_count() == pasted {
+                self.put_top_on_clipboard();
+            }
+            self.rebuild_search();
+            cx.emit(UserDataChanged);
+            if clipboard::scope(&self.query).is_some() {
+                self.run_query(self.query.clone(), cx);
+            }
+        }
+        if self.pops_queued > 0 {
+            self.pops_queued -= 1;
+            self.paste_and_pop(cx);
+        }
     }
 
     /// Starts or stops watching the clipboard to match the config. While
@@ -1153,9 +1229,14 @@ impl Launcher {
         let sift_macos::ClipboardText::Text(text) = sift_macos::clipboard_text() else {
             return;
         };
-        if !removed.iter().any(|r| **r == *text) {
-            return;
+        if removed.iter().any(|r| **r == *text) {
+            self.put_top_on_clipboard();
         }
+    }
+
+    /// Writes the newest unpinned entry to the clipboard, or empties it
+    /// when there is none. The write is not recorded as a copy.
+    fn put_top_on_clipboard(&mut self) {
         match self.user.clipboard().top() {
             Some(top) => {
                 if let Err(error) = sift_macos::copy_text(&top.text) {

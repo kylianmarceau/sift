@@ -659,8 +659,21 @@ Opt-in (`[clipboard] enabled = true`).
   matched loosely, since almost any letters appear in order somewhere in
   a long text, and only for the newest 2,000 entries not matched by
   words, which bounds the search near 2 ms (BENCHMARKS.md, 2026-10-26).
-- **No auto-paste.** Automatic pasting would need synthetic key events,
-  which need the Accessibility permission.
+- **Paste and pop.** An optional shortcut (`hotkey::Slot::Pop`) pastes
+  the top of the stack and deletes it. Pressing ⌘V for the user needs
+  synthetic key events and so Accessibility, which is checked on each
+  press and requested when the shortcut is recorded; nothing else in
+  clipboard history needs it. Sift makes sure the clipboard holds the
+  top entry, hides the panel (it never activates Sift, so the app
+  behind gets the keys), and on the background executor waits up to a
+  second for the shortcut's modifier keys to be let go, so they do not
+  mix with ⌘, then posts ⌘V (`sift_macos::paste`). The key is the one
+  that types "v" with ⌘ on the current layout (`UCKeyTranslate`), so
+  Dvorak and AZERTY work. 300 ms later, the time the app gets to read
+  the clipboard, the entry is deleted and the next one written to the
+  clipboard, unless something new was copied meanwhile. Presses made
+  during that time are queued, so pasting twice quickly cannot paste
+  the same entry twice or the second one early.
 - **Turning it off** stops the task and hides the history.
   *Clear Clipboard History* deletes it, except pinned entries.
 - **Tests** use private, uniquely named pasteboards and never touch the
@@ -1021,10 +1034,12 @@ falls back to Option+Space too.
 (`hotkey::Slot::Clipboard`, saved in `clipboard-hotkey`, empty or
 missing for none) opens the panel with `clip ` typed, or hides it if it
 already shows clipboard history. It has no default: the obvious choices
-are taken (⌥⌘V moves files in Finder). Both shortcuts go through one
-`GlobalHotKeyManager`, whose handler matches the event id against each
-slot. Recording either pauses both, and one slot refuses the other's
-shortcut, since the two would share a hotkey id.
+are taken (⌥⌘V moves files in Finder). A third, the paste-and-pop
+shortcut (`Slot::Pop`, `paste-pop-hotkey`), works the same way (see
+Clipboard history). All go through one `GlobalHotKeyManager`, whose
+handler matches the event id against each slot. Recording any pauses
+all, and no slot takes another's shortcut, since they would share a
+hotkey id.
 
 **Conflicts with other apps.** Carbon lets two processes register the
 same shortcut without an error (tested: two Sift copies both registered
