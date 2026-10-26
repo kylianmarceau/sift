@@ -7,6 +7,7 @@
 //!   URL with its default application, or show a file in Finder.
 //! - [`copy_text`] / [`clipboard_text`] / [`clipboard_change_count`]: write
 //!   and read plain text on the clipboard, skipping content marked private.
+//!   [`frontmost_app`] names the app that most likely copied it.
 //! - [`choose_folder`]: the standard folder picker, non-modal.
 //! - [`use_accessory_activation_policy`] / [`activate_app`]: run without a
 //!   Dock icon, and come to the front for the settings window.
@@ -81,9 +82,10 @@ pub use quicklook::QuickLook;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    ClipboardText, ClipboardWatcher, Panel, activate_app, choose_folder, clipboard_change_count,
-    clipboard_text, copy_text, format_local_now, icon_png, open_application, open_path,
-    open_text_file, open_url, reveal_in_finder, use_accessory_activation_policy,
+    ClipboardText, ClipboardWatcher, FrontApp, Panel, activate_app, choose_folder,
+    clipboard_change_count, clipboard_text, copy_text, format_local_now, frontmost_app, icon_png,
+    open_application, open_path, open_text_file, open_url, reveal_in_finder,
+    use_accessory_activation_policy,
 };
 
 #[cfg(test)]

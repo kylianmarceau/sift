@@ -13,7 +13,7 @@ use sift_core::{Action, ResultItem, ResultKind};
 
 use crate::StateError;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE usage (
@@ -37,10 +37,23 @@ CREATE TABLE favorites (
 CREATE TABLE clipboard (
     id        INTEGER PRIMARY KEY,
     text      TEXT NOT NULL UNIQUE,
-    copied_at INTEGER NOT NULL
+    copied_at INTEGER NOT NULL,
+    pinned_at INTEGER,
+    source_name TEXT,
+    source_bundle TEXT
 );
 CREATE INDEX clipboard_copied_at ON clipboard (copied_at);
 ";
+
+/// Upgrades from each older schema version, in order: `MIGRATIONS[0]`
+/// takes version 1 to 2, and so on.
+const MIGRATIONS: &[&str] = &[
+    // 2: pinned clipboard entries.
+    "ALTER TABLE clipboard ADD COLUMN pinned_at INTEGER;",
+    // 3: the app each clipboard entry was copied in.
+    "ALTER TABLE clipboard ADD COLUMN source_name TEXT;
+     ALTER TABLE clipboard ADD COLUMN source_bundle TEXT;",
+];
 
 /// Usage rows kept; older ones are dropped.
 pub const MAX_USAGE_ROWS: usize = 500;
@@ -60,6 +73,19 @@ pub struct ClipEntry {
     pub id: i64,
     pub text: Arc<str>,
     pub copied_at: i64,
+    /// Pinned entries are listed first and kept until unpinned or deleted.
+    pub pinned: bool,
+    /// The app it was copied in, if known.
+    pub source: Option<ClipSource>,
+}
+
+/// The app a clipboard entry was copied in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipSource {
+    /// "Safari".
+    pub name: Arc<str>,
+    /// "com.apple.Safari".
+    pub bundle_id: Option<Arc<str>>,
 }
 
 pub struct StateDb {
@@ -72,7 +98,7 @@ impl StateDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Self::init(Connection::open(path)?)
+        Self::init(Connection::open(path)?, Some(path))
     }
 
     /// Opens the database at `path`; if it is damaged (cannot be opened,
@@ -115,10 +141,10 @@ impl StateDb {
     }
 
     pub fn open_in_memory() -> Result<Self, StateError> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(conn: Connection) -> Result<Self, StateError> {
+    fn init(conn: Connection, path: Option<&Path>) -> Result<Self, StateError> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -128,6 +154,7 @@ impl StateDb {
                 conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             SCHEMA_VERSION => {}
+            older if older < SCHEMA_VERSION => migrate(&conn, older, path)?,
             newer => return Err(StateError::NewerSchema(newer)),
         }
         Ok(Self { conn })
@@ -300,12 +327,16 @@ impl StateDb {
         Ok(())
     }
 
-    /// Adds `text` to clipboard history, keeping the newest `max_items`.
-    /// Copying something already in the history moves it to the top.
-    /// Blank and oversized text is ignored; returns whether it was kept.
+    /// Adds `text`, copied in `source`, to clipboard history, keeping the
+    /// newest `max_items` unpinned entries (pinned ones do not count and
+    /// are always kept). Copying something already in the history moves
+    /// it to the top; a copy with no known source (Sift copying an entry
+    /// back) keeps the source it had. Blank and oversized text is ignored;
+    /// returns whether it was kept.
     pub fn clipboard_add(
         &self,
         text: &str,
+        source: Option<&ClipSource>,
         now: i64,
         max_items: usize,
     ) -> Result<bool, StateError> {
@@ -313,36 +344,81 @@ impl StateDb {
             return Ok(false);
         }
         self.conn.execute(
-            "INSERT INTO clipboard (text, copied_at) VALUES (?1, ?2)
-             ON CONFLICT (text) DO UPDATE SET copied_at = excluded.copied_at",
-            params![text, now],
+            "INSERT INTO clipboard (text, copied_at, source_name, source_bundle)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (text) DO UPDATE SET
+                copied_at = excluded.copied_at,
+                source_bundle = CASE WHEN excluded.source_name IS NULL
+                    THEN source_bundle ELSE excluded.source_bundle END,
+                source_name = coalesce(excluded.source_name, source_name)",
+            params![
+                text,
+                now,
+                source.map(|s| &*s.name),
+                source.and_then(|s| s.bundle_id.as_deref())
+            ],
         )?;
         self.conn.execute(
-            "DELETE FROM clipboard WHERE id NOT IN
-                (SELECT id FROM clipboard ORDER BY copied_at DESC, id DESC LIMIT ?1)",
+            "DELETE FROM clipboard WHERE pinned_at IS NULL AND id NOT IN
+                (SELECT id FROM clipboard WHERE pinned_at IS NULL
+                 ORDER BY copied_at DESC, id DESC LIMIT ?1)",
             params![max_items as i64],
         )?;
         Ok(true)
     }
 
-    /// Clipboard history, newest first.
+    /// Clipboard history: pinned entries in the order they were pinned,
+    /// then the newest `limit` others, newest first.
     pub fn clipboard(&self, limit: usize) -> Result<Vec<ClipEntry>, StateError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, text, copied_at FROM clipboard
-             ORDER BY copied_at DESC, id DESC LIMIT ?1",
+            "SELECT id, text, copied_at, pinned_at, source_name, source_bundle FROM clipboard
+             WHERE pinned_at IS NOT NULL OR id IN
+                (SELECT id FROM clipboard WHERE pinned_at IS NULL
+                 ORDER BY copied_at DESC, id DESC LIMIT ?1)
+             ORDER BY pinned_at IS NULL, pinned_at, copied_at DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
+            let bundle_id = r.get::<_, Option<String>>(5)?;
             Ok(ClipEntry {
                 id: r.get(0)?,
                 text: r.get::<_, String>(1)?.into(),
                 copied_at: r.get(2)?,
+                pinned: r.get::<_, Option<i64>>(3)?.is_some(),
+                source: r.get::<_, Option<String>>(4)?.map(|name| ClipSource {
+                    name: name.into(),
+                    bundle_id: bundle_id.map(Into::into),
+                }),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Pins or unpins entry `id`; returns whether it exists.
+    pub fn clipboard_set_pinned(
+        &self,
+        id: i64,
+        pinned: bool,
+        now: i64,
+    ) -> Result<bool, StateError> {
+        let changed = self.conn.execute(
+            "UPDATE clipboard SET pinned_at = ?2 WHERE id = ?1",
+            params![id, pinned.then_some(now)],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Deletes entry `id`, pinned or not; returns whether it existed.
+    pub fn clipboard_delete(&self, id: i64) -> Result<bool, StateError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM clipboard WHERE id = ?1", [id])?
+            > 0)
+    }
+
+    /// Deletes the unpinned entries; pinned ones stay until unpinned.
     pub fn clipboard_clear(&self) -> Result<(), StateError> {
-        self.conn.execute("DELETE FROM clipboard", [])?;
+        self.conn
+            .execute("DELETE FROM clipboard WHERE pinned_at IS NULL", [])?;
         Ok(())
     }
 }
@@ -352,6 +428,32 @@ fn is_corruption(error: &rusqlite::Error) -> bool {
         error.sqlite_error_code(),
         Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
     )
+}
+
+/// Upgrades the schema from `from` to [`SCHEMA_VERSION`] in one
+/// transaction. A file on disk is first copied to
+/// `state.db.schema-<from>`, since an older Sift refuses the upgraded file
+/// (see [`StateError::NewerSchema`]); going back to it means putting the
+/// copy back.
+fn migrate(conn: &Connection, from: i32, path: Option<&Path>) -> Result<(), StateError> {
+    if let Some(path) = path {
+        let mut backup = path.as_os_str().to_owned();
+        backup.push(format!(".schema-{from}"));
+        let backup = PathBuf::from(backup);
+        if !backup.exists() {
+            // VACUUM INTO writes a consistent copy, including what is still
+            // in the write-ahead log.
+            conn.execute("VACUUM INTO ?1", [backup.to_string_lossy()])?;
+        }
+        tracing::info!(from, to = SCHEMA_VERSION, backup = %backup.display(), "upgrading state.db");
+    }
+    let tx = conn.unchecked_transaction()?;
+    for step in &MIGRATIONS[(from - 1).max(0) as usize..] {
+        tx.execute_batch(step)?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn is_recordable(item: &ResultItem) -> bool {
@@ -500,14 +602,14 @@ mod tests {
     #[test]
     fn clipboard_dedupes_caps_and_skips_blank_or_huge_text() {
         let db = StateDb::open_in_memory().unwrap();
-        assert!(db.clipboard_add("one", 1, 3).unwrap());
-        assert!(db.clipboard_add("two", 2, 3).unwrap());
-        assert!(db.clipboard_add("three", 3, 3).unwrap());
-        assert!(db.clipboard_add("one", 4, 3).unwrap()); // moves to top
-        assert!(db.clipboard_add("four", 5, 3).unwrap()); // drops "two"
-        assert!(!db.clipboard_add("   \n", 6, 3).unwrap());
+        assert!(db.clipboard_add("one", None, 1, 3).unwrap());
+        assert!(db.clipboard_add("two", None, 2, 3).unwrap());
+        assert!(db.clipboard_add("three", None, 3, 3).unwrap());
+        assert!(db.clipboard_add("one", None, 4, 3).unwrap()); // moves to top
+        assert!(db.clipboard_add("four", None, 5, 3).unwrap()); // drops "two"
+        assert!(!db.clipboard_add("   \n", None, 6, 3).unwrap());
         assert!(
-            !db.clipboard_add(&"x".repeat(MAX_CLIP_BYTES + 1), 7, 3)
+            !db.clipboard_add(&"x".repeat(MAX_CLIP_BYTES + 1), None, 7, 3)
                 .unwrap()
         );
         let texts: Vec<_> = db
@@ -519,6 +621,130 @@ mod tests {
         assert_eq!(texts, ["four", "one", "three"]);
         db.clipboard_clear().unwrap();
         assert!(db.clipboard(10).unwrap().is_empty());
+    }
+
+    fn clip_texts(db: &StateDb) -> Vec<String> {
+        db.clipboard(100)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.text.to_string())
+            .collect()
+    }
+
+    fn clip_id(db: &StateDb, text: &str) -> i64 {
+        db.clipboard(100)
+            .unwrap()
+            .into_iter()
+            .find(|e| &*e.text == text)
+            .expect("entry")
+            .id
+    }
+
+    #[test]
+    fn pinned_clipboard_entries_come_first_and_outlive_the_cap_and_clearing() {
+        let db = StateDb::open_in_memory().unwrap();
+        db.clipboard_add("old", None, 1, 2).unwrap();
+        db.clipboard_add("keep", None, 2, 2).unwrap();
+        db.clipboard_add("also", None, 3, 2).unwrap();
+        assert!(
+            db.clipboard_set_pinned(clip_id(&db, "keep"), true, 10)
+                .unwrap()
+        );
+        assert!(
+            db.clipboard_set_pinned(clip_id(&db, "also"), true, 11)
+                .unwrap()
+        );
+        // Pins are in the order they were made; the cap counts only the rest.
+        db.clipboard_add("a", None, 4, 2).unwrap();
+        db.clipboard_add("b", None, 5, 2).unwrap();
+        db.clipboard_add("c", None, 6, 2).unwrap();
+        assert_eq!(clip_texts(&db), ["keep", "also", "c", "b"]);
+        assert!(db.clipboard(100).unwrap()[0].pinned);
+        // Copying a pinned entry again keeps it pinned.
+        db.clipboard_add("keep", None, 7, 2).unwrap();
+        assert!(db.clipboard(100).unwrap()[0].pinned);
+
+        db.clipboard_clear().unwrap();
+        assert_eq!(clip_texts(&db), ["keep", "also"]);
+        assert!(
+            db.clipboard_set_pinned(clip_id(&db, "also"), false, 12)
+                .unwrap()
+        );
+        assert!(!db.clipboard_set_pinned(9999, true, 12).unwrap());
+        db.clipboard_clear().unwrap();
+        assert_eq!(clip_texts(&db), ["keep"]);
+        // Deleting one entry removes it even when pinned.
+        assert!(db.clipboard_delete(clip_id(&db, "keep")).unwrap());
+        assert!(clip_texts(&db).is_empty());
+        assert!(!db.clipboard_delete(1).unwrap());
+    }
+
+    #[test]
+    fn clipboard_entries_remember_where_they_were_copied() {
+        let db = StateDb::open_in_memory().unwrap();
+        let safari = ClipSource {
+            name: "Safari".into(),
+            bundle_id: Some("com.apple.Safari".into()),
+        };
+        let notes = ClipSource {
+            name: "Notes".into(),
+            bundle_id: None,
+        };
+        db.clipboard_add("link", Some(&safari), 1, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, Some(safari.clone()));
+        // Sift copying the entry back keeps its source.
+        db.clipboard_add("link", None, 2, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, Some(safari));
+        // Copying it again elsewhere replaces it.
+        db.clipboard_add("link", Some(&notes), 3, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, Some(notes));
+        db.clipboard_add("other", None, 4, 10).unwrap();
+        assert_eq!(db.clipboard(10).unwrap()[0].source, None);
+    }
+
+    #[test]
+    fn upgrades_a_version_1_file_and_keeps_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE usage (id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                    title TEXT NOT NULL, subtitle TEXT, action TEXT NOT NULL,
+                    count INTEGER NOT NULL, last_used INTEGER NOT NULL);
+                 CREATE TABLE favorites (id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                    title TEXT NOT NULL, subtitle TEXT, action TEXT NOT NULL,
+                    added_at INTEGER NOT NULL);
+                 CREATE TABLE clipboard (id INTEGER PRIMARY KEY,
+                    text TEXT NOT NULL UNIQUE, copied_at INTEGER NOT NULL);
+                 INSERT INTO clipboard (text, copied_at) VALUES ('kept', 1);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        assert_eq!(clip_texts(&db), ["kept"]);
+        assert!(
+            db.clipboard_set_pinned(clip_id(&db, "kept"), true, 2)
+                .unwrap()
+        );
+        drop(db);
+
+        // The copy is the version 1 file, untouched.
+        let backup = dir.path().join("state.db.schema-1");
+        let old = Connection::open(&backup).unwrap();
+        let version: i32 = old
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let text: String = old
+            .query_row("SELECT text FROM clipboard", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(text, "kept");
+
+        // Opening again neither migrates nor overwrites the copy.
+        let db = StateDb::open(&path).unwrap();
+        assert!(db.clipboard(10).unwrap()[0].pinned);
     }
 
     #[test]

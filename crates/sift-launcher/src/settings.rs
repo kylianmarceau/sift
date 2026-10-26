@@ -23,7 +23,7 @@ use gpui::{
 use sift_files::{Command, RootState, RootStatus};
 use sift_indexer::IndexOptions;
 
-use crate::hotkey::{self, Hotkeys, Recorded, Shortcut};
+use crate::hotkey::{self, Hotkeys, Recorded, Shortcut, Slot};
 use crate::launcher::{
     IndexStatusChanged, Launcher, UpdateStateChanged, UserDataChanged, WindowManagerChanged,
 };
@@ -116,10 +116,11 @@ pub struct Settings {
     /// Open at Login, read when the window opens or becomes active (it can
     /// also be changed in System Settings).
     login: LoginStatus,
-    /// While a new shortcut is being recorded: the capture of key presses.
-    recording: Option<KeyCapture>,
-    /// A note under the shortcut, and whether it reports a problem.
-    shortcut_note: Option<(SharedString, bool)>,
+    /// While a new shortcut is being recorded: for which slot, and the
+    /// capture of key presses.
+    recording: Option<(Slot, KeyCapture)>,
+    /// A note under a shortcut, and whether it reports a problem.
+    shortcut_note: Option<(Slot, SharedString, bool)>,
     /// Clear History was clicked once and waits for confirmation.
     confirm_clear: bool,
     _subscriptions: Vec<Subscription>,
@@ -210,10 +211,10 @@ impl Settings {
         }
     }
 
-    /// Starts recording a new shortcut: the next key press in Sift's
-    /// windows becomes it. The current shortcut is off meanwhile, so it can
-    /// be pressed too.
-    fn start_recording(&mut self, cx: &mut Context<Self>) {
+    /// Starts recording a new shortcut for `slot`: the next key press in
+    /// Sift's windows becomes it. The current shortcuts are off meanwhile,
+    /// so they can be pressed too.
+    fn start_recording(&mut self, slot: Slot, cx: &mut Context<Self>) {
         if self.recording.is_some() {
             return;
         }
@@ -221,7 +222,7 @@ impl Settings {
         let Some(capture) = KeyCapture::start(move |press| {
             let _ = tx.unbounded_send(press);
         }) else {
-            self.shortcut_note = Some(("Cannot read the keyboard right now.".into(), true));
+            self.shortcut_note = Some((slot, "Cannot read the keyboard right now.".into(), true));
             cx.notify();
             return;
         };
@@ -229,7 +230,7 @@ impl Settings {
             let () = hotkeys;
             cx.update_global::<Hotkeys, _>(|hotkeys, _| hotkeys.pause());
         }
-        self.recording = Some(capture);
+        self.recording = Some((slot, capture));
         self.shortcut_note = None;
         speak("Recording a shortcut. Press the new shortcut, or Escape to cancel.");
         // The task ends when the capture is dropped, which drops the sender.
@@ -257,42 +258,61 @@ impl Settings {
     }
 
     fn on_key_press(&mut self, press: KeyPress, cx: &mut Context<Self>) {
-        if self.recording.is_none() {
+        let Some((slot, _)) = &self.recording else {
             return;
-        }
+        };
+        let slot = *slot;
         match hotkey::interpret(&press) {
             Recorded::Cancel => {
                 self.stop_recording(cx);
                 speak("Cancelled.");
             }
             Recorded::Rejected(reason) => {
-                self.shortcut_note = Some((reason.into(), true));
+                self.shortcut_note = Some((slot, reason.into(), true));
                 speak(reason);
                 cx.notify();
             }
             Recorded::Shortcut(shortcut) => {
+                // Dropping the capture before `use_shortcut` resumes the
+                // other shortcuts.
                 self.recording = None;
-                self.use_shortcut(shortcut, cx);
+                self.use_shortcut(slot, Some(shortcut), cx);
             }
         }
     }
 
-    /// Makes `shortcut` the one that shows the panel.
-    fn use_shortcut(&mut self, shortcut: Shortcut, cx: &mut Context<Self>) {
+    /// Makes `shortcut` the one for `slot`; `None` removes it.
+    fn use_shortcut(&mut self, slot: Slot, shortcut: Option<Shortcut>, cx: &mut Context<Self>) {
         let result = if cx.try_global::<Hotkeys>().is_some() {
-            cx.update_global::<Hotkeys, _>(|hotkeys, _| hotkeys.set(shortcut.clone()))
+            cx.update_global::<Hotkeys, _>(|hotkeys, _| {
+                let result = hotkeys.set(slot, shortcut.clone());
+                // On a refusal, turn the others back on too.
+                hotkeys.resume();
+                result
+            })
         } else {
             Err("Keyboard shortcuts are not available.".to_string())
         };
-        match result {
-            Ok(()) => {
-                tracing::info!(shortcut = shortcut.display(), "keyboard shortcut changed");
+        match (result, shortcut) {
+            (Ok(()), Some(shortcut)) => {
+                tracing::info!(
+                    ?slot,
+                    shortcut = shortcut.display(),
+                    "keyboard shortcut changed"
+                );
                 speak(&format!("Shortcut set to {}.", shortcut.spoken()));
-                self.shortcut_note = shortcut.system_conflict().map(|note| (note.into(), false));
+                self.shortcut_note = shortcut
+                    .system_conflict()
+                    .map(|note| (slot, note.into(), false));
             }
-            Err(reason) => {
+            (Ok(()), None) => {
+                tracing::info!(?slot, "keyboard shortcut removed");
+                speak("Shortcut removed.");
+                self.shortcut_note = None;
+            }
+            (Err(reason), _) => {
                 speak(&reason);
-                self.shortcut_note = Some((reason.into(), true));
+                self.shortcut_note = Some((slot, reason.into(), true));
             }
         }
         cx.notify();
@@ -515,7 +535,7 @@ impl Settings {
         let edit_config = button("edit-config", "Edit Configuration…", Kind::Secondary, theme)
             .on_click(cx.listener(|this, _, _, cx| this.open_config_file(cx)));
         let hairline = || div().h(px(1.)).bg(theme.divider);
-        let shortcut_row = self.render_shortcut(theme, cx);
+        let shortcut_row = self.render_shortcut(Slot::Panel, theme, cx);
         div()
             .p(px(14.))
             .rounded(px(10.))
@@ -594,10 +614,12 @@ impl Settings {
                 )
         };
         let hairline = || div().h(px(1.)).bg(theme.divider);
+        let shortcut_row = self.render_shortcut(Slot::Clipboard, theme, cx);
 
         let detail = if on {
             "Type clip in the panel to search text you copied, or clip and a word. \
-             Text that password managers mark as private is never kept."
+             Text that password managers mark as private is never kept, nor copies \
+             from apps listed in ignore_apps in config.toml."
         } else {
             "Keep a history of the text you copy, on this Mac only. Off by default, \
              because copied text can be private."
@@ -629,10 +651,16 @@ impl Settings {
                 }));
 
         let kept: SharedString = match (on, count) {
-            (false, _) => "Deletes what was kept while history was on.".into(),
+            (false, _) => {
+                "Deletes what was kept while history was on, except pinned entries.".into()
+            }
             (true, 0) => "Nothing kept yet.".into(),
-            (true, 1) => "1 entry kept on this Mac.".into(),
-            (true, n) => format!("{} entries kept on this Mac.", thousands(n as u64)).into(),
+            (true, 1) => "1 entry kept on this Mac. Pinned entries are not deleted.".into(),
+            (true, n) => format!(
+                "{} entries kept on this Mac. Pinned entries are not deleted.",
+                thousands(n as u64)
+            )
+            .into(),
         };
         let clear: AnyElement = if self.confirm_clear {
             div()
@@ -668,13 +696,16 @@ impl Settings {
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.confirm_clear = true;
-                speak("Delete the clipboard history? Choose Delete History or Cancel.");
+                speak(
+                    "Delete the clipboard history, except pinned entries? Choose Delete \
+                     History or Cancel.",
+                );
                 cx.notify();
             }))
             .into_any_element()
         };
         let kept: SharedString = if self.confirm_clear {
-            "Delete every entry? This cannot be undone.".into()
+            "Delete every entry that is not pinned? This cannot be undone.".into()
         } else {
             kept
         };
@@ -697,17 +728,22 @@ impl Settings {
                     .child(enable),
             )
             .when(on, |card| {
-                card.child(hairline()).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(row(
-                            "History Size",
-                            "The newest entries are kept; older ones are deleted.".into(),
-                        ))
-                        .child(choices),
-                )
+                card.child(hairline())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(row(
+                                "History Size",
+                                "The newest entries are kept; older ones are deleted. \
+                             Pinned entries (⌘D in the panel) do not count."
+                                    .into(),
+                            ))
+                            .child(choices),
+                    )
+                    .child(hairline())
+                    .child(shortcut_row)
             })
             .child(hairline())
             .child(
@@ -757,18 +793,27 @@ impl Settings {
             .into_any_element()
     }
 
-    /// "Keyboard Shortcut": the current shortcut as key caps, which start
+    /// "Keyboard Shortcut": a slot's shortcut as key caps, which start
     /// recording when clicked.
-    fn render_shortcut(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_shortcut(&self, slot: Slot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (shortcut, registered) = cx
             .try_global::<Hotkeys>()
-            .map(|h| (h.current().clone(), h.is_registered()))
-            .unwrap_or((Shortcut::default(), false));
-        let recording = self.recording.is_some();
-        let (detail, problem): (SharedString, bool) = match &self.shortcut_note {
-            Some((note, problem)) => (note.clone(), *problem),
-            None if recording => ("Type the new shortcut. Esc cancels.".into(), false),
-            None if !registered => (
+            .map(|h| (h.current(slot).cloned(), h.is_registered(slot)))
+            .unwrap_or((None, false));
+        let shortcut = match slot {
+            Slot::Panel => Some(shortcut.unwrap_or_default()),
+            Slot::Clipboard => shortcut,
+        };
+        let recording = matches!(&self.recording, Some((s, _)) if *s == slot);
+        let note = self
+            .shortcut_note
+            .as_ref()
+            .filter(|(s, ..)| *s == slot)
+            .map(|(_, note, problem)| (note.clone(), *problem));
+        let (detail, problem): (SharedString, bool) = match (note, &shortcut) {
+            (Some(note), _) => note,
+            (None, _) if recording => ("Type the new shortcut. Esc cancels.".into(), false),
+            (None, Some(shortcut)) if !registered => (
                 format!(
                     "{} is not working: macOS did not accept it. Choose another.",
                     shortcut.display()
@@ -776,10 +821,19 @@ impl Settings {
                 .into(),
                 true,
             ),
-            None => ("Shows and hides the Sift panel.".into(), false),
+            (None, _) => match (slot, &shortcut) {
+                (Slot::Panel, _) => ("Shows and hides the Sift panel.".into(), false),
+                (Slot::Clipboard, Some(_)) => {
+                    ("Opens the panel on your clipboard history.".into(), false)
+                }
+                (Slot::Clipboard, None) => (
+                    "Open the panel on your clipboard history with a shortcut of its own.".into(),
+                    false,
+                ),
+            },
         };
         let recorder = div()
-            .id("shortcut-recorder")
+            .id(("shortcut-recorder", slot as usize))
             .flex_none()
             .min_w(px(92.))
             .h(px(26.))
@@ -801,28 +855,55 @@ impl Settings {
                         .child("Type shortcut…")
                 } else {
                     let hover = theme.selected;
-                    el.border_color(gpui::transparent_black())
+                    let el = el
+                        .border_color(gpui::transparent_black())
                         .bg(theme.key_background)
                         .text_color(theme.key_text)
-                        .hover(move |style| style.bg(hover))
-                        .children(shortcut.parts().into_iter().map(|part| div().child(part)))
+                        .hover(move |style| style.bg(hover));
+                    match &shortcut {
+                        Some(shortcut) => {
+                            el.children(shortcut.parts().into_iter().map(|part| div().child(part)))
+                        }
+                        None => el.child("Record Shortcut"),
+                    }
                 }
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.recording.is_some() {
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if recording {
                     this.stop_recording(cx);
                 } else {
-                    this.start_recording(cx);
+                    this.stop_recording(cx);
+                    this.start_recording(slot, cx);
                 }
             }));
-        let reset = (!recording && !shortcut.is_default()).then(|| {
-            button("shortcut-reset", "Use ⌥Space", Kind::Link, theme).on_click(cx.listener(
-                |this, _, _, cx| {
+        let reset = match (slot, &shortcut) {
+            _ if recording => None,
+            (Slot::Panel, Some(shortcut)) if !shortcut.is_default() => Some(
+                button(
+                    ("shortcut-reset", slot as usize),
+                    "Use ⌥Space",
+                    Kind::Link,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
                     this.stop_recording(cx);
-                    this.use_shortcut(Shortcut::default(), cx);
-                },
-            ))
-        });
+                    this.use_shortcut(Slot::Panel, Some(Shortcut::default()), cx);
+                })),
+            ),
+            (Slot::Clipboard, Some(_)) => Some(
+                button(
+                    ("shortcut-reset", slot as usize),
+                    "Remove",
+                    Kind::Link,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.stop_recording(cx);
+                    this.use_shortcut(Slot::Clipboard, None, cx);
+                })),
+            ),
+            _ => None,
+        };
         div()
             .flex()
             .items_center()

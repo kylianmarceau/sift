@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use sift_core::{Action, Boosts, Provider, ResultItem, ResultKind};
 use sift_search::{NameMatcher, fold};
-use sift_state::{CommandAction, Config, CustomCommand, Snippet, StateDb};
+use sift_state::{ClipSource, CommandAction, Config, CustomCommand, Snippet, StateDb};
 
 use crate::clipboard::ClipboardProvider;
 use crate::commands;
@@ -160,14 +160,24 @@ impl UserData {
         self.clipboard = Arc::new(ClipboardProvider::new(entries));
     }
 
-    /// Keeps `text` in the clipboard history (if enabled). Returns whether
-    /// it was kept (blank and very large text is not).
-    pub fn record_clipboard(&mut self, text: &str) -> bool {
+    /// Keeps `text`, copied in `source`, in the clipboard history (if
+    /// enabled). Returns whether it was kept (blank and very large text is
+    /// not).
+    pub fn record_clipboard(&mut self, text: &str, source: Option<&ClipSource>) -> bool {
         let (Some(db), true) = (&self.db, self.config.clipboard.enabled) else {
             return false;
         };
+        if let Some(source) = source
+            && self
+                .config
+                .clipboard
+                .ignores(&source.name, source.bundle_id.as_deref())
+        {
+            tracing::debug!(app = %source.name, "copied in an ignored app; not kept");
+            return false;
+        }
         let max = self.config.clipboard.max_items;
-        match db.clipboard_add(text, sift_state::now(), max) {
+        match db.clipboard_add(text, source, sift_state::now(), max) {
             Ok(true) => {
                 self.reload_clipboard();
                 true
@@ -180,6 +190,42 @@ impl UserData {
         }
     }
 
+    /// Pins or unpins clipboard entry `id`. Returns whether it is now
+    /// pinned, or `None` if it is not in the history.
+    pub fn toggle_pin(&mut self, id: i64) -> Option<bool> {
+        let db = self.db.as_ref()?;
+        let pinned = !self.clipboard.entry(id)?.pinned;
+        match db.clipboard_set_pinned(id, pinned, sift_state::now()) {
+            Ok(true) => {
+                self.reload_clipboard();
+                Some(pinned)
+            }
+            Ok(false) => None,
+            Err(error) => {
+                tracing::warn!(%error, "cannot pin clipboard entry");
+                None
+            }
+        }
+    }
+
+    /// Deletes clipboard entry `id`; returns whether it was there.
+    pub fn delete_clip(&mut self, id: i64) -> bool {
+        let Some(db) = &self.db else {
+            return false;
+        };
+        match db.clipboard_delete(id) {
+            Ok(deleted) => {
+                self.reload_clipboard();
+                deleted
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot delete clipboard entry");
+                false
+            }
+        }
+    }
+
+    /// Deletes the unpinned clipboard entries.
     pub fn clear_clipboard(&mut self) {
         if let Some(db) = &self.db
             && let Err(error) = db.clipboard_clear()
@@ -611,14 +657,14 @@ mod tests {
     fn clipboard_history_is_kept_only_when_enabled() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
-        assert!(!user.record_clipboard("secret"));
+        assert!(!user.record_clipboard("secret", None));
         assert_eq!(user.clipboard().len(), 0);
 
         write_config(dir.path(), "[clipboard]\nenabled = true\nmax_items = 2\n");
         user.reload_config();
-        assert!(user.record_clipboard("one"));
-        assert!(user.record_clipboard("two"));
-        assert!(user.record_clipboard("three"));
+        assert!(user.record_clipboard("one", None));
+        assert!(user.record_clipboard("two", None));
+        assert!(user.record_clipboard("three", None));
         let titles: Vec<String> = user
             .clipboard()
             .search("clip", 10)
@@ -636,6 +682,25 @@ mod tests {
         assert_eq!(user.clipboard().len(), 2);
         user.clear_clipboard();
         assert_eq!(user.clipboard().len(), 0);
+    }
+
+    #[test]
+    fn copies_in_ignored_apps_are_not_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_config(
+            dir.path(),
+            "[clipboard]\nenabled = true\nignore_apps = [\"Terminal\"]\n",
+        );
+        let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
+        let app = |name: &str| ClipSource {
+            name: name.into(),
+            bundle_id: None,
+        };
+        assert!(!user.record_clipboard("token", Some(&app("Terminal"))));
+        assert!(user.record_clipboard("hello", Some(&app("Notes"))));
+        // Copies with no known app are kept.
+        assert!(user.record_clipboard("unknown", None));
+        assert_eq!(user.clipboard().len(), 2);
     }
 
     #[test]

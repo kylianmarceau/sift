@@ -610,12 +610,53 @@ Opt-in (`[clipboard] enabled = true`).
 - **What is kept.** Plain text only, deduplicated (copying again moves an
   entry to the top), capped at `max_items`. Blank text and text over
   64 KiB are skipped.
+- **Pinning.** ⌘D sets `clipboard.pinned_at` (schema 2). Pinned entries
+  come first, in the order they were pinned, and do not count towards
+  `max_items`; *Clear History* leaves them. Schema 2 was the first
+  in-place upgrade of `state.db`: before migrating, `StateDb` copies the
+  file to `state.db.schema-<old>` with `VACUUM INTO`, because an older
+  Sift refuses a newer schema and the copy is the way back.
+- **Deleting one entry.** ⌃X, which removes other results from recents,
+  deletes the selected entry, pinned or not.
+- **Source app.** macOS does not say which app wrote to the pasteboard,
+  so an entry records the frontmost app when the change is noticed
+  (`sift_macos::frontmost_app`; name and bundle id, schema 3). That is
+  the copying app unless the user switched apps within the 750 ms poll.
+  Sift itself is never a source: its settings window is skipped, and a
+  copy Sift made (Enter on an entry) is recognised by the change count
+  right after writing, and keeps the entry's old source. `from:` in a
+  `clip` search matches the app name.
+- **Content types.** `clipboard::Content::of` sorts an entry into link
+  (http/https), email address, hex colour, path (`/…` or `~/…`), code or
+  plain text, once when the history loads. It never touches the file
+  system and reads at most 4 KB. The type picks the row's tile (a colour
+  is drawn as a swatch) and what ⌘↵ does: open the link, open a
+  `mailto:` link, or reveal the path in Finder. Nothing is opened or run
+  without that key press, and paths are only revealed, never opened.
+- **Preview.** In a `clip` search with results, the list narrows to
+  300 pt and the selected entry is shown beside it: the text wrapped
+  (code in Menlo), a colour as a swatch with its RGB values, and the
+  source app, age and word, character and line counts below. The panel
+  then always has the height of 8 rows, so one entry still gets room.
+  Only the first 3,000 characters are laid out (the rest is counted),
+  which bounds text shaping for a 64 KiB entry. Each entry gets its own
+  scroll element, so the preview starts at the top.
+- **Ignored apps.** `[clipboard] ignore_apps` (empty by default) names
+  apps, by name or bundle id, whose copies are dropped before anything
+  is written. It relies on the same frontmost-app guess, so it is a
+  convenience on top of the concealed-type check, not a guarantee.
 - **Searching.** Entries are searched only after a `clip` prefix, never
-  mixed into ordinary results, and Enter copies an entry back.
+  mixed into ordinary results, and Enter copies an entry back. Entries
+  that contain every word come first, in history order; then entries
+  whose title (the first 100 characters) matches with `NameMatcher`, the
+  same tiers and fuzzy matching as names, best first. Only the title is
+  matched loosely, since almost any letters appear in order somewhere in
+  a long text, and only for the newest 2,000 entries not matched by
+  words, which bounds the search near 2 ms (BENCHMARKS.md, 2026-10-26).
 - **No auto-paste.** Automatic pasting would need synthetic key events,
   which need the Accessibility permission.
 - **Turning it off** stops the task and hides the history.
-  *Clear Clipboard History* deletes it.
+  *Clear Clipboard History* deletes it, except pinned entries.
 - **Tests** use private, uniquely named pasteboards and never touch the
   user's clipboard.
 
@@ -969,6 +1010,15 @@ uses them for Spotlight and input sources by default.
 shortcut is restored. At launch, a missing, damaged or unusable file
 means Option+Space, and a saved shortcut that cannot be registered
 falls back to Option+Space too.
+
+**Clipboard history shortcut.** A second, optional shortcut
+(`hotkey::Slot::Clipboard`, saved in `clipboard-hotkey`, empty or
+missing for none) opens the panel with `clip ` typed, or hides it if it
+already shows clipboard history. It has no default: the obvious choices
+are taken (⌥⌘V moves files in Finder). Both shortcuts go through one
+`GlobalHotKeyManager`, whose handler matches the event id against each
+slot. Recording either pauses both, and one slot refuses the other's
+shortcut, since the two would share a hotkey id.
 
 **Conflicts with other apps.** Carbon lets two processes register the
 same shortcut without an error (tested: two Sift copies both registered

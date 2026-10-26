@@ -48,7 +48,7 @@ fn main() {
     }
     for i in 0..200 {
         let text = format!("clipboard entry {i} ").repeat(20);
-        db.clipboard_add(&text, now - i, 200).expect("clip");
+        db.clipboard_add(&text, None, now - i, 200).expect("clip");
     }
     let mut n = MAX_USAGE_ROWS;
     time("record_use (insert + prune)", || {
@@ -66,7 +66,7 @@ fn main() {
     });
     time("clipboard_add (dedupe + cap)", || {
         n += 1;
-        db.clipboard_add(&format!("new entry {n}"), now, 200)
+        db.clipboard_add(&format!("new entry {n}"), None, now, 200)
             .expect("clip");
     });
     time("clipboard(200)", || {

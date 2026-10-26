@@ -2,6 +2,7 @@
 //!
 //! Runs as an accessory app (no Dock icon). A global shortcut (Option+Space
 //! unless changed in Settings) shows a floating search panel; Escape, the hotkey again, or clicking elsewhere hides it.
+//! An optional second shortcut opens the panel on clipboard history.
 //! The process, window and caches stay alive between uses, so showing the
 //! panel is an order-front, not a relaunch.
 
@@ -126,13 +127,16 @@ fn main() {
 
             // Shortcut presses arrive from a Carbon event handler on the main
             // thread; forward them to a GPUI task through a channel.
-            let (hotkey_tx, mut hotkey_rx) = unbounded::<Instant>();
+            let (hotkey_tx, mut hotkey_rx) = unbounded::<(hotkey::Slot, Instant)>();
             hotkey::install(launcher::user_dir(), hotkey_tx, cx);
             let _ = window.update(cx, |launcher, _, cx| launcher.sync_window_hotkeys(cx));
             cx.spawn(async move |cx| {
-                while let Some(pressed_at) = hotkey_rx.next().await {
-                    let _ = window.update(cx, |launcher, window, cx| {
-                        launcher.toggle(pressed_at, window, cx)
+                while let Some((slot, pressed_at)) = hotkey_rx.next().await {
+                    let _ = window.update(cx, |launcher, window, cx| match slot {
+                        hotkey::Slot::Panel => launcher.toggle(pressed_at, window, cx),
+                        hotkey::Slot::Clipboard => {
+                            launcher.toggle_clipboard(pressed_at, window, cx)
+                        }
                     });
                 }
             })

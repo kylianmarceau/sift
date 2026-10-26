@@ -159,9 +159,21 @@ Changes apply the next time the panel opens.
 **Clipboard history** is off by default. Turn it on in Sift Settings ›
 Clipboard History (or set `enabled = true` under `[clipboard]` in the
 config), then type `clip` (or `clip invoice`) to search what you copied.
-Settings also chooses how many entries to keep. Text that password
-managers mark as concealed is never kept. *Clear History* in Settings,
-or the *Clear Clipboard History* command, deletes everything kept.
+Entries containing every word come first, then entries that start with
+a loose match (`clip invpd` finds "invoice paid"). Links, email
+addresses, paths, colours and code get their own icon; **⌘Enter** opens a
+link, starts an email or shows a path in Finder. Beside the list, a
+preview shows the selected entry in full (code in a fixed-width font, a
+colour as a swatch) with where and when you copied it.
+**⌘D** pins the selected entry (★): pinned entries are listed first and
+kept until you unpin them. **Ctrl-X** deletes the selected entry. Each
+entry shows the app it was copied in; `clip from:slack` lists only what
+you copied in Slack. To never keep copies from some apps, list them by
+name or bundle id under `[clipboard]`, as in
+`ignore_apps = ["Terminal", "com.1password.1password"]`. Settings also chooses how many other entries
+to keep. Text that password managers mark as concealed is never kept.
+*Clear History* in Settings, or the *Clear Clipboard History* command,
+deletes everything kept except pinned entries.
 
 Sift follows the system's light or dark appearance and your accent colour
 (System Settings › Appearance).
@@ -193,7 +205,9 @@ press the new one (Esc cancels). It needs ⌘, ⌃ or ⌥, or can be a
 function key on its own. It works by key position, so it stays the same
 if you switch keyboard layouts. macOS does not tell Sift when another app
 uses the same shortcut, so if the panel stops appearing, pick another
-one. *Use ⌥Space* restores the default. macOS asks once for
+one. *Use ⌥Space* restores the default. Settings › Clipboard History
+can also give clipboard history a shortcut of its own (none by default),
+which opens the panel straight on `clip`. macOS asks once for
 access to Documents, Desktop or Downloads. Folders indexed with
 `sift index` in a terminal show up there too; they share one index.
 

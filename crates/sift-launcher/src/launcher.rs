@@ -62,6 +62,12 @@ const ICON_SIZE: f32 = 28.;
 const ICON_GAP: f32 = 12.;
 /// Rows visible at once; more results scroll with the selection.
 pub const VISIBLE_ROWS: usize = 8;
+/// Width of the result list beside the clipboard preview.
+const CLIP_LIST_WIDTH: f32 = 300.;
+/// Characters of an entry shown in the preview; the rest is counted.
+const PREVIEW_CHARS: usize = 3_000;
+/// Fixed-width font for code in the preview.
+const CODE_FONT: &str = "Menlo";
 /// Results fetched per query.
 const RESULT_LIMIT: usize = 40;
 const ICON_PX: u32 = 64;
@@ -117,6 +123,9 @@ pub struct Launcher {
     window_error: Option<String>,
     /// Watches the clipboard while clipboard history is enabled.
     clipboard_task: Option<(sift_macos::ClipboardWatcher, Task<()>)>,
+    /// The clipboard's change count after Sift last copied to it, so that
+    /// copying an entry back is not credited to the app in front.
+    own_copy: Option<isize>,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -302,6 +311,7 @@ impl Launcher {
             window_config: sift_wm::Config::default(),
             window_error: None,
             clipboard_task: None,
+            own_copy: None,
             apps: None,
             files,
             file_index,
@@ -474,6 +484,25 @@ impl Launcher {
         }
     }
 
+    /// The clipboard history shortcut: shows the panel on clipboard
+    /// history, or hides it if it already shows that.
+    pub fn toggle_clipboard(
+        &mut self,
+        requested_at: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_visible() && self.in_clipboard_scope(&self.query) {
+            self.hide(cx);
+            return;
+        }
+        if !self.is_visible() {
+            self.show_requested_at = Some(requested_at);
+            self.show(window, cx);
+        }
+        self.run_command(commands::CLIPBOARD, cx);
+    }
+
     /// Starts or stops watching the clipboard to match the config. While
     /// on, a background thread reads the change counter every
     /// `CLIPBOARD_POLL`; the UI wakes and reads the contents only after a
@@ -519,7 +548,15 @@ impl Launcher {
     fn clipboard_changed(&mut self, text: sift_macos::ClipboardText, cx: &mut Context<Self>) {
         match text {
             sift_macos::ClipboardText::Text(text) => {
-                if self.user.record_clipboard(&text) {
+                let source = if self.own_copy == Some(sift_macos::clipboard_change_count()) {
+                    None
+                } else {
+                    sift_macos::frontmost_app().map(|app| sift_state::ClipSource {
+                        name: app.name.into(),
+                        bundle_id: app.bundle_id.map(Into::into),
+                    })
+                };
+                if self.user.record_clipboard(&text, source.as_ref()) {
                     self.rebuild_search();
                     cx.emit(UserDataChanged);
                     if clipboard::scope(&self.query).is_some() {
@@ -744,7 +781,19 @@ impl Launcher {
     }
 
     fn height(&self) -> f32 {
-        window_height(self.visible_rows(), self.shows_message())
+        // The preview needs room even for one entry.
+        let rows = if self.shows_preview() {
+            VISIBLE_ROWS
+        } else {
+            self.visible_rows()
+        };
+        window_height(rows, self.shows_message())
+    }
+
+    /// A clip search with results: the list shares the panel with a
+    /// preview of the selected entry.
+    fn shows_preview(&self) -> bool {
+        self.message.is_none() && !self.results.is_empty() && self.in_clipboard_scope(&self.query)
     }
 
     /// What to say when a query finds nothing.
@@ -879,7 +928,36 @@ impl Launcher {
         }
     }
 
+    /// ⌘↵: shows the selected file in Finder, or opens what a clipboard
+    /// entry names (a link, an address, a path).
     fn reveal(&mut self, _: &RevealSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = self.selected()
+            && let Some(content) = self.user.clipboard().content(item)
+        {
+            let Action::CopyText(text) = &item.action else {
+                return;
+            };
+            let text = text.trim().to_owned();
+            let failures = crate::launch_failures();
+            let report = move |error| {
+                let _ = failures.unbounded_send(error);
+            };
+            let result = match content {
+                clipboard::Content::Link => sift_macos::open_url(&text, report),
+                clipboard::Content::Email => {
+                    sift_macos::open_url(&format!("mailto:{text}"), report)
+                }
+                clipboard::Content::Path => {
+                    sift_macos::reveal_in_finder(&sift_state::expand_tilde(&text))
+                }
+                _ => return,
+            };
+            match result {
+                Ok(()) => self.hide(cx),
+                Err(error) => self.show_error(error, cx),
+            }
+            return;
+        }
         let Some(path) = self
             .selected()
             .and_then(|item| item.action.path())
@@ -927,7 +1005,9 @@ impl Launcher {
             Action::OpenApplication(path) => sift_macos::open_application(path, report),
             Action::OpenPath(path) => sift_macos::open_path(path, report),
             Action::OpenUrl(url) => sift_macos::open_url(url, report),
-            Action::CopyText(text) => sift_macos::copy_text(text),
+            Action::CopyText(text) => sift_macos::copy_text(text).inspect(|()| {
+                self.own_copy = Some(sift_macos::clipboard_change_count());
+            }),
             Action::Shell(command) => crate::shell::spawn(command),
             Action::WindowCommand(text) => {
                 let command = sift_wm::parse(text).map_err(|e| LaunchError::Command(e.to_string()));
@@ -976,10 +1056,20 @@ impl Launcher {
         self.rebuild_search();
     }
 
+    /// ⌘D: favorites an item, or pins a clipboard entry.
     fn toggle_favorite(&mut self, _: &ToggleFavorite, _: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.selected().cloned() else {
             return;
         };
+        if let Some(id) = clipboard::entry_id(&item) {
+            if self.user.toggle_pin(id).is_some() {
+                self.rebuild_search();
+                cx.emit(UserDataChanged);
+                // Pinned entries move to the top; the selection follows.
+                self.run_query(self.query.clone(), cx);
+            }
+            return;
+        }
         if self.user.toggle_favorite(&item).is_some() {
             self.rebuild_search();
             // Re-rank; the selection stays on the same item.
@@ -987,11 +1077,21 @@ impl Launcher {
         }
     }
 
-    /// Removes the selected item from recents and favorites.
+    /// ⌃X: removes the selected item from recents and favorites, or
+    /// deletes a clipboard entry.
     fn forget_selected(&mut self, _: &ForgetSelected, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.selected().map(|item| item.id.clone()) else {
+        let Some(item) = self.selected() else {
             return;
         };
+        if let Some(clip) = clipboard::entry_id(item) {
+            if self.user.delete_clip(clip) {
+                self.rebuild_search();
+                cx.emit(UserDataChanged);
+                self.run_query(self.query.clone(), cx);
+            }
+            return;
+        }
+        let id = item.id.clone();
         self.user.forget(&id);
         self.rebuild_search();
         self.run_query(self.query.clone(), cx);
@@ -1438,10 +1538,14 @@ impl Launcher {
         // Shares the result's strings rather than copying them every frame.
         let title = SharedString::new(item.title.clone());
         let subtitle = item.subtitle.clone().map(SharedString::new);
-        let favorite = self.user.is_favorite(&item.id);
+        let favorite = self.user.is_favorite(&item.id) || self.user.clipboard().is_pinned(item);
+        let content = self.user.clipboard().content(item);
         let kind = item.kind;
         let item = item.clone();
         let icon = self.icon(&item, cx);
+        // Beside the preview every row is a clipboard entry; the label
+        // would only take room.
+        let show_kind = !self.shows_preview();
 
         div()
             .id(("result", index))
@@ -1466,7 +1570,7 @@ impl Launcher {
                 this.selection.select(index);
                 this.activate_selected(cx);
             }))
-            .child(result_icon(kind, icon))
+            .child(result_icon(kind, icon, content))
             .child(
                 // Title, then the folder or detail in quieter text on the
                 // same line; the detail gives way first when space runs out.
@@ -1514,7 +1618,113 @@ impl Launcher {
                                 .child("★"),
                         )
                     })
-                    .child(kind.label()),
+                    .when(show_kind, |accessory| accessory.child(kind.label())),
+            )
+            .into_any_element()
+    }
+
+    /// The selected clipboard entry in full (up to [`PREVIEW_CHARS`]),
+    /// with where and when it was copied.
+    fn render_clip_preview(&self) -> AnyElement {
+        let theme = self.theme;
+        let clipboard = self.user.clipboard();
+        let selected = self.selected();
+        let Some((entry, content)) = selected.and_then(|item| {
+            let entry = clipboard.entry(clipboard::entry_id(item)?)?;
+            Some((entry, clipboard.content(item)?))
+        }) else {
+            return div().flex_1().into_any_element();
+        };
+        let text = &*entry.text;
+        let chars = text.chars().count();
+        let words = text.split_whitespace().count();
+        let lines = text.lines().count();
+        let mut stats = vec![plural(words, "word"), plural(chars, "character")];
+        if lines > 1 {
+            stats.push(plural(lines, "line"));
+        }
+        let copied = clipboard::copied_when(entry.copied_at, sift_state::now());
+        let origin = match &entry.source {
+            Some(source) => format!("{copied} in {}", source.name),
+            None => copied,
+        };
+        let shown: String = text
+            .chars()
+            .take(PREVIEW_CHARS)
+            .collect::<String>()
+            .replace('\t', "    ");
+        let more = chars.saturating_sub(PREVIEW_CHARS);
+        let body = match content {
+            clipboard::Content::Color(rgba) => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .h(px(96.))
+                        .rounded(px(8.))
+                        .bg(gpui::rgba(rgba))
+                        .border_1()
+                        .border_color(theme.divider),
+                )
+                .child(
+                    div()
+                        .font_family(CODE_FONT)
+                        .text_size(px(13.))
+                        .child(format!(
+                            "{}  ·  rgb({}, {}, {})",
+                            text.trim(),
+                            rgba >> 24,
+                            rgba >> 16 & 0xff,
+                            rgba >> 8 & 0xff
+                        )),
+                ),
+            clipboard::Content::Code => div()
+                .font_family(CODE_FONT)
+                .text_size(px(12.))
+                .line_height(px(17.))
+                .child(shown),
+            _ => div().text_size(px(13.)).line_height(px(19.)).child(shown),
+        };
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+                // A new element per entry, so each starts scrolled to the top.
+                div()
+                    .id(("clip-preview", entry.id as u64))
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .px(px(16.))
+                    .py(px(12.))
+                    .text_color(theme.text)
+                    .child(body)
+                    .when(more > 0, |preview| {
+                        preview.child(
+                            div()
+                                .pt(px(8.))
+                                .text_size(px(12.))
+                                .text_color(theme.muted)
+                                .child(format!("… {} more", plural(more, "character"))),
+                        )
+                    }),
+            )
+            .child(div().h(px(DIVIDER)).bg(theme.divider))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .text_size(px(11.))
+                    .text_color(theme.muted)
+                    .child(div().truncate().child(origin))
+                    .child(div().truncate().child(stats.join(" · "))),
             )
             .into_any_element()
     }
@@ -1602,23 +1812,17 @@ impl Launcher {
         let (dot, status) = self.status_line();
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
-        let favorite_label = selected
-            .filter(|i| {
-                !matches!(
-                    i.kind,
-                    ResultKind::Calculator
-                        | ResultKind::Clipboard
-                        | ResultKind::Window
-                        | ResultKind::Workspace
-                )
-            })
-            .map(|i| {
-                if self.user.is_favorite(&i.id) {
-                    "Unfavorite"
-                } else {
-                    "Favorite"
-                }
-            });
+        let clipping = selected.is_some_and(|i| i.kind == ResultKind::Clipboard);
+        let clip_action = selected
+            .and_then(|i| self.user.clipboard().content(i))
+            .and_then(clipboard::Content::secondary_action);
+        let favorite_label = selected.and_then(|i| match i.kind {
+            ResultKind::Calculator | ResultKind::Window | ResultKind::Workspace => None,
+            ResultKind::Clipboard if self.user.clipboard().is_pinned(i) => Some("Unpin"),
+            ResultKind::Clipboard => Some("Pin"),
+            _ if self.user.is_favorite(&i.id) => Some("Unfavorite"),
+            _ => Some("Favorite"),
+        });
         let open_label = match selected.map(|i| &i.action) {
             Some(Action::Run(_) | Action::Shell(_)) => "Run",
             Some(Action::CopyText(_)) => "Copy",
@@ -1654,8 +1858,14 @@ impl Launcher {
                     row.child(hint("Show in Finder", &["⌘", "↵"], false))
                         .child(hint("Quick Look", &["⌘", "Y"], false))
                 })
+                .when_some(clip_action, |row, label| {
+                    row.child(hint(label, &["⌘", "↵"], false))
+                })
                 .when_some(favorite_label, |row, label| {
                     row.child(hint(label, &["⌘", "D"], false))
+                })
+                .when(clipping, |row| {
+                    row.child(hint("Delete", &["⌃", "X"], false))
                 })
                 .when(!can_reveal && favorite_label.is_none(), |row| {
                     row.child(hint("Close", &["esc"], false))
@@ -1707,19 +1917,41 @@ fn key_cap(label: &'static str, theme: &Theme) -> AnyElement {
 }
 
 /// A result's icon: the file or app icon once rendered, or a coloured tile
-/// with a symbol for results that have no file.
-fn result_icon(kind: ResultKind, icon: Option<Arc<RenderImage>>) -> AnyElement {
+/// with a symbol for results that have no file. A clipboard entry's tile
+/// says what it holds; a colour is shown as itself.
+fn result_icon(
+    kind: ResultKind,
+    icon: Option<Arc<RenderImage>>,
+    content: Option<clipboard::Content>,
+) -> AnyElement {
     if let Some(image) = icon {
         return img(image)
             .flex_none()
             .size(px(ICON_SIZE))
             .into_any_element();
     }
+    if let Some(clipboard::Content::Color(rgba)) = content {
+        return div()
+            .flex_none()
+            .size(px(ICON_SIZE))
+            .rounded(px(7.))
+            .bg(gpui::rgba(rgba))
+            // Keeps white and black swatches visible on either theme.
+            .border_1()
+            .border_color(gpui::rgba(0x8080807f))
+            .into_any_element();
+    }
     let symbol = match kind {
         ResultKind::Command => Some("⌘"),
         ResultKind::Calculator => Some("="),
         ResultKind::Snippet => Some("¶"),
-        ResultKind::Clipboard => None,
+        ResultKind::Clipboard => match content {
+            Some(clipboard::Content::Link) => Some("↗"),
+            Some(clipboard::Content::Email) => Some("@"),
+            Some(clipboard::Content::Path) => Some("/"),
+            Some(clipboard::Content::Code) => Some("{}"),
+            _ => None,
+        },
         ResultKind::Window => Some("▣"),
         ResultKind::Workspace => Some("▦"),
         // Its icon is still being rendered: keep the space.
@@ -1817,6 +2049,15 @@ fn free_textures(images: Vec<Arc<RenderImage>>, cx: &mut App) {
     }
 }
 
+/// "1 word", "12 words", "1,204 characters".
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{} {noun}s", thousands(n))
+    }
+}
+
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -1868,6 +2109,15 @@ impl Render for Launcher {
         let rows: Vec<AnyElement> = (self.scroll_top..end)
             .map(|i| self.render_row(i, cx))
             .collect();
+        let list = (self.message.is_none() && !rows.is_empty()).then(|| {
+            div()
+                .py(px(LIST_PADDING))
+                .flex()
+                .flex_col()
+                .child(self.render_section())
+                .children(rows)
+        });
+        let preview = self.shows_preview().then(|| self.render_clip_preview());
         let message: Option<SharedString> = self
             .message
             .clone()
@@ -1925,15 +2175,20 @@ impl Render for Launcher {
                             .child(self.input.clone()),
                     ),
             )
-            .when(self.message.is_none() && !rows.is_empty(), |root| {
-                root.child(divider()).child(
-                    div()
-                        .py(px(LIST_PADDING))
+            .when_some(list, |root, list| {
+                let body = match preview {
+                    Some(preview) => div()
+                        .h(px(window_height(VISIBLE_ROWS, false)
+                            - HEADER_HEIGHT
+                            - 2. * DIVIDER
+                            - FOOTER_HEIGHT))
                         .flex()
-                        .flex_col()
-                        .child(self.render_section())
-                        .children(rows),
-                )
+                        .child(list.flex_none().w(px(CLIP_LIST_WIDTH)))
+                        .child(div().flex_none().w(px(DIVIDER)).bg(theme.divider))
+                        .child(preview),
+                    None => list,
+                };
+                root.child(divider()).child(body)
             })
             .when(self.visible_rows() == 0, |root| {
                 root.when_some(message, |root, message| {

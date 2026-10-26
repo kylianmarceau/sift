@@ -839,3 +839,38 @@ actions are covered by the native smoke check separately.
 and [native smoke output](docs/benchmarks/manual-window-controls-smoke-2026-10-25.txt)
 are retained. Reproduce with the existing native benchmark command and
 `SIFT_WM_BENCH_AUTOMATIC_TILING=false`.
+
+## 2026-10-26 — Clipboard search: loose matching
+
+**Machine:** Apple M4 (4P+6E cores), 16 GiB, macOS 15.6. **Toolchain:**
+rustc 1.99.1, release profile.
+
+`cargo test --release -p sift-launcher clipboard_search_latency --
+--ignored --nocapture`: `ClipboardProvider::search` with a limit of 40,
+200 runs per query, on histories of 200 (the default size) and 10,000
+(the largest) entries. A quarter of the entries are paragraphs of 120
+bytes to 5 KB, so a typical title contains many letters; the rest are
+links, short phrases and code.
+
+Before, an entry matched only if it contained every word. After, entries
+whose title matches loosely follow ("invpd" finds "invoice paid"), among
+the newest 2,000 entries that did not match by words. Medians:
+
+| entries | query | words only | with loose matches |
+|--------:|-------|-----------:|-------------------:|
+| 200 | `clip` | 36 µs | 34 µs |
+| 200 | `clip invoice` | 46 µs | 45 µs |
+| 200 | `clip inv 42` | 13 µs | 25 µs |
+| 200 | `clip invpd` | 10 µs | 211 µs |
+| 200 | `clip zzqx` (no match) | 10 µs | 23 µs |
+| 10,000 | `clip` | 35 µs | 35 µs |
+| 10,000 | `clip invoice` | 46 µs | 45 µs |
+| 10,000 | `clip inv 42` | 225 µs | 233 µs |
+| 10,000 | `clip invpd` | 480 µs | 2.29 ms (p95 2.46 ms) |
+| 10,000 | `clip zzqx` (no match) | 491 µs | 613 µs |
+
+Queries with enough word matches stop after 40 and cost the same as
+before. Loose matching costs about 4 µs per long entry whose title
+contains the query's letters in order. Without the 2,000-entry bound,
+`clip invpd` on 10,000 entries took 9.6 ms (p95 16 ms). Searches run on
+the background executor, so typing never waits for them.
