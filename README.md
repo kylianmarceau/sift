@@ -162,7 +162,9 @@ config), then type `clip` (or `clip invoice`) to search what you copied.
 **⌘D** pins the selected entry (★): pinned entries are listed first and
 kept until you unpin them. **Ctrl-X** deletes the selected entry. Each
 entry shows the app it was copied in; `clip from:slack` lists only what
-you copied in Slack. Settings also chooses how many other entries
+you copied in Slack. To never keep copies from some apps, list them by
+name or bundle id under `[clipboard]`, as in
+`ignore_apps = ["Terminal", "com.1password.1password"]`. Settings also chooses how many other entries
 to keep. Text that password managers mark as concealed is never kept.
 *Clear History* in Settings, or the *Clear Clipboard History* command,
 deletes everything kept except pinned entries.

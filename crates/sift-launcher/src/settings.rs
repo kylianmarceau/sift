@@ -597,7 +597,8 @@ impl Settings {
 
         let detail = if on {
             "Type clip in the panel to search text you copied, or clip and a word. \
-             Text that password managers mark as private is never kept."
+             Text that password managers mark as private is never kept, nor copies \
+             from apps listed in ignore_apps in config.toml."
         } else {
             "Keep a history of the text you copy, on this Mac only. Off by default, \
              because copied text can be private."

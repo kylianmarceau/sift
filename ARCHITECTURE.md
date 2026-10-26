@@ -626,6 +626,10 @@ Opt-in (`[clipboard] enabled = true`).
   copy Sift made (Enter on an entry) is recognised by the change count
   right after writing, and keeps the entry's old source. `from:` in a
   `clip` search matches the app name.
+- **Ignored apps.** `[clipboard] ignore_apps` (empty by default) names
+  apps, by name or bundle id, whose copies are dropped before anything
+  is written. It relies on the same frontmost-app guess, so it is a
+  convenience on top of the concealed-type check, not a guarantee.
 - **Searching.** Entries are searched only after a `clip` prefix, never
   mixed into ordinary results, and Enter copies an entry back.
 - **No auto-paste.** Automatic pasting would need synthetic key events,

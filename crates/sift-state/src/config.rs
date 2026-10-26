@@ -27,6 +27,9 @@ pub const TEMPLATE: &str = r#"# Sift configuration. Changes apply the next time 
 enabled = false
 # How many entries to keep.
 max_items = 200
+# Apps whose copies are never kept, by name or bundle id, for example
+# ["Terminal", "com.1password.1password"].
+ignore_apps = []
 
 [updates]
 # Once a day at most, ask GitHub whether a newer Sift has been released,
@@ -85,6 +88,20 @@ pub struct Config {
 pub struct ClipboardConfig {
     pub enabled: bool,
     pub max_items: usize,
+    /// App names or bundle ids whose copies are not kept.
+    pub ignore_apps: Vec<String>,
+}
+
+impl ClipboardConfig {
+    /// Whether copies made in `app` are not to be kept. Names and bundle
+    /// ids match whole and ignoring case.
+    pub fn ignores(&self, name: &str, bundle_id: Option<&str>) -> bool {
+        self.ignore_apps.iter().any(|ignored| {
+            let ignored = ignored.trim();
+            ignored.eq_ignore_ascii_case(name)
+                || bundle_id.is_some_and(|id| ignored.eq_ignore_ascii_case(id))
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -105,6 +122,7 @@ impl Default for ClipboardConfig {
         Self {
             enabled: false,
             max_items: 200,
+            ignore_apps: Vec::new(),
         }
     }
 }
@@ -441,6 +459,20 @@ mod tests {
             config.commands[0].action(),
             Ok(CommandAction::Url("https://example.com".into()))
         );
+    }
+
+    #[test]
+    fn ignored_apps_match_by_name_or_bundle_id() {
+        let config = Config::parse(
+            "[clipboard]\nignore_apps = [\"Terminal\", \"com.1password.1password\"]\n",
+        )
+        .config
+        .clipboard;
+        assert!(config.ignores("terminal", Some("com.apple.Terminal")));
+        assert!(config.ignores("1Password", Some("com.1Password.1password")));
+        assert!(!config.ignores("Terminal Pro", None));
+        assert!(!config.ignores("Safari", Some("com.apple.Safari")));
+        assert!(!ClipboardConfig::default().ignores("Terminal", None));
     }
 
     #[test]

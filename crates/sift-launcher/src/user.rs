@@ -167,6 +167,15 @@ impl UserData {
         let (Some(db), true) = (&self.db, self.config.clipboard.enabled) else {
             return false;
         };
+        if let Some(source) = source
+            && self
+                .config
+                .clipboard
+                .ignores(&source.name, source.bundle_id.as_deref())
+        {
+            tracing::debug!(app = %source.name, "copied in an ignored app; not kept");
+            return false;
+        }
         let max = self.config.clipboard.max_items;
         match db.clipboard_add(text, source, sift_state::now(), max) {
             Ok(true) => {
@@ -673,6 +682,25 @@ mod tests {
         assert_eq!(user.clipboard().len(), 2);
         user.clear_clipboard();
         assert_eq!(user.clipboard().len(), 0);
+    }
+
+    #[test]
+    fn copies_in_ignored_apps_are_not_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_config(
+            dir.path(),
+            "[clipboard]\nenabled = true\nignore_apps = [\"Terminal\"]\n",
+        );
+        let mut user = UserData::open(dir.path(), dir.path().join("config.toml"));
+        let app = |name: &str| ClipSource {
+            name: name.into(),
+            bundle_id: None,
+        };
+        assert!(!user.record_clipboard("token", Some(&app("Terminal"))));
+        assert!(user.record_clipboard("hello", Some(&app("Notes"))));
+        // Copies with no known app are kept.
+        assert!(user.record_clipboard("unknown", None));
+        assert_eq!(user.clipboard().len(), 2);
     }
 
     #[test]
