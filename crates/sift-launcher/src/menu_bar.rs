@@ -211,6 +211,10 @@ impl State {
             self.error = None;
             return Ok(());
         }
+        if let Action::Login(on) = &action {
+            self.login = sift_macos::login_item::set(*on)?;
+            return Ok(());
+        }
         if let Action::WindowCommand(command, identity) = &action {
             let runtime = self
                 .launcher
@@ -327,9 +331,7 @@ impl State {
                         launcher.retry_window_management(cx);
                     }
                     Action::Permission => launcher.request_window_permission(cx),
-                    Action::Login(on) => {
-                        sift_macos::login_item::set(on)?;
-                    }
+                    Action::Login(_) => unreachable!("handled with the menu state"),
                     Action::OpenLogs => {
                         let path =
                             crate::logging::log_dir().ok_or("Logs directory is unavailable")?;
