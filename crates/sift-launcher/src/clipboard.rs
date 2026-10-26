@@ -332,14 +332,19 @@ fn title(text: &str) -> String {
     out
 }
 
-fn subtitle(entry: &ClipEntry, now: i64) -> String {
-    let age = (now - entry.copied_at).max(0);
-    let when = match age {
+/// "Copied 2 min ago".
+pub fn copied_when(copied_at: i64, now: i64) -> String {
+    let age = (now - copied_at).max(0);
+    match age {
         0..60 => "Copied just now".to_owned(),
         60..3600 => format!("Copied {} min ago", age / 60),
         3600..86_400 => format!("Copied {} h ago", age / 3600),
         _ => format!("Copied {} days ago", age / 86_400),
-    };
+    }
+}
+
+fn subtitle(entry: &ClipEntry, now: i64) -> String {
+    let when = copied_when(entry.copied_at, now);
     let lines = entry.text.lines().count();
     let chars = entry.text.chars().count();
     let size = if lines > 1 {

@@ -62,6 +62,12 @@ const ICON_SIZE: f32 = 28.;
 const ICON_GAP: f32 = 12.;
 /// Rows visible at once; more results scroll with the selection.
 pub const VISIBLE_ROWS: usize = 8;
+/// Width of the result list beside the clipboard preview.
+const CLIP_LIST_WIDTH: f32 = 300.;
+/// Characters of an entry shown in the preview; the rest is counted.
+const PREVIEW_CHARS: usize = 3_000;
+/// Fixed-width font for code in the preview.
+const CODE_FONT: &str = "Menlo";
 /// Results fetched per query.
 const RESULT_LIMIT: usize = 40;
 const ICON_PX: u32 = 64;
@@ -756,7 +762,19 @@ impl Launcher {
     }
 
     fn height(&self) -> f32 {
-        window_height(self.visible_rows(), self.shows_message())
+        // The preview needs room even for one entry.
+        let rows = if self.shows_preview() {
+            VISIBLE_ROWS
+        } else {
+            self.visible_rows()
+        };
+        window_height(rows, self.shows_message())
+    }
+
+    /// A clip search with results: the list shares the panel with a
+    /// preview of the selected entry.
+    fn shows_preview(&self) -> bool {
+        self.message.is_none() && !self.results.is_empty() && self.in_clipboard_scope(&self.query)
     }
 
     /// What to say when a query finds nothing.
@@ -1506,6 +1524,9 @@ impl Launcher {
         let kind = item.kind;
         let item = item.clone();
         let icon = self.icon(&item, cx);
+        // Beside the preview every row is a clipboard entry; the label
+        // would only take room.
+        let show_kind = !self.shows_preview();
 
         div()
             .id(("result", index))
@@ -1578,7 +1599,113 @@ impl Launcher {
                                 .child("★"),
                         )
                     })
-                    .child(kind.label()),
+                    .when(show_kind, |accessory| accessory.child(kind.label())),
+            )
+            .into_any_element()
+    }
+
+    /// The selected clipboard entry in full (up to [`PREVIEW_CHARS`]),
+    /// with where and when it was copied.
+    fn render_clip_preview(&self) -> AnyElement {
+        let theme = self.theme;
+        let clipboard = self.user.clipboard();
+        let selected = self.selected();
+        let Some((entry, content)) = selected.and_then(|item| {
+            let entry = clipboard.entry(clipboard::entry_id(item)?)?;
+            Some((entry, clipboard.content(item)?))
+        }) else {
+            return div().flex_1().into_any_element();
+        };
+        let text = &*entry.text;
+        let chars = text.chars().count();
+        let words = text.split_whitespace().count();
+        let lines = text.lines().count();
+        let mut stats = vec![plural(words, "word"), plural(chars, "character")];
+        if lines > 1 {
+            stats.push(plural(lines, "line"));
+        }
+        let copied = clipboard::copied_when(entry.copied_at, sift_state::now());
+        let origin = match &entry.source {
+            Some(source) => format!("{copied} in {}", source.name),
+            None => copied,
+        };
+        let shown: String = text
+            .chars()
+            .take(PREVIEW_CHARS)
+            .collect::<String>()
+            .replace('\t', "    ");
+        let more = chars.saturating_sub(PREVIEW_CHARS);
+        let body = match content {
+            clipboard::Content::Color(rgba) => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .h(px(96.))
+                        .rounded(px(8.))
+                        .bg(gpui::rgba(rgba))
+                        .border_1()
+                        .border_color(theme.divider),
+                )
+                .child(
+                    div()
+                        .font_family(CODE_FONT)
+                        .text_size(px(13.))
+                        .child(format!(
+                            "{}  ·  rgb({}, {}, {})",
+                            text.trim(),
+                            rgba >> 24,
+                            rgba >> 16 & 0xff,
+                            rgba >> 8 & 0xff
+                        )),
+                ),
+            clipboard::Content::Code => div()
+                .font_family(CODE_FONT)
+                .text_size(px(12.))
+                .line_height(px(17.))
+                .child(shown),
+            _ => div().text_size(px(13.)).line_height(px(19.)).child(shown),
+        };
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+                // A new element per entry, so each starts scrolled to the top.
+                div()
+                    .id(("clip-preview", entry.id as u64))
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .px(px(16.))
+                    .py(px(12.))
+                    .text_color(theme.text)
+                    .child(body)
+                    .when(more > 0, |preview| {
+                        preview.child(
+                            div()
+                                .pt(px(8.))
+                                .text_size(px(12.))
+                                .text_color(theme.muted)
+                                .child(format!("… {} more", plural(more, "character"))),
+                        )
+                    }),
+            )
+            .child(div().h(px(DIVIDER)).bg(theme.divider))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .text_size(px(11.))
+                    .text_color(theme.muted)
+                    .child(div().truncate().child(origin))
+                    .child(div().truncate().child(stats.join(" · "))),
             )
             .into_any_element()
     }
@@ -1903,6 +2030,15 @@ fn free_textures(images: Vec<Arc<RenderImage>>, cx: &mut App) {
     }
 }
 
+/// "1 word", "12 words", "1,204 characters".
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{} {noun}s", thousands(n))
+    }
+}
+
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -1954,6 +2090,15 @@ impl Render for Launcher {
         let rows: Vec<AnyElement> = (self.scroll_top..end)
             .map(|i| self.render_row(i, cx))
             .collect();
+        let list = (self.message.is_none() && !rows.is_empty()).then(|| {
+            div()
+                .py(px(LIST_PADDING))
+                .flex()
+                .flex_col()
+                .child(self.render_section())
+                .children(rows)
+        });
+        let preview = self.shows_preview().then(|| self.render_clip_preview());
         let message: Option<SharedString> = self
             .message
             .clone()
@@ -2011,15 +2156,20 @@ impl Render for Launcher {
                             .child(self.input.clone()),
                     ),
             )
-            .when(self.message.is_none() && !rows.is_empty(), |root| {
-                root.child(divider()).child(
-                    div()
-                        .py(px(LIST_PADDING))
+            .when_some(list, |root, list| {
+                let body = match preview {
+                    Some(preview) => div()
+                        .h(px(window_height(VISIBLE_ROWS, false)
+                            - HEADER_HEIGHT
+                            - 2. * DIVIDER
+                            - FOOTER_HEIGHT))
                         .flex()
-                        .flex_col()
-                        .child(self.render_section())
-                        .children(rows),
-                )
+                        .child(list.flex_none().w(px(CLIP_LIST_WIDTH)))
+                        .child(div().flex_none().w(px(DIVIDER)).bg(theme.divider))
+                        .child(preview),
+                    None => list,
+                };
+                root.child(divider()).child(body)
             })
             .when(self.visible_rows() == 0, |root| {
                 root.when_some(message, |root, message| {

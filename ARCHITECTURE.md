@@ -633,6 +633,14 @@ Opt-in (`[clipboard] enabled = true`).
   is drawn as a swatch) and what ⌘↵ does: open the link, open a
   `mailto:` link, or reveal the path in Finder. Nothing is opened or run
   without that key press, and paths are only revealed, never opened.
+- **Preview.** In a `clip` search with results, the list narrows to
+  300 pt and the selected entry is shown beside it: the text wrapped
+  (code in Menlo), a colour as a swatch with its RGB values, and the
+  source app, age and word, character and line counts below. The panel
+  then always has the height of 8 rows, so one entry still gets room.
+  Only the first 3,000 characters are laid out (the rest is counted),
+  which bounds text shaping for a 64 KiB entry. Each entry gets its own
+  scroll element, so the preview starts at the top.
 - **Ignored apps.** `[clipboard] ignore_apps` (empty by default) names
   apps, by name or bundle id, whose copies are dropped before anything
   is written. It relies on the same frontmost-app guess, so it is a
