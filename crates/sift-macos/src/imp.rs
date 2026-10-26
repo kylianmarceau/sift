@@ -346,6 +346,11 @@ pub fn copy_text(text: &str) -> Result<(), LaunchError> {
     }
 }
 
+/// Empties the clipboard.
+pub fn clear_clipboard() {
+    NSPasteboard::generalPasteboard().clearContents();
+}
+
 fn write_text(pasteboard: &NSPasteboard, text: &str) -> bool {
     pasteboard.clearContents();
     // SAFETY: NSPasteboardTypeString is an immutable framework constant.

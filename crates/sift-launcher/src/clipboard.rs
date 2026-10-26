@@ -236,6 +236,17 @@ impl ClipboardProvider {
         self.by_id.get(&id).map(|&i| &self.entries[i].entry)
     }
 
+    /// The unpinned entries, newest first: the stack that the clipboard
+    /// holds the top of.
+    pub fn unpinned(&self) -> impl Iterator<Item = &ClipEntry> {
+        self.entries.iter().map(|e| &e.entry).filter(|e| !e.pinned)
+    }
+
+    /// The newest unpinned entry.
+    pub fn top(&self) -> Option<&ClipEntry> {
+        self.unpinned().next()
+    }
+
     /// What the entry `item` stands for looks like.
     pub fn content(&self, item: &ResultItem) -> Option<Content> {
         let id = entry_id(item)?;
@@ -499,6 +510,26 @@ mod tests {
             ..results[0].clone()
         };
         assert_eq!(entry_id(&snippet), None);
+    }
+
+    #[test]
+    fn the_stack_is_the_unpinned_entries_newest_first() {
+        let mut pinned = entry(7, "keep me", 5);
+        pinned.pinned = true;
+        let provider = ClipboardProvider::new(vec![pinned, entry(3, "new", 4), entry(2, "old", 1)]);
+        assert_eq!(provider.top().map(|e| e.id), Some(3));
+        let ids: Vec<_> = provider.unpinned().map(|e| e.id).collect();
+        assert_eq!(ids, [3, 2]);
+        let only_pins = ClipboardProvider::new(
+            vec![entry(7, "keep me", 5)]
+                .into_iter()
+                .map(|mut e| {
+                    e.pinned = true;
+                    e
+                })
+                .collect(),
+        );
+        assert!(only_pins.top().is_none());
     }
 
     /// Search latency on a full history of mixed short and long entries.

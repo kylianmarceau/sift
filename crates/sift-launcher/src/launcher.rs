@@ -126,6 +126,9 @@ pub struct Launcher {
     /// The clipboard's change count after Sift last copied to it, so that
     /// copying an entry back is not credited to the app in front.
     own_copy: Option<isize>,
+    /// The clipboard's change count after Sift put the newest entry back
+    /// on it, so that this is not recorded as a new copy.
+    restored: Option<isize>,
     apps: Option<Arc<AppProvider>>,
     files: Arc<FileProvider>,
     file_index: Arc<FileIndex>,
@@ -312,6 +315,7 @@ impl Launcher {
             window_error: None,
             clipboard_task: None,
             own_copy: None,
+            restored: None,
             apps: None,
             files,
             file_index,
@@ -546,6 +550,9 @@ impl Launcher {
     }
 
     fn clipboard_changed(&mut self, text: sift_macos::ClipboardText, cx: &mut Context<Self>) {
+        if self.restored == Some(sift_macos::clipboard_change_count()) {
+            return;
+        }
         match text {
             sift_macos::ClipboardText::Text(text) => {
                 let source = if self.own_copy == Some(sift_macos::clipboard_change_count()) {
@@ -1084,7 +1091,9 @@ impl Launcher {
             return;
         };
         if let Some(clip) = clipboard::entry_id(item) {
+            let text = self.user.clipboard().entry(clip).map(|e| e.text.clone());
             if self.user.delete_clip(clip) {
+                self.restore_top(text.as_slice());
                 self.rebuild_search();
                 cx.emit(UserDataChanged);
                 self.run_query(self.query.clone(), cx);
@@ -1125,9 +1134,38 @@ impl Launcher {
     }
 
     pub fn clear_clipboard(&mut self, cx: &mut Context<Self>) {
+        let removed: Vec<_> = self
+            .user
+            .clipboard()
+            .unpinned()
+            .map(|e| e.text.clone())
+            .collect();
         self.user.clear_clipboard();
+        self.restore_top(&removed);
         self.rebuild_search();
         cx.emit(UserDataChanged);
+    }
+
+    /// After entries were deleted: if the clipboard still holds one of
+    /// them, puts the newest remaining unpinned entry there instead, or
+    /// empties it, so that it always holds the top of the stack.
+    fn restore_top(&mut self, removed: &[Arc<str>]) {
+        let sift_macos::ClipboardText::Text(text) = sift_macos::clipboard_text() else {
+            return;
+        };
+        if !removed.iter().any(|r| **r == *text) {
+            return;
+        }
+        match self.user.clipboard().top() {
+            Some(top) => {
+                if let Err(error) = sift_macos::copy_text(&top.text) {
+                    tracing::warn!(%error, "cannot put the newest entry on the clipboard");
+                    return;
+                }
+            }
+            None => sift_macos::clear_clipboard(),
+        }
+        self.restored = Some(sift_macos::clipboard_change_count());
     }
 
     fn edit_config(&mut self, cx: &mut Context<Self>) {

@@ -618,6 +618,12 @@ Opt-in (`[clipboard] enabled = true`).
   Sift refuses a newer schema and the copy is the way back.
 - **Deleting one entry.** ⌃X, which removes other results from recents,
   deletes the selected entry, pinned or not.
+- **A stack.** The unpinned entries, newest first, are a stack whose top
+  is on the clipboard: copying pushes. When ⌃X or *Clear History*
+  deletes the text the clipboard holds, Sift writes the newest remaining
+  unpinned entry there, or empties it when none is left. That write is
+  recognised by its change count and not recorded as a copy, so the entry
+  keeps its age and source.
 - **Source app.** macOS does not say which app wrote to the pasteboard,
   so an entry records the frontmost app when the change is noticed
   (`sift_macos::frontmost_app`; name and bundle id, schema 3). That is

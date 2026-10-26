@@ -5,8 +5,9 @@
 //! - [`open_application`]: launch or activate an app with `NSWorkspace`.
 //! - [`open_path`] / [`open_url`] / [`reveal_in_finder`]: open a file or
 //!   URL with its default application, or show a file in Finder.
-//! - [`copy_text`] / [`clipboard_text`] / [`clipboard_change_count`]: write
-//!   and read plain text on the clipboard, skipping content marked private.
+//! - [`copy_text`] / [`clipboard_text`] / [`clipboard_change_count`] /
+//!   [`clear_clipboard`]: write, read and empty plain text on the
+//!   clipboard, skipping content marked private.
 //!   [`frontmost_app`] names the app that most likely copied it.
 //! - [`choose_folder`]: the standard folder picker, non-modal.
 //! - [`use_accessory_activation_policy`] / [`activate_app`]: run without a
@@ -82,7 +83,7 @@ pub use quicklook::QuickLook;
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    ClipboardText, ClipboardWatcher, FrontApp, Panel, activate_app, choose_folder,
+    ClipboardText, ClipboardWatcher, FrontApp, Panel, activate_app, choose_folder, clear_clipboard,
     clipboard_change_count, clipboard_text, copy_text, format_local_now, frontmost_app, icon_png,
     open_application, open_path, open_text_file, open_url, reveal_in_finder,
     use_accessory_activation_policy,
