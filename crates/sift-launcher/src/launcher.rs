@@ -891,7 +891,36 @@ impl Launcher {
         }
     }
 
+    /// ⌘↵: shows the selected file in Finder, or opens what a clipboard
+    /// entry names (a link, an address, a path).
     fn reveal(&mut self, _: &RevealSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = self.selected()
+            && let Some(content) = self.user.clipboard().content(item)
+        {
+            let Action::CopyText(text) = &item.action else {
+                return;
+            };
+            let text = text.trim().to_owned();
+            let failures = crate::launch_failures();
+            let report = move |error| {
+                let _ = failures.unbounded_send(error);
+            };
+            let result = match content {
+                clipboard::Content::Link => sift_macos::open_url(&text, report),
+                clipboard::Content::Email => {
+                    sift_macos::open_url(&format!("mailto:{text}"), report)
+                }
+                clipboard::Content::Path => {
+                    sift_macos::reveal_in_finder(&sift_state::expand_tilde(&text))
+                }
+                _ => return,
+            };
+            match result {
+                Ok(()) => self.hide(cx),
+                Err(error) => self.show_error(error, cx),
+            }
+            return;
+        }
         let Some(path) = self
             .selected()
             .and_then(|item| item.action.path())
@@ -1473,6 +1502,7 @@ impl Launcher {
         let title = SharedString::new(item.title.clone());
         let subtitle = item.subtitle.clone().map(SharedString::new);
         let favorite = self.user.is_favorite(&item.id) || self.user.clipboard().is_pinned(item);
+        let content = self.user.clipboard().content(item);
         let kind = item.kind;
         let item = item.clone();
         let icon = self.icon(&item, cx);
@@ -1500,7 +1530,7 @@ impl Launcher {
                 this.selection.select(index);
                 this.activate_selected(cx);
             }))
-            .child(result_icon(kind, icon))
+            .child(result_icon(kind, icon, content))
             .child(
                 // Title, then the folder or detail in quieter text on the
                 // same line; the detail gives way first when space runs out.
@@ -1637,6 +1667,9 @@ impl Launcher {
         let selected = self.selected();
         let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
         let clipping = selected.is_some_and(|i| i.kind == ResultKind::Clipboard);
+        let clip_action = selected
+            .and_then(|i| self.user.clipboard().content(i))
+            .and_then(clipboard::Content::secondary_action);
         let favorite_label = selected.and_then(|i| match i.kind {
             ResultKind::Calculator | ResultKind::Window | ResultKind::Workspace => None,
             ResultKind::Clipboard if self.user.clipboard().is_pinned(i) => Some("Unpin"),
@@ -1678,6 +1711,9 @@ impl Launcher {
                 .when(can_reveal, |row| {
                     row.child(hint("Show in Finder", &["⌘", "↵"], false))
                         .child(hint("Quick Look", &["⌘", "Y"], false))
+                })
+                .when_some(clip_action, |row, label| {
+                    row.child(hint(label, &["⌘", "↵"], false))
                 })
                 .when_some(favorite_label, |row, label| {
                     row.child(hint(label, &["⌘", "D"], false))
@@ -1735,19 +1771,41 @@ fn key_cap(label: &'static str, theme: &Theme) -> AnyElement {
 }
 
 /// A result's icon: the file or app icon once rendered, or a coloured tile
-/// with a symbol for results that have no file.
-fn result_icon(kind: ResultKind, icon: Option<Arc<RenderImage>>) -> AnyElement {
+/// with a symbol for results that have no file. A clipboard entry's tile
+/// says what it holds; a colour is shown as itself.
+fn result_icon(
+    kind: ResultKind,
+    icon: Option<Arc<RenderImage>>,
+    content: Option<clipboard::Content>,
+) -> AnyElement {
     if let Some(image) = icon {
         return img(image)
             .flex_none()
             .size(px(ICON_SIZE))
             .into_any_element();
     }
+    if let Some(clipboard::Content::Color(rgba)) = content {
+        return div()
+            .flex_none()
+            .size(px(ICON_SIZE))
+            .rounded(px(7.))
+            .bg(gpui::rgba(rgba))
+            // Keeps white and black swatches visible on either theme.
+            .border_1()
+            .border_color(gpui::rgba(0x8080807f))
+            .into_any_element();
+    }
     let symbol = match kind {
         ResultKind::Command => Some("⌘"),
         ResultKind::Calculator => Some("="),
         ResultKind::Snippet => Some("¶"),
-        ResultKind::Clipboard => None,
+        ResultKind::Clipboard => match content {
+            Some(clipboard::Content::Link) => Some("↗"),
+            Some(clipboard::Content::Email) => Some("@"),
+            Some(clipboard::Content::Path) => Some("/"),
+            Some(clipboard::Content::Code) => Some("{}"),
+            _ => None,
+        },
         ResultKind::Window => Some("▣"),
         ResultKind::Workspace => Some("▦"),
         // Its icon is still being rendered: keep the space.

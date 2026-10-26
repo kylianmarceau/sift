@@ -58,9 +58,144 @@ pub fn scope(query: &str) -> Option<&str> {
     }
 }
 
+/// What an entry's text looks like, for its icon, its preview and what
+/// ⌘↵ does with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content {
+    /// An http or https URL: ⌘↵ opens it.
+    Link,
+    /// An email address: ⌘↵ starts a message to it.
+    Email,
+    /// A hex colour (`#0a84ff`), as 0xRRGGBBAA.
+    Color(u32),
+    /// An absolute or home-relative path: ⌘↵ shows it in Finder.
+    Path,
+    /// Several lines that look like source code: shown in a fixed-width
+    /// font.
+    Code,
+    Text,
+}
+
+impl Content {
+    /// What ⌘↵ does with an entry like this, if anything.
+    pub fn secondary_action(self) -> Option<&'static str> {
+        match self {
+            Self::Link => Some("Open Link"),
+            Self::Email => Some("Write Email"),
+            Self::Path => Some("Show in Finder"),
+            Self::Color(_) | Self::Code | Self::Text => None,
+        }
+    }
+}
+
+/// Bytes of an entry looked at to recognise code.
+const DETECT_BYTES: usize = 4096;
+
+impl Content {
+    /// Recognises `text`. Cheap and bounded: it never touches the file
+    /// system, and looks at no more than [`DETECT_BYTES`].
+    pub fn of(text: &str) -> Self {
+        let t = text.trim();
+        if !t.contains('\n') {
+            if !t.contains(char::is_whitespace) {
+                if is_link(t) {
+                    return Self::Link;
+                }
+                if is_email(t) {
+                    return Self::Email;
+                }
+                if let Some(rgba) = parse_color(t) {
+                    return Self::Color(rgba);
+                }
+            }
+            if is_path(t) {
+                return Self::Path;
+            }
+            return Self::Text;
+        }
+        if looks_like_code(t) {
+            Self::Code
+        } else {
+            Self::Text
+        }
+    }
+}
+
+fn is_link(t: &str) -> bool {
+    ["https://", "http://"].iter().any(|scheme| {
+        t.get(..scheme.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+            && t.len() > scheme.len()
+    })
+}
+
+fn is_email(t: &str) -> bool {
+    let Some((local, domain)) = t.split_once('@') else {
+        return false;
+    };
+    let allowed = |c: char| c.is_ascii_alphanumeric() || "._%+-".contains(c);
+    !local.is_empty()
+        && local.chars().all(allowed)
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa` as 0xRRGGBBAA.
+fn parse_color(t: &str) -> Option<u32> {
+    let hex = t.strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let full: String = match hex.len() {
+        3 | 4 => hex.chars().flat_map(|c| [c, c]).collect(),
+        6 | 8 => hex.to_string(),
+        _ => return None,
+    };
+    let value = u32::from_str_radix(&full, 16).ok()?;
+    Some(if full.len() == 6 {
+        value << 8 | 0xff
+    } else {
+        value
+    })
+}
+
+fn is_path(t: &str) -> bool {
+    let rest = t.strip_prefix("~/").or_else(|| t.strip_prefix('/'));
+    // Not `//` or `/*` comments, and something after the slash.
+    rest.is_some_and(|rest| !rest.is_empty() && !rest.starts_with(['/', '*', ' ']))
+        && t.len() < 1024
+}
+
+/// Most lines end like statements or blocks, or are indented.
+fn looks_like_code(t: &str) -> bool {
+    let head = match t.char_indices().nth(DETECT_BYTES) {
+        Some((end, _)) => &t[..end],
+        None => t,
+    };
+    let lines: Vec<&str> = head.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 2 {
+        return false;
+    }
+    let code_like = lines
+        .iter()
+        .filter(|line| {
+            let end = line.trim_end();
+            end.ends_with(['{', '}', ';', '(', ')', ',', '[', ']'])
+                || line.starts_with(['\t'])
+                || line.starts_with("  ")
+        })
+        .count();
+    code_like * 2 >= lines.len()
+}
+
 /// An entry with what searching it needs.
 struct Indexed {
     entry: ClipEntry,
+    content: Content,
     /// The whole text, lowercased, for word matches.
     lower: String,
     /// The title, folded as names are, for loose matches.
@@ -82,6 +217,7 @@ impl ClipboardProvider {
             entries: entries
                 .into_iter()
                 .map(|entry| Indexed {
+                    content: Content::of(&entry.text),
                     lower: entry.text.to_lowercase(),
                     folded_title: fold(title(&entry.text).as_bytes()),
                     entry,
@@ -98,6 +234,12 @@ impl ClipboardProvider {
     /// The entry with this id, if it is in the history.
     pub fn entry(&self, id: i64) -> Option<&ClipEntry> {
         self.by_id.get(&id).map(|&i| &self.entries[i].entry)
+    }
+
+    /// What the entry `item` stands for looks like.
+    pub fn content(&self, item: &ResultItem) -> Option<Content> {
+        let id = entry_id(item)?;
+        self.by_id.get(&id).map(|&i| self.entries[i].content)
     }
 
     /// Whether `item` is a pinned entry.
@@ -305,6 +447,37 @@ mod tests {
         assert_eq!(titles, ["the invpd ticket", "invoice paid in full"]);
         let results = provider.search("clip invpd", 10);
         assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn recognises_links_addresses_colours_paths_and_code() {
+        assert_eq!(Content::of(" https://example.com/a?b=1 "), Content::Link);
+        assert_eq!(Content::of("HTTP://example.com"), Content::Link);
+        assert_eq!(Content::of("https://"), Content::Text);
+        assert_eq!(Content::of("see https://example.com"), Content::Text);
+        assert_eq!(Content::of("me+sift@example.co.uk"), Content::Email);
+        assert_eq!(Content::of("@handle"), Content::Text);
+        assert_eq!(Content::of("a@b"), Content::Text);
+        assert_eq!(Content::of("#0a84ff"), Content::Color(0x0a84ffff));
+        assert_eq!(Content::of("#fff"), Content::Color(0xffffffff));
+        assert_eq!(Content::of("#11223380"), Content::Color(0x11223380));
+        assert_eq!(Content::of("#12345"), Content::Text);
+        assert_eq!(Content::of("#hashtag"), Content::Text);
+        assert_eq!(Content::of("~/Documents/report final.pdf"), Content::Path);
+        assert_eq!(Content::of("/usr/local/bin"), Content::Path);
+        assert_eq!(Content::of("// a comment"), Content::Text);
+        assert_eq!(Content::of("/"), Content::Text);
+        assert_eq!(
+            Content::of("fn main() {\n    println!(\"hi\");\n}"),
+            Content::Code
+        );
+        assert_eq!(
+            Content::of("Dear Sam,\nThanks for the invoice.\nBest, K"),
+            Content::Text
+        );
+        let provider = ClipboardProvider::new(vec![entry(1, "#fff", 0)]);
+        let result = &provider.search("clip", 1)[0];
+        assert_eq!(provider.content(result), Some(Content::Color(0xffffffff)));
     }
 
     #[test]

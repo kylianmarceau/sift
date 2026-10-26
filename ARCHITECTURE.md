@@ -626,6 +626,13 @@ Opt-in (`[clipboard] enabled = true`).
   copy Sift made (Enter on an entry) is recognised by the change count
   right after writing, and keeps the entry's old source. `from:` in a
   `clip` search matches the app name.
+- **Content types.** `clipboard::Content::of` sorts an entry into link
+  (http/https), email address, hex colour, path (`/…` or `~/…`), code or
+  plain text, once when the history loads. It never touches the file
+  system and reads at most 4 KB. The type picks the row's tile (a colour
+  is drawn as a swatch) and what ⌘↵ does: open the link, open a
+  `mailto:` link, or reveal the path in Finder. Nothing is opened or run
+  without that key press, and paths are only revealed, never opened.
 - **Ignored apps.** `[clipboard] ignore_apps` (empty by default) names
   apps, by name or bundle id, whose copies are dropped before anything
   is written. It relies on the same frontmost-app guess, so it is a
