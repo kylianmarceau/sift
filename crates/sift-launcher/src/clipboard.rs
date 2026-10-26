@@ -1,15 +1,27 @@
 //! Clipboard history results. Entries are searched only when the query
 //! starts with `clip` (`clip`, `clip invoice`), never mixed into ordinary
 //! results: copied text can be private.
+//!
+//! Entries that contain every word come first, in history order. Then
+//! come entries whose beginning (the title shown) matches loosely, as
+//! file names do ("invpd" finds "invoice paid"), best match first. Loose
+//! matching looks only at the beginning, since anywhere in a long text
+//! almost any letters can be found in order, and only at the newest
+//! [`LOOSE_LIMIT`] entries, to bound its cost.
 
 use std::collections::HashMap;
 
 use sift_core::{Action, Provider, ResultItem, ResultKind, top_score};
+use sift_search::{NameMatcher, fold};
 use sift_state::ClipEntry;
 
 /// Characters of an entry shown as its title.
 const TITLE_CHARS: usize = 100;
 const ID_PREFIX: &str = "clip:";
+/// Entries that are matched loosely, newest first. Loose matching costs
+/// about 4 µs per long entry; this keeps a search of the largest history
+/// near 2 ms.
+const LOOSE_LIMIT: usize = 2_000;
 /// `clip from:safari invoice`: only entries copied in an app whose name
 /// contains "safari".
 const FROM: &str = "from:";
@@ -46,11 +58,19 @@ pub fn scope(query: &str) -> Option<&str> {
     }
 }
 
+/// An entry with what searching it needs.
+struct Indexed {
+    entry: ClipEntry,
+    /// The whole text, lowercased, for word matches.
+    lower: String,
+    /// The title, folded as names are, for loose matches.
+    folded_title: Vec<u8>,
+}
+
 #[derive(Default)]
 pub struct ClipboardProvider {
-    /// Pinned entries, then the others newest first, each with a
-    /// lowercased copy for matching.
-    entries: Vec<(ClipEntry, String)>,
+    /// Pinned entries, then the others newest first.
+    entries: Vec<Indexed>,
     /// Position in `entries` by entry id.
     by_id: HashMap<i64, usize>,
 }
@@ -61,9 +81,10 @@ impl ClipboardProvider {
         Self {
             entries: entries
                 .into_iter()
-                .map(|e| {
-                    let lower = e.text.to_lowercase();
-                    (e, lower)
+                .map(|entry| Indexed {
+                    lower: entry.text.to_lowercase(),
+                    folded_title: fold(title(&entry.text).as_bytes()),
+                    entry,
                 })
                 .collect(),
             by_id,
@@ -76,7 +97,7 @@ impl ClipboardProvider {
 
     /// The entry with this id, if it is in the history.
     pub fn entry(&self, id: i64) -> Option<&ClipEntry> {
-        self.by_id.get(&id).map(|&i| &self.entries[i].0)
+        self.by_id.get(&id).map(|&i| &self.entries[i].entry)
     }
 
     /// Whether `item` is a pinned entry.
@@ -105,20 +126,45 @@ impl Provider for ClipboardProvider {
             .map(|a| &a[FROM.len()..])
             .filter(|a| !a.is_empty())
             .collect();
-        let now = sift_state::now();
-        self.entries
+        let entries = self
+            .entries
             .iter()
-            .filter(|(entry, _)| apps.is_empty() || copied_in(entry, &apps))
-            .filter(|(_, lower)| words.iter().all(|w| lower.contains(w.as_str())))
+            .filter(|e| apps.is_empty() || copied_in(&e.entry, &apps));
+        let mut found: Vec<&ClipEntry> = Vec::new();
+        let mut rest: Vec<&Indexed> = Vec::new();
+        for e in entries {
+            if words.iter().all(|w| e.lower.contains(w.as_str())) {
+                found.push(&e.entry);
+                if found.len() == limit {
+                    // Enough word matches: loose ones would come after.
+                    break;
+                }
+            } else if rest.len() < LOOSE_LIMIT {
+                rest.push(e);
+            }
+        }
+        if found.len() < limit
+            && let Some(matcher) = NameMatcher::new(&words.join(" "))
+        {
+            let mut loose: Vec<(u64, &ClipEntry)> = rest
+                .into_iter()
+                .filter_map(|e| Some((matcher.score(&e.folded_title)?.1, &e.entry)))
+                .collect();
+            // Stable: equal matches stay in history order.
+            loose.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+            found.extend(loose.into_iter().map(|(_, entry)| entry));
+        }
+        let now = sift_state::now();
+        found
+            .into_iter()
             .take(limit)
             .enumerate()
-            .map(|(rank, (entry, _))| ResultItem {
+            .map(|(rank, entry)| ResultItem {
                 id: format!("{ID_PREFIX}{}", entry.id).into(),
                 kind: ResultKind::Clipboard,
                 title: title(&entry.text).into(),
                 subtitle: Some(subtitle(entry, now).into()),
-                // In history order (pinned, then newest), above everything
-                // else.
+                // In this order, above everything else.
                 score: top_score().saturating_sub(rank as u64),
                 action: Action::CopyText(entry.text.clone()),
             })
@@ -241,6 +287,27 @@ mod tests {
     }
 
     #[test]
+    fn loose_matches_of_the_beginning_follow_word_matches() {
+        let now = sift_state::now();
+        let provider = ClipboardProvider::new(vec![
+            entry(4, "invoice paid in full", now - 10),
+            entry(3, "the invpd ticket", now - 20),
+            entry(2, &format!("{} invoice paid", "x".repeat(200)), now - 30),
+            entry(1, "unrelated", now - 40),
+        ]);
+        let titles: Vec<String> = provider
+            .search("clip invpd", 10)
+            .into_iter()
+            .map(|r| r.title.to_string())
+            .collect();
+        // The word match first, then the loose match of a beginning; the
+        // long entry's beginning does not match.
+        assert_eq!(titles, ["the invpd ticket", "invoice paid in full"]);
+        let results = provider.search("clip invpd", 10);
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
     fn results_name_their_entry() {
         let mut pinned = entry(7, "keep me", sift_state::now());
         pinned.pinned = true;
@@ -254,6 +321,55 @@ mod tests {
             ..results[0].clone()
         };
         assert_eq!(entry_id(&snippet), None);
+    }
+
+    /// Search latency on a full history of mixed short and long entries.
+    /// Not run by default:
+    ///
+    /// cargo test --release -p sift-launcher clipboard_search_latency -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn clipboard_search_latency() {
+        const ROUNDS: usize = 200;
+        let now = sift_state::now();
+        let paragraph = "The quarterly report lists every open invoice by customer, \
+                         with totals per region and the payment terms agreed. ";
+        for size in [200, 10_000] {
+            let entries: Vec<ClipEntry> = (0..size)
+                .map(|i| {
+                    let text = match i % 4 {
+                        0 => format!("https://example.com/orders/{i}?ref=mail"),
+                        1 => format!("invoice {i} paid"),
+                        2 => paragraph.repeat(1 + i % 40),
+                        _ => format!("fn handler_{i}() {{\n    let total = {i};\n}}"),
+                    };
+                    entry(i as i64, &text, now - i as i64)
+                })
+                .collect();
+            let provider = ClipboardProvider::new(entries);
+            for query in [
+                "clip",
+                "clip invoice",
+                "clip inv 42",
+                "clip invocie",
+                "clip invpd",
+                "clip zzqx",
+            ] {
+                let mut times: Vec<f64> = (0..ROUNDS)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        std::hint::black_box(provider.search(query, 40));
+                        started.elapsed().as_secs_f64() * 1e6
+                    })
+                    .collect();
+                times.sort_by(f64::total_cmp);
+                println!(
+                    "{size:>6} entries  {query:<14} median {:>8.1} µs   p95 {:>8.1} µs",
+                    times[ROUNDS / 2],
+                    times[ROUNDS * 95 / 100]
+                );
+            }
+        }
     }
 
     #[test]

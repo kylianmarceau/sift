@@ -159,6 +159,8 @@ Changes apply the next time the panel opens.
 **Clipboard history** is off by default. Turn it on in Sift Settings ›
 Clipboard History (or set `enabled = true` under `[clipboard]` in the
 config), then type `clip` (or `clip invoice`) to search what you copied.
+Entries containing every word come first, then entries that start with
+a loose match (`clip invpd` finds "invoice paid").
 **⌘D** pins the selected entry (★): pinned entries are listed first and
 kept until you unpin them. **Ctrl-X** deletes the selected entry. Each
 entry shows the app it was copied in; `clip from:slack` lists only what

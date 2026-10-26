@@ -631,7 +631,13 @@ Opt-in (`[clipboard] enabled = true`).
   is written. It relies on the same frontmost-app guess, so it is a
   convenience on top of the concealed-type check, not a guarantee.
 - **Searching.** Entries are searched only after a `clip` prefix, never
-  mixed into ordinary results, and Enter copies an entry back.
+  mixed into ordinary results, and Enter copies an entry back. Entries
+  that contain every word come first, in history order; then entries
+  whose title (the first 100 characters) matches with `NameMatcher`, the
+  same tiers and fuzzy matching as names, best first. Only the title is
+  matched loosely, since almost any letters appear in order somewhere in
+  a long text, and only for the newest 2,000 entries not matched by
+  words, which bounds the search near 2 ms (BENCHMARKS.md, 2026-10-26).
 - **No auto-paste.** Automatic pasting would need synthetic key events,
   which need the Accessibility permission.
 - **Turning it off** stops the task and hides the history.
