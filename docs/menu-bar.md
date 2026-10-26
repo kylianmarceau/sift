@@ -21,6 +21,11 @@ it to open the native menu; arrow keys navigate it and Escape closes it.
 
 ## Workspaces
 
+**Workspace Apps and Windows** is always available. You can create workspaces
+and use **Assign App…** to save app assignments before granting window-control
+permission or enabling tiling. These setup actions do not move windows or launch
+apps. With workspace control running, **Add and Open App…** also opens the app.
+
 Turn on **Window Management → Automatic Tiling and Workspaces**. This also enables
 Window Shortcuts and Controls. macOS window-control permission must be granted
 before workspaces work. Manual controls remain available with tiling off.
@@ -62,6 +67,14 @@ floating/tiling and fullscreen. **Search Open Windows** opens Sift's window sear
 **Pause Window Management** suspends actions; **Resume** restores them. Workspace
 actions are disabled while paused. Turning controls off uses the existing
 window-restoration behavior.
+
+If Settings shows Sift enabled but controls still report missing permission,
+check the running copy with **Show This Sift App in Finder**. A preview build and
+the installed app can have different signing identities. Ad-hoc builds acquire a
+new code identity when rebuilt; macOS may require removing the stale Sift entry
+and adding the current app again. **Retry Window Controls** rechecks permission,
+and closing the menu also picks up a permission grant without a polling timer.
+See [Apple's code-signing requirements note](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
 
 Menu contents stay fixed while the menu is open, so background window changes
 cannot move an action under your pointer. A targeted window's identity is checked

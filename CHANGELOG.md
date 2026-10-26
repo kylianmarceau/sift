@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep workspace creation and app assignment visible before window-control
+  permission is granted; recheck permission after menu use and offer an explicit
+  retry and a way to locate the running Sift app in Finder.
 - Native menu bar icon for Sift with launcher, settings, clipboard, file-index,
   login, update, configuration, help, logs and quit actions.
 - Show the active workspace or paused state beside the icon. Switch workspaces,

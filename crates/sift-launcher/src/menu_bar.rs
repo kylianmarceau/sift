@@ -32,6 +32,7 @@ enum Action {
     Permission,
     Login(bool),
     OpenLogs,
+    ShowApp,
     ClearError,
     Help(String),
 }
@@ -135,6 +136,13 @@ pub(crate) fn install(window: WindowHandle<Launcher>, cx: &mut App) {
                         if value.is_empty() {
                             this.login = sift_macos::login_item::status();
                             this.key = None;
+                            // Recheck after returning from System Settings. Do
+                            // not prompt or keep a permission polling timer.
+                            this.launcher.update(cx, |launcher, cx| {
+                                if launcher.window_manager.is_none() && sift_macos::wm::trusted() {
+                                    launcher.retry_window_management(cx);
+                                }
+                            });
                         }
                         // A close notification flushes updates deferred while tracking.
                         if !value.is_empty() {
@@ -261,7 +269,10 @@ impl State {
             self.window
                 .update(cx, |launcher, _, cx| launcher.hide(cx))
                 .map_err(|e| e.to_string())?;
-            if let Some(controller) = controller {
+            if let Some(controller) = controller.filter(|c| {
+                let snapshot = c.snapshot();
+                snapshot.enabled && snapshot.automatic_tiling
+            }) {
                 // Queue after configuration and after the UI update. Existing
                 // windows move now; later windows use the persisted rule.
                 let mut commands: Vec<_> = controller
@@ -341,6 +352,14 @@ impl State {
                         })
                         .map_err(|e| e.to_string())?;
                     }
+                    Action::ShowApp => {
+                        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+                        let app = executable
+                            .ancestors()
+                            .find(|p| p.extension().is_some_and(|e| e == "app"))
+                            .unwrap_or(&executable);
+                        sift_macos::reveal_in_finder(app).map_err(|e| e.to_string())?;
+                    }
                     Action::Help(anchor) => {
                         let url =
                             format!("https://github.com/kylianmarceau/sift/blob/main/{anchor}");
@@ -396,7 +415,7 @@ fn menu_key(
     for ws in &snapshot.workspaces {
         (&ws.name, ws.monitor).hash(&mut hash);
     }
-    serde_json::to_string(&launcher.window_config)
+    serde_json::to_string(launcher.user.window_manager_config())
         .ok()
         .hash(&mut hash);
     launcher.window_error.hash(&mut hash);
@@ -435,11 +454,13 @@ fn model(
     let mut title = String::new();
     if launcher.window_management_enabled() {
         if launcher.window_manager.is_none() {
-            items.push(Item::label(short(&launcher.window_management_status(), 90)));
+            items.push(Item::label("Window controls are not running"));
             items.push(action(
                 "Grant Window Control Permission…",
                 Action::Permission,
             ));
+            items.push(action("Show This Sift App in Finder", Action::ShowApp));
+            items.push(action("Retry Window Controls", Action::Reload));
         } else {
             let paused = !snapshot.enabled;
             if paused {
@@ -461,7 +482,6 @@ fn model(
             }));
             if snapshot.automatic_tiling {
                 items.push(workspace_menu(snapshot));
-                items.push(manage_workspaces(launcher));
             }
             items.push(window_menu(snapshot));
             items.push(action("Search Open Windows", Action::Search("win ".into())));
@@ -475,6 +495,14 @@ fn model(
             ));
         }
     }
+    let can_control =
+        launcher.window_manager.is_some() && snapshot.enabled && snapshot.automatic_tiling;
+    items.push(manage_workspaces(
+        snapshot,
+        launcher.user.window_manager_config(),
+        launcher.apps.as_deref(),
+        can_control,
+    ));
     items.push(submenu(
         "Window Management",
         vec![
@@ -567,6 +595,7 @@ fn model(
             builtin("Edit Configuration…", commands::EDIT_CONFIG),
             action("Reload Configuration", Action::Reload),
             action("Open Logs Folder", Action::OpenLogs),
+            action("Show This Sift App in Finder", Action::ShowApp),
         ],
     ));
     items.push(Item::separator());
@@ -609,17 +638,45 @@ fn workspace_menu(snapshot: &Snapshot) -> Item {
     )
 }
 
-fn manage_workspaces(launcher: &Launcher) -> Item {
-    let snapshot = &launcher.window_snapshot;
+fn workspace_names(config: &sift_wm::Config, snapshot: &Snapshot) -> Vec<String> {
+    let mut names: Vec<_> = config
+        .workspaces
+        .iter()
+        .cloned()
+        .chain(snapshot.workspaces.iter().map(|ws| ws.name.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    names.sort_by(|a, b| match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        _ => a.cmp(b),
+    });
+    names
+}
+
+fn manage_workspaces(
+    snapshot: &Snapshot,
+    config: &sift_wm::Config,
+    apps: Option<&sift_apps::AppProvider>,
+    can_control: bool,
+) -> Item {
     let mut workspaces = Vec::new();
-    for ws in ordered_workspaces(snapshot) {
+    if !can_control {
+        workspaces.push(Item::label(
+            "Setup is available; workspace control is inactive",
+        ));
+    }
+    let names = workspace_names(config, snapshot);
+    for name in &names {
         let windows: Vec<_> = snapshot
             .windows
             .iter()
-            .filter(|w| w.workspace == ws.name)
+            .filter(|w| &w.workspace == name)
             .collect();
         let mut children = vec![Item::label(format!("{} windows", windows.len()))];
-        if snapshot.enabled {
+        if can_control {
             if let Some(focused) = snapshot
                 .windows
                 .iter()
@@ -630,7 +687,7 @@ fn manage_workspaces(launcher: &Launcher) -> Item {
                     Action::WindowCommand(
                         Command::Target(
                             focused.id,
-                            Box::new(Command::MoveToWorkspace(ws.name.clone(), false)),
+                            Box::new(Command::MoveToWorkspace(name.clone(), false)),
                         ),
                         Some(focused.into()),
                     ),
@@ -639,49 +696,55 @@ fn manage_workspaces(launcher: &Launcher) -> Item {
                     children.push(action(
                         format!("Always Put {} Here", short(&focused.app_name, 35)),
                         Action::AssignApp {
-                            workspace: ws.name.clone(),
+                            workspace: name.clone(),
                             app_id: focused.app_id.clone(),
                             open: None,
                         },
                     ));
                 }
             }
-            if let Some(apps) = &launcher.apps {
-                let mut groups = std::collections::BTreeMap::<String, Vec<Item>>::new();
-                for app in apps.catalog().apps() {
-                    let Some(app_id) = &app.bundle_id else {
-                        continue;
-                    };
-                    if app_id == "io.github.kylianmarceau.sift" {
-                        continue;
-                    }
-                    let group = app
-                        .name
-                        .chars()
-                        .next()
-                        .unwrap_or('#')
-                        .to_uppercase()
-                        .to_string();
-                    groups.entry(group).or_default().push(action(
-                        app.name.as_ref(),
-                        Action::AssignApp {
-                            workspace: ws.name.clone(),
-                            app_id: app_id.clone(),
-                            open: Some(app.path.clone()),
-                        },
-                    ));
+        }
+        if let Some(apps) = apps {
+            let mut groups = std::collections::BTreeMap::<String, Vec<Item>>::new();
+            for app in apps.catalog().apps() {
+                let Some(app_id) = &app.bundle_id else {
+                    continue;
+                };
+                if app_id == "io.github.kylianmarceau.sift" {
+                    continue;
                 }
-                children.push(submenu(
-                    "Add and Open App…",
-                    groups
-                        .into_iter()
-                        .map(|(name, mut apps)| {
-                            apps.sort_by(|a, b| a.title.cmp(&b.title));
-                            submenu(name, apps)
-                        })
-                        .collect(),
+                let group = app
+                    .name
+                    .chars()
+                    .next()
+                    .unwrap_or('#')
+                    .to_uppercase()
+                    .to_string();
+                groups.entry(group).or_default().push(action(
+                    app.name.as_ref(),
+                    Action::AssignApp {
+                        workspace: name.clone(),
+                        app_id: app_id.clone(),
+                        open: can_control.then(|| app.path.clone()),
+                    },
                 ));
             }
+            children.push(submenu(
+                if can_control {
+                    "Add and Open App…"
+                } else {
+                    "Assign App…"
+                },
+                groups
+                    .into_iter()
+                    .map(|(name, mut apps)| {
+                        apps.sort_by(|a, b| a.title.cmp(&b.title));
+                        submenu(name, apps)
+                    })
+                    .collect(),
+            ));
+        } else {
+            children.push(Item::label("Loading installed apps…"));
         }
         children.push(Item::separator());
         for w in windows {
@@ -691,7 +754,7 @@ fn manage_workspaces(launcher: &Launcher) -> Item {
                 short(&w.title, 50),
                 if w.minimized { " (minimized)" } else { "" }
             );
-            children.push(if snapshot.enabled {
+            children.push(if can_control {
                 action(
                     label,
                     Action::WindowCommand(Command::FocusId(w.id), Some(w.into())),
@@ -700,11 +763,11 @@ fn manage_workspaces(launcher: &Launcher) -> Item {
                 Item::label(label)
             });
         }
-        workspaces.push(submenu(format!("Workspace {}", ws.name), children));
+        workspaces.push(submenu(format!("Workspace {name}"), children));
     }
-    let name = next_workspace(&launcher.window_config.workspaces);
+    let name = next_workspace(&names);
     workspaces.push(Item::separator());
-    if launcher.window_config.workspaces.len() < 256 {
+    if names.len() < 256 {
         workspaces.push(action(
             format!("Add Workspace {name}"),
             Action::AddWorkspace(name),
@@ -870,6 +933,63 @@ mod tests {
                 .children
                 .iter()
                 .any(|i| i.title == "Toggle Floating")
+        );
+    }
+    #[test]
+    fn workspace_setup_is_available_before_window_controls_start() {
+        let config = sift_wm::Config::default();
+        let menu = manage_workspaces(&Snapshot::default(), &config, None, false);
+        assert!(menu.children.iter().any(|i| i.title == "Workspace 1"));
+        let add = menu
+            .children
+            .iter()
+            .find(|i| i.title == "Add Workspace 10")
+            .expect("add workspace action");
+        assert_eq!(
+            serde_json::from_str::<Action>(add.action.as_ref().unwrap()).unwrap(),
+            Action::AddWorkspace("10".into())
+        );
+    }
+
+    #[test]
+    fn offline_app_assignment_saves_without_launching() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = dir.path().join("Test Editor.app/Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::write(contents.join("Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.editor</string><key>CFBundleName</key><string>Test Editor</string></dict></plist>"#).unwrap();
+        let catalog =
+            sift_apps::AppCatalog::discover(&[sift_apps::Location::Folder(dir.path().into())]);
+        let apps = sift_apps::AppProvider::new(catalog);
+        let menu = manage_workspaces(
+            &Snapshot::default(),
+            &sift_wm::Config::default(),
+            Some(&apps),
+            false,
+        );
+        let workspace = menu
+            .children
+            .iter()
+            .find(|i| i.title == "Workspace 1")
+            .unwrap();
+        let assign = workspace
+            .children
+            .iter()
+            .find(|i| i.title == "Assign App…")
+            .unwrap();
+        let entry = &assign.children[0].children[0];
+        assert_eq!(
+            serde_json::from_str::<Action>(entry.action.as_ref().unwrap()).unwrap(),
+            Action::AssignApp {
+                workspace: "1".into(),
+                app_id: "com.example.editor".into(),
+                open: None,
+            }
+        );
+        assert!(
+            !workspace
+                .children
+                .iter()
+                .any(|i| i.title == "Move Focused Window Here")
         );
     }
 }
