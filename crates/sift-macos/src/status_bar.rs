@@ -2,13 +2,13 @@
 // actions; the launcher handles them after menu tracking has finished.
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSBezierPath, NSCellImagePosition, NSColor, NSImage, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSStatusBar, NSStatusItem,
+    NSAccessibility, NSBezierPath, NSCellImagePosition, NSColor, NSFont, NSFontAttributeName,
+    NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSStringDrawing,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSBundle, NSDictionary, NSObject, NSPoint, NSRect, NSSize, NSString};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -54,9 +54,8 @@ define_class!(
     impl Target {
         #[unsafe(method(selectItem:))]
         fn select(&self, item: &NSMenuItem) {
-            if let Some(value) = item.representedObject() {
-                // SAFETY: build_menu stores only NSString represented objects.
-                let value: &NSString = unsafe { &*(&*value as *const _ as *const NSString) };
+            if let Some(value) = item.representedObject()
+                && let Some(value) = value.downcast_ref::<NSString>() {
                 (self.ivars().callback)(value.to_string());
             }
         }
@@ -173,13 +172,16 @@ fn fill_menu(menu: &NSMenu, items: &[Item], target: &Target, mtm: MainThreadMark
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
-                &NSString::from_str(&entry.title),
+                &NSString::from_str(&bounded_title(&entry.title)),
                 entry.action.as_ref().map(|_| sel!(selectItem:)),
                 &NSString::from_str(&entry.key),
             )
         };
         item.setEnabled(entry.action.is_some() || !entry.children.is_empty());
         item.setState(if entry.checked { 1 } else { 0 });
+        // Keep full context accessible without allowing long errors, app names,
+        // or paths to stretch the entire native menu across the screen.
+        item.setToolTip(Some(&NSString::from_str(&entry.title)));
         if let Some(action) = &entry.action {
             // SAFETY: represented objects are retained NSStrings. MenuBar
             // retains the target longer than the installed menu.
@@ -200,6 +202,49 @@ fn fill_menu(menu: &NSMenu, items: &[Item], target: &Target, mtm: MainThreadMark
         }
         menu.addItem(&item);
     }
+}
+
+const MAX_TITLE_WIDTH: f64 = 300.;
+fn bounded_title(title: &str) -> String {
+    let clean: String = title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let font = NSFont::menuFontOfSize(0.);
+    // SAFETY: NSFontAttributeName maps to an NSFont, the documented value type.
+    let attributes =
+        NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&*font as &AnyObject]);
+    let fits = |text: &str| {
+        // SAFETY: the attributes dictionary contains only the font attribute.
+        unsafe {
+            NSString::from_str(text)
+                .sizeWithAttributes(Some(&attributes))
+                .width
+                <= MAX_TITLE_WIDTH
+        }
+    };
+    if fits(&clean) {
+        return clean;
+    }
+    let chars: Vec<_> = clean.chars().collect();
+    let (mut low, mut high) = (0, chars.len());
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let candidate = format!("{}…", chars[..mid].iter().collect::<String>());
+        if fits(&candidate) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    format!("{}…", chars[..low].iter().collect::<String>())
+}
+
+/// The packaged build number distinguishes preview binaries with the same version.
+pub fn build_number() -> Option<String> {
+    let value = NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&NSString::from_str("CFBundleVersion"))?;
+    value.downcast_ref::<NSString>().map(|s| s.to_string())
 }
 
 #[cfg(test)]

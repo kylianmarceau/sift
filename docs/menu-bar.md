@@ -3,6 +3,9 @@
 Sift's Sieve icon stays in the macOS menu bar while the launcher is hidden. It
 uses a template image so it follows the menu bar's light/dark appearance. Click
 it to open the native menu; arrow keys navigate it and Escape closes it.
+The header includes the build number so previews with the same release version
+can be distinguished. Long row titles are truncated by rendered width; hover to
+read their full text in a tooltip.
 
 ## Everyday actions
 

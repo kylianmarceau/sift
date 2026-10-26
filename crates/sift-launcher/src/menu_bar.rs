@@ -438,7 +438,13 @@ fn model(
     login: sift_macos::login_item::Status,
 ) -> (String, Vec<Item>) {
     let snapshot = &launcher.window_snapshot;
-    let mut items = vec![Item::label(format!("Sift {}", env!("CARGO_PKG_VERSION")))];
+    let build = sift_macos::status_bar::build_number()
+        .map(|n| format!(" · build {n}"))
+        .unwrap_or_default();
+    let mut items = vec![Item::label(format!(
+        "Sift {}{build}",
+        env!("CARGO_PKG_VERSION")
+    ))];
     if let Some(error) = error {
         items.push(Item::label(short(error, 100)));
         items.push(action("Dismiss Message", Action::ClearError));

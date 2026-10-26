@@ -89,6 +89,7 @@ fn main() {
             // GPUI switches the app to the regular policy while launching;
             // switch back so sift has no Dock icon even when run unbundled.
             sift_macos::use_accessory_activation_policy();
+            tracing::info!(version = env!("CARGO_PKG_VERSION"), build = ?sift_macos::status_bar::build_number(), executable = ?std::env::current_exe().ok(), "launcher build");
             bind_keys(cx);
 
             let window = match cx.open_window(window_options(cx), |window, cx| {

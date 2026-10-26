@@ -9,6 +9,7 @@ mod check {
     pub fn run() {
         let mtm = MainThreadMarker::new().expect("main thread");
         let _app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        let _ = build_number();
         let selected = Rc::new(RefCell::new(Vec::<String>::new()));
         let events = selected.clone();
         let bar =
@@ -73,11 +74,29 @@ mod check {
         assert_eq!(button.title().to_string(), " 2");
         assert_eq!(menu.numberOfItems(), 1);
         assert!(!menu.itemAtIndex(0).expect("first item").isEnabled());
+        let long = format!(
+            "Permission detail: {}",
+            "very wide 窗口 workspace title ".repeat(12)
+        );
+        bar.update("".into(), "Sift".into(), vec![Item::label(&long)]);
+        bar.target.needs_update(sel!(menuNeedsUpdate:), &menu);
+        let row = menu.itemAtIndex(0).expect("long row");
+        let displayed = row.title();
+        assert!(displayed.to_string().ends_with('…'));
+        assert_eq!(row.toolTip().expect("full description").to_string(), long);
+        let font = NSFont::menuFontOfSize(0.);
+        // SAFETY: the font attribute's documented value is NSFont.
+        let attributes =
+            NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&*font as &AnyObject]);
+        // SAFETY: the attributes dictionary has the documented value types.
+        assert!(
+            unsafe { displayed.sizeWithAttributes(Some(&attributes)).width } <= MAX_TITLE_WIDTH
+        );
         let item = bar.item.clone();
         drop(bar);
         assert!(item.menu(mtm).is_none());
         println!(
-            "PASS: native status icon, nested menus, checkmarks, symbols, shortcuts, action dispatch, tracking freeze, deferred updates, teardown"
+            "PASS: native status icon, nested menus, checkmarks, symbols, shortcuts, action dispatch, tracking freeze, deferred updates, bounded menu width, full tooltips, teardown"
         );
     }
 }
