@@ -1011,6 +1011,15 @@ shortcut is restored. At launch, a missing, damaged or unusable file
 means Option+Space, and a saved shortcut that cannot be registered
 falls back to Option+Space too.
 
+**Clipboard history shortcut.** A second, optional shortcut
+(`hotkey::Slot::Clipboard`, saved in `clipboard-hotkey`, empty or
+missing for none) opens the panel with `clip ` typed, or hides it if it
+already shows clipboard history. It has no default: the obvious choices
+are taken (⌥⌘V moves files in Finder). Both shortcuts go through one
+`GlobalHotKeyManager`, whose handler matches the event id against each
+slot. Recording either pauses both, and one slot refuses the other's
+shortcut, since the two would share a hotkey id.
+
 **Conflicts with other apps.** Carbon lets two processes register the
 same shortcut without an error (tested: two Sift copies both registered
 ⌃⌥K, and a second copy registered ⌥Space while the first held it). So

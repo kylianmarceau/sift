@@ -484,6 +484,25 @@ impl Launcher {
         }
     }
 
+    /// The clipboard history shortcut: shows the panel on clipboard
+    /// history, or hides it if it already shows that.
+    pub fn toggle_clipboard(
+        &mut self,
+        requested_at: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_visible() && self.in_clipboard_scope(&self.query) {
+            self.hide(cx);
+            return;
+        }
+        if !self.is_visible() {
+            self.show_requested_at = Some(requested_at);
+            self.show(window, cx);
+        }
+        self.run_command(commands::CLIPBOARD, cx);
+    }
+
     /// Starts or stops watching the clipboard to match the config. While
     /// on, a background thread reads the change counter every
     /// `CLIPBOARD_POLL`; the UI wakes and reads the contents only after a

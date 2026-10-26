@@ -1,10 +1,13 @@
-//! The keyboard shortcut that shows and hides the panel.
+//! The keyboard shortcuts: one shows and hides the panel, and another,
+//! optional one opens the panel on clipboard history ([`Slot`]).
 //!
-//! Option+Space unless the user records another one in Settings. The
-//! choice is kept in `hotkey`, a two-line file in the support directory: the
-//! shortcut in `global-hotkey`'s notation ("alt+Space"), then the key's
-//! label as the keyboard layout showed it when recorded ("Space", "K",
-//! "É"). A missing or unreadable file means the default.
+//! The panel's is Option+Space unless the user records another one in
+//! Settings; clipboard history has none until one is recorded. Each choice
+//! is kept in a two-line file in the support directory (`hotkey`,
+//! `clipboard-hotkey`): the shortcut in `global-hotkey`'s notation
+//! ("alt+Space"), then the key's label as the keyboard layout showed it
+//! when recorded ("Space", "K", "É"). A missing or unreadable file means
+//! the default, and an empty one means no shortcut.
 //!
 //! Shortcuts are registered by physical key, so they work the same on
 //! every keyboard layout; the label is only for display.
@@ -21,7 +24,46 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::{App, Global};
 use sift_macos::key_capture::KeyPress;
 
-const STATE_FILE: &str = "hotkey";
+/// What a shortcut does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// Shows and hides the panel.
+    Panel,
+    /// Opens the panel on clipboard history.
+    Clipboard,
+}
+
+impl Slot {
+    const ALL: [Slot; 2] = [Slot::Panel, Slot::Clipboard];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn file(self) -> &'static str {
+        match self {
+            Slot::Panel => "hotkey",
+            Slot::Clipboard => "clipboard-hotkey",
+        }
+    }
+
+    /// What it does, after "That shortcut already …".
+    fn purpose(self) -> &'static str {
+        match self {
+            Slot::Panel => "shows the panel",
+            Slot::Clipboard => "opens clipboard history",
+        }
+    }
+
+    /// The shortcut's name in an error: "Sift's launcher shortcut".
+    fn name(self) -> &'static str {
+        match self {
+            Slot::Panel => "launcher",
+            Slot::Clipboard => "clipboard",
+        }
+    }
+}
+
 /// Escape (`kVK_Escape`) without modifiers cancels recording.
 const ESCAPE: u16 = 0x35;
 
@@ -355,20 +397,31 @@ fn fallback_label(name: &str) -> String {
     .to_string()
 }
 
-fn state_path(dir: &Path) -> PathBuf {
-    dir.join(STATE_FILE)
+fn state_path(dir: &Path, slot: Slot) -> PathBuf {
+    dir.join(slot.file())
 }
 
-/// The saved shortcut, or the default when there is none or it is not
-/// one Sift accepts.
+/// The panel's saved shortcut, or the default when there is none or it
+/// is not one Sift accepts.
 pub fn load(dir: &Path) -> Shortcut {
-    let Ok(text) = std::fs::read_to_string(state_path(dir)) else {
-        return Shortcut::default();
-    };
+    load_slot(dir, Slot::Panel).unwrap_or_else(|| {
+        tracing::info!("using ⌥Space to show the panel");
+        Shortcut::default()
+    })
+}
+
+/// A slot's saved shortcut; `None` when there is none (or an empty file)
+/// or it is not one Sift accepts.
+pub fn load_slot(dir: &Path, slot: Slot) -> Option<Shortcut> {
+    let text = std::fs::read_to_string(state_path(dir, slot)).ok()?;
     let mut lines = text.lines();
-    let Some(hotkey) = lines.next().and_then(|l| HotKey::from_str(l.trim()).ok()) else {
-        tracing::warn!("the saved keyboard shortcut is not readable; using ⌥Space");
-        return Shortcut::default();
+    let first = lines.next().map(str::trim).unwrap_or("");
+    if first.is_empty() {
+        return None;
+    }
+    let Ok(hotkey) = HotKey::from_str(first) else {
+        tracing::warn!(?slot, "the saved keyboard shortcut is not readable");
+        return None;
     };
     let usable = KEYS.iter().any(|(_, c)| *c == hotkey.key)
         && (is_function_key(hotkey.key)
@@ -376,8 +429,8 @@ pub fn load(dir: &Path) -> Shortcut {
                 .mods
                 .intersects(Modifiers::META | Modifiers::CONTROL | Modifiers::ALT));
     if !usable {
-        tracing::warn!(%hotkey, "the saved keyboard shortcut is not usable; using ⌥Space");
-        return Shortcut::default();
+        tracing::warn!(?slot, %hotkey, "the saved keyboard shortcut is not usable");
+        return None;
     }
     let saved = lines.next().map(str::trim).unwrap_or("");
     let key =
@@ -387,26 +440,36 @@ pub fn load(dir: &Path) -> Shortcut {
         } else {
             label(hotkey.key, "")
         };
-    Shortcut { hotkey, key }
+    Some(Shortcut { hotkey, key })
 }
 
-/// Saves the shortcut. The default is saved too, so the file always says
-/// what was chosen last.
-pub fn save(dir: &Path, shortcut: &Shortcut) -> Result<(), String> {
-    let text = format!("{}\n{}\n", shortcut.hotkey.into_string(), shortcut.key);
+/// Saves a slot's shortcut; `None` saves an empty file (no shortcut). The
+/// panel's default is saved too, so the file always says what was chosen
+/// last.
+pub fn save_slot(dir: &Path, slot: Slot, shortcut: Option<&Shortcut>) -> Result<(), String> {
+    let text = shortcut
+        .map(|s| format!("{}\n{}\n", s.hotkey.into_string(), s.key))
+        .unwrap_or_default();
     std::fs::create_dir_all(dir)
-        .and_then(|()| std::fs::write(state_path(dir), text))
+        .and_then(|()| std::fs::write(state_path(dir, slot), text))
         .map_err(|error| format!("cannot save the shortcut: {error}"))
 }
 
-/// The registered shortcut, owned by the app.
-pub struct Hotkeys {
-    manager: Option<GlobalHotKeyManager>,
-    current: Shortcut,
+/// One slot's shortcut and whether it is registered.
+#[derive(Default)]
+struct Binding {
+    shortcut: Option<Shortcut>,
     registered: bool,
     /// The id of the registered hotkey (0 for none), read by the event
     /// handler.
     active: Arc<AtomicU32>,
+}
+
+/// The registered shortcuts, owned by the app.
+pub struct Hotkeys {
+    manager: Option<GlobalHotKeyManager>,
+    /// By [`Slot::index`].
+    bindings: [Binding; 2],
     dir: PathBuf,
     window_keys: Vec<HotKey>,
     window_routes: Arc<Mutex<Option<WindowRoutes>>>,
@@ -421,15 +484,18 @@ struct WindowRoutes {
 
 impl Global for Hotkeys {}
 
-/// Registers the saved shortcut (or Option+Space if that fails) and sends
-/// the time of each press to `presses`.
-pub fn install(dir: PathBuf, presses: UnboundedSender<Instant>, cx: &mut App) {
-    let active = Arc::new(AtomicU32::new(0));
+/// Registers the saved shortcuts (Option+Space for the panel if its own
+/// fails) and sends each press, with its time, to `presses`.
+pub fn install(dir: PathBuf, presses: UnboundedSender<(Slot, Instant)>, cx: &mut App) {
+    let bindings = [Binding::default(), Binding::default()];
     let window_routes: Arc<Mutex<Option<WindowRoutes>>> = Arc::default();
     let paused = Arc::new(AtomicBool::new(false));
     let manager = match GlobalHotKeyManager::new() {
         Ok(manager) => {
-            let active = active.clone();
+            let active: Vec<(Slot, Arc<AtomicU32>)> = Slot::ALL
+                .iter()
+                .map(|&slot| (slot, bindings[slot.index()].active.clone()))
+                .collect();
             let routes = window_routes.clone();
             let paused = paused.clone();
             // Events arrive from a Carbon handler on the main thread.
@@ -437,8 +503,11 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<Instant>, cx: &mut App) {
                 if event.state != HotKeyState::Pressed || paused.load(Ordering::Relaxed) {
                     return;
                 }
-                if event.id == active.load(Ordering::Relaxed) {
-                    let _ = presses.unbounded_send(Instant::now());
+                if let Some((slot, _)) = active
+                    .iter()
+                    .find(|(_, id)| event.id == id.load(Ordering::Relaxed))
+                {
+                    let _ = presses.unbounded_send((*slot, Instant::now()));
                 } else if let Some(routes) = &*routes.lock().unwrap_or_else(|e| e.into_inner()) {
                     if let Some(command) = routes.commands.get(&event.id) {
                         let _ = routes.controller.execute(command.clone());
@@ -454,22 +523,31 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<Instant>, cx: &mut App) {
     };
     let mut hotkeys = Hotkeys {
         manager,
-        current: load(&dir),
-        registered: false,
-        active,
+        bindings,
         dir,
         window_keys: Vec::new(),
         window_routes,
         window_signature: None,
         paused,
     };
-    if let Err(error) = hotkeys.register()
-        && !hotkeys.current.is_default()
+    hotkeys.bindings[Slot::Panel.index()].shortcut = Some(load(&hotkeys.dir));
+    if let Err(error) = hotkeys.register(Slot::Panel)
+        && hotkeys
+            .current(Slot::Panel)
+            .is_some_and(|s| !s.is_default())
     {
         tracing::warn!(%error, "falling back to ⌥Space");
-        hotkeys.current = Shortcut::default();
-        let _ = hotkeys.register();
+        hotkeys.bindings[Slot::Panel.index()].shortcut = Some(Shortcut::default());
+        let _ = hotkeys.register(Slot::Panel);
     }
+    // A clipboard shortcut that the panel's fallback took is dropped.
+    let clipboard = load_slot(&hotkeys.dir, Slot::Clipboard).filter(|s| {
+        hotkeys
+            .current(Slot::Panel)
+            .is_none_or(|panel| panel.hotkey != s.hotkey)
+    });
+    hotkeys.bindings[Slot::Clipboard.index()].shortcut = clipboard;
+    let _ = hotkeys.register(Slot::Clipboard);
     cx.set_global(hotkeys);
 }
 
@@ -501,8 +579,14 @@ impl Hotkeys {
         let mut commands = std::collections::HashMap::new();
         for (text, values) in &bindings {
             let key = window_mode_hotkey(text, mode)?;
-            if key == self.current.hotkey {
-                return Err(format!("{text} conflicts with Sift's launcher shortcut"));
+            if let Some(slot) = Slot::ALL
+                .into_iter()
+                .find(|&slot| self.current(slot).is_some_and(|s| s.hotkey == key))
+            {
+                return Err(format!(
+                    "{text} conflicts with Sift's {} shortcut",
+                    slot.name()
+                ));
             }
             let sequence = values
                 .iter()
@@ -555,52 +639,57 @@ impl Hotkeys {
         Ok(())
     }
 
-    pub fn current(&self) -> &Shortcut {
-        &self.current
+    /// The slot's shortcut; the panel always has one.
+    pub fn current(&self, slot: Slot) -> Option<&Shortcut> {
+        self.bindings[slot.index()].shortcut.as_ref()
     }
 
-    /// Whether the shortcut works right now (false while recording, or if
-    /// macOS refused it).
-    pub fn is_registered(&self) -> bool {
-        self.registered
+    /// Whether the slot's shortcut works right now (false while recording,
+    /// or if macOS refused it).
+    pub fn is_registered(&self, slot: Slot) -> bool {
+        self.bindings[slot.index()].registered
     }
 
-    fn register(&mut self) -> Result<(), String> {
-        let shortcut = self.current.display();
+    fn register(&mut self, slot: Slot) -> Result<(), String> {
+        let binding = &mut self.bindings[slot.index()];
+        let Some(current) = &binding.shortcut else {
+            return Ok(());
+        };
+        let shortcut = current.display();
         let manager = self
             .manager
             .as_ref()
             .ok_or("keyboard shortcuts are not available")?;
-        match manager.register(self.current.hotkey) {
+        match manager.register(current.hotkey) {
             Ok(()) => {
-                self.registered = true;
-                self.active
-                    .store(self.current.hotkey.id(), Ordering::Relaxed);
-                tracing::info!(shortcut, "registered the keyboard shortcut");
+                binding.registered = true;
+                binding.active.store(current.hotkey.id(), Ordering::Relaxed);
+                tracing::info!(?slot, shortcut, "registered the keyboard shortcut");
                 Ok(())
             }
             Err(error) => {
-                tracing::error!(shortcut, %error, "cannot register the keyboard shortcut");
+                tracing::error!(?slot, shortcut, %error, "cannot register the keyboard shortcut");
                 Err(format!("macOS did not accept {shortcut}. Choose another."))
             }
         }
     }
 
-    fn unregister(&mut self) {
-        if !self.registered {
+    fn unregister(&mut self, slot: Slot) {
+        let binding = &mut self.bindings[slot.index()];
+        if !binding.registered {
             return;
         }
-        self.active.store(0, Ordering::Relaxed);
-        self.registered = false;
-        if let Some(manager) = &self.manager
-            && let Err(error) = manager.unregister(self.current.hotkey)
+        binding.active.store(0, Ordering::Relaxed);
+        binding.registered = false;
+        if let (Some(manager), Some(current)) = (&self.manager, &binding.shortcut)
+            && let Err(error) = manager.unregister(current.hotkey)
         {
-            tracing::warn!(%error, "cannot unregister the keyboard shortcut");
+            tracing::warn!(?slot, %error, "cannot unregister the keyboard shortcut");
         }
     }
 
-    /// Turns the shortcut off while a new one is recorded, so pressing it
-    /// reaches the recorder instead of toggling the panel.
+    /// Turns the shortcuts off while a new one is recorded, so pressing
+    /// one reaches the recorder instead of opening the panel.
     pub fn pause(&mut self) {
         self.paused.store(true, Ordering::Relaxed);
         if let Some(manager) = &self.manager {
@@ -608,14 +697,18 @@ impl Hotkeys {
                 let _ = manager.unregister(*key);
             }
         }
-        self.unregister();
+        for slot in Slot::ALL {
+            self.unregister(slot);
+        }
     }
 
-    /// Turns the shortcut back on after [`pause`](Self::pause).
+    /// Turns the shortcuts back on after [`pause`](Self::pause).
     pub fn resume(&mut self) {
         let was_paused = self.paused.swap(false, Ordering::Relaxed);
-        if !self.registered {
-            let _ = self.register();
+        for slot in Slot::ALL {
+            if !self.bindings[slot.index()].registered {
+                let _ = self.register(slot);
+            }
         }
         if was_paused {
             if let Some(manager) = &self.manager {
@@ -626,24 +719,36 @@ impl Hotkeys {
         }
     }
 
-    /// Replaces the shortcut and saves it. If macOS refuses the new one,
-    /// the previous one stays and the reason is returned.
-    pub fn set(&mut self, shortcut: Shortcut) -> Result<(), String> {
-        if self.window_keys.contains(&shortcut.hotkey) {
-            return Err("This shortcut is assigned to a window-management command.".into());
+    /// Replaces the slot's shortcut (`None` removes it, except for the
+    /// panel) and saves it. If the other slot or a window command uses it,
+    /// or macOS refuses it, the previous one stays and the reason is
+    /// returned.
+    pub fn set(&mut self, slot: Slot, shortcut: Option<Shortcut>) -> Result<(), String> {
+        if slot == Slot::Panel && shortcut.is_none() {
+            return Err("The panel needs a shortcut.".into());
         }
-        if shortcut == self.current {
+        if let Some(new) = &shortcut {
+            if self.window_keys.contains(&new.hotkey) {
+                return Err("This shortcut is assigned to a window-management command.".into());
+            }
+            if let Some(other) = Slot::ALL.into_iter().find(|&s| s != slot)
+                && self.current(other).is_some_and(|s| s.hotkey == new.hotkey)
+            {
+                return Err(format!("That shortcut already {}.", other.purpose()));
+            }
+        }
+        if shortcut.as_ref() == self.current(slot) {
             self.resume();
             return Ok(());
         }
-        self.unregister();
-        let previous = std::mem::replace(&mut self.current, shortcut);
-        if let Err(reason) = self.register() {
-            self.current = previous;
-            let _ = self.register();
+        self.unregister(slot);
+        let previous = std::mem::replace(&mut self.bindings[slot.index()].shortcut, shortcut);
+        if let Err(reason) = self.register(slot) {
+            self.bindings[slot.index()].shortcut = previous;
+            let _ = self.register(slot);
             return Err(reason);
         }
-        save(&self.dir, &self.current)
+        save_slot(&self.dir, slot, self.current(slot))
     }
 }
 
@@ -782,7 +887,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(load(dir.path()).is_default());
         let s = shortcut(interpret(&press(0x0c, "⌃⌥", "a")));
-        save(dir.path(), &s).expect("save");
+        save_slot(dir.path(), Slot::Panel, Some(&s)).expect("save");
         assert_eq!(load(dir.path()), s);
 
         // Damaged, unusable or hostile files fall back to the default.
@@ -793,14 +898,37 @@ mod tests {
             "alt+CapsLock\nCaps\n", // not allowed
             "Escape\n⎋\n",          // Escape alone cancels recording
         ] {
-            std::fs::write(state_path(dir.path()), text).expect("write");
+            std::fs::write(state_path(dir.path(), Slot::Panel), text).expect("write");
             assert!(load(dir.path()).is_default(), "{text:?}");
         }
         // A bad label is replaced, the shortcut kept.
-        std::fs::write(state_path(dir.path()), "alt+KeyK\n\u{7}bell\n").expect("write");
+        std::fs::write(state_path(dir.path(), Slot::Panel), "alt+KeyK\n\u{7}bell\n")
+            .expect("write");
         assert_eq!(load(dir.path()).display(), "⌥K");
-        std::fs::write(state_path(dir.path()), "alt+Escape\n\u{1b}[31m\n").expect("write");
+        std::fs::write(
+            state_path(dir.path(), Slot::Panel),
+            "alt+Escape\n\u{1b}[31m\n",
+        )
+        .expect("write");
         assert_eq!(load(dir.path()).display(), "⌥⎋");
+    }
+
+    #[test]
+    fn the_clipboard_shortcut_is_optional_and_saved_apart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(load_slot(dir.path(), Slot::Clipboard), None);
+        let s = shortcut(interpret(&press(0x09, "⌃⌥", "v")));
+        save_slot(dir.path(), Slot::Clipboard, Some(&s)).expect("save");
+        assert_eq!(load_slot(dir.path(), Slot::Clipboard), Some(s));
+        // The panel keeps its own.
+        assert!(load(dir.path()).is_default());
+        // Removing it leaves an empty file, which means none.
+        save_slot(dir.path(), Slot::Clipboard, None).expect("save");
+        assert_eq!(load_slot(dir.path(), Slot::Clipboard), None);
+        assert_eq!(
+            std::fs::read_to_string(state_path(dir.path(), Slot::Clipboard)).expect("read"),
+            ""
+        );
     }
 
     #[test]
