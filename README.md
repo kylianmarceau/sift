@@ -127,8 +127,8 @@ data too, except `~/.config/sift`). Otherwise:
 file-index status, Open at Login, updates and window controls. With window
 controls enabled, the active workspace appears beside the icon and **Workspaces**
 switches between them. **Workspace Apps and Windows** lets you move the focused
-window, assign an app permanently, add and open an installed app, or add another
-numbered workspace. See the [menu bar guide](docs/menu-bar.md).
+window, assign an app permanently, remove an assignment, add and open an
+installed app, or add another numbered workspace. See the [menu bar guide](docs/menu-bar.md).
 
 - Type to search apps, files and folders (files need two characters).
   With nothing typed, the panel lists your favorites and recent items.

@@ -207,6 +207,24 @@ impl Config {
         write_replacing(path, &edited).map_err(|e| format!("Cannot save {}: {e}", path.display()))
     }
 
+    /// Removes the app-wide assignment rules for `app_id` that the menu
+    /// bar saves. Returns how many rules were removed. Existing comments
+    /// and unrelated rules survive; malformed configuration and invalid
+    /// window-manager configuration are never written back.
+    pub fn remove_workspace_app(path: &Path, app_id: &str) -> Result<usize, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        let (edited, count) = apply_unassign(&text, app_id)?;
+        if count > 0 {
+            write_replacing(path, &edited)
+                .map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
+        }
+        Ok(count)
+    }
+
     /// Loads `path`. A missing file gives the defaults; a malformed one
     /// gives the defaults plus the parse error; invalid commands are
     /// dropped with a problem each.
@@ -341,6 +359,58 @@ pub fn apply_workspace(text: &str, name: &str, app_id: Option<&str>) -> Result<S
         .validate()
         .map_err(|e| e.to_string())?;
     Ok(edited)
+}
+
+/// `text` without the app-wide assignment rules for `app_id` (the rules
+/// the menu bar writes) and how many were removed. Everything else stays:
+/// comments, workspaces, and title-specific or floating rules for the same
+/// app. The file is unchanged when nothing matches.
+pub fn apply_unassign(text: &str, app_id: &str) -> Result<(String, usize), String> {
+    use toml_edit::DocumentMut;
+    let original: Config = toml::from_str(text)
+        .map_err(|e| format!("config.toml was not changed: {}", e.message()))?;
+    original
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    if app_id.is_empty() {
+        return Err("The application has no bundle identifier".into());
+    }
+    let exact = format!("^{}$", regex::escape(app_id));
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let Some(rules) = doc
+        .as_table_mut()
+        .get_mut("window_manager")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|wm| wm.get_mut("rules"))
+        .and_then(|item| item.as_array_of_tables_mut())
+    else {
+        return Ok((text.to_owned(), 0));
+    };
+    let before = rules.len();
+    rules.retain(|rule| {
+        !(rule.get("app_id").and_then(|v| v.as_str()) == Some(exact.as_str())
+            && !rule.contains_key("title")
+            && !rule.contains_key("app_name")
+            && !rule.contains_key("floating")
+            && !rule
+                .get("check_further")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false))
+    });
+    if rules.len() == before {
+        return Ok((text.to_owned(), 0));
+    }
+    let removed = before - rules.len();
+    let edited = doc.to_string();
+    let config: Config = toml::from_str(&edited).map_err(|e| e.to_string())?;
+    config
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    Ok((edited, removed))
 }
 
 pub fn apply_workspace_shortcuts(text: &str) -> Result<(String, usize), String> {
@@ -549,6 +619,61 @@ mod tests {
         assert!(pattern.is_match("com.example.Editor+Beta"));
         assert!(!pattern.is_match("comXexampleXEditorBeta"));
         assert_eq!(wm.rules[1].floating, Some(true));
+    }
+
+    #[test]
+    fn unassign_removes_only_the_menu_assignment() {
+        let source = "# mine\n[window_manager]\nworkspaces = ['1', '2']\n[[window_manager.rules]]\napp_id = '^com\\.example\\.editor$'\nworkspace = '1'\n[[window_manager.rules]]\napp_id = '^com\\.example\\.editor$'\ntitle = '(?i)settings'\nfloating = true\n[[window_manager.rules]]\napp_id = '^com\\.example\\.other$'\nworkspace = '2'\n";
+        let (edited, count) = super::apply_unassign(source, "com.example.editor").unwrap();
+        assert_eq!(count, 1);
+        assert!(edited.contains("# mine"));
+        let loaded = super::Config::parse(&edited);
+        assert!(loaded.problems.is_empty());
+        let wm = loaded.config.window_manager;
+        assert!(wm.workspaces.iter().any(|w| w == "1"));
+        assert_eq!(wm.rules.len(), 2);
+        // The simple rule is gone; the title-specific one survives.
+        assert!(wm.rules.iter().all(|r| r.workspace != Some("1".into())));
+        assert_eq!(wm.rules[0].title.as_deref(), Some("(?i)settings"));
+
+        // Removing again changes nothing.
+        let (again, count) = super::apply_unassign(&edited, "com.example.editor").unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(again, edited);
+
+        // A file without rules or a [window_manager] table is left as it is.
+        for text in ["# nothing\n", "[updates]\ncheck = false\n"] {
+            let (edited, count) = super::apply_unassign(text, "com.example.editor").unwrap();
+            assert_eq!(count, 0);
+            assert_eq!(edited, text);
+        }
+        assert!(super::apply_unassign("# mine\n", "").is_err());
+        assert!(super::apply_unassign("[broken", "com.example.editor").is_err());
+
+        // A missing file has no assignment to remove.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::Config::remove_workspace_app(&dir.path().join("none.toml"), "com.a.b").unwrap(),
+            0
+        );
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, source).unwrap();
+        assert_eq!(
+            super::Config::remove_workspace_app(&path, "com.example.editor").unwrap(),
+            1
+        );
+        let loaded = super::Config::parse(&std::fs::read_to_string(&path).unwrap());
+        assert!(loaded.problems.is_empty());
+        assert!(loaded.config.window_manager.rules[0].title.is_some());
+        // An uninstalled app's assignment can still be removed by bundle id.
+        assert_eq!(
+            super::Config::remove_workspace_app(
+                &dir.path().join("config.toml"),
+                "com.example.other"
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

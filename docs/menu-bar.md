@@ -28,8 +28,11 @@ read their full text in a tooltip.
 and use **Assign App…** to save app assignments before granting window-control
 permission or enabling tiling. These setup actions do not move windows or launch
 apps. With workspace control running, **Add and Open App…** also opens the app.
-Saved assignments appear under **Assigned Apps** and have checkmarks in the app
-picker. When controls are unavailable, the menu bar shows a checkmark and the
+Saved assignments appear under **Assigned Apps**; choosing one there removes the
+assignment, leaving that app's windows where they are. Apps that are assigned
+but not installed stay listed by bundle identifier, so stray assignments are
+always removable. Assigned apps also have checkmarks in the app picker. When
+controls are unavailable, the menu bar shows a checkmark and the
 menu explains that the assignment was saved without moving a window.
 
 Turn on **Window Management → Window Shortcuts and Controls** and grant macOS
@@ -49,11 +52,13 @@ Under **Workspace Apps and Windows → Workspace N**:
   managed windows, and switches to the destination workspace.
 - **Add and Open App…** lists installed apps alphabetically. Choosing one saves
   the same assignment and opens or activates the app in that workspace.
+- **Assigned Apps** lists saved assignments; choosing one removes that app's
+  assignment. Its windows stay where they are.
 - Window entries focus the chosen window, switching workspace when needed.
 
 **Add Workspace N** saves the next unused positive number. Use it again to add
 more workspaces. **Edit Workspace Names and Rules…** opens `config.toml` for
-custom names, keyboard bindings, or removing saved assignments.
+custom names and keyboard bindings.
 
 If a custom `[window_manager.bindings.main]` table replaced the numbered
 shortcuts, choose **Add Missing Workspace Shortcuts**. This adds Ctrl–1…9,
@@ -69,7 +74,8 @@ workspace is still active when their window appears.
 Assignments are exact bundle-ID routing rules at the beginning of
 `[[window_manager.rules]]`. An explicit menu assignment takes precedence over
 later rules for that app. Reassigning the same app replaces its previous simple
-app-wide rule; title-specific and floating rules remain in the file. Settings,
+app-wide rule; removing it from **Assigned Apps** deletes that rule.
+Title-specific and floating rules remain in the file. Settings,
 snippets, unrelated rules and comments are preserved. Invalid configuration is
 left unchanged, and the menu reports save errors. Changes apply immediately and
 persist across app and Sift restarts. Existing include/exclude app filters still

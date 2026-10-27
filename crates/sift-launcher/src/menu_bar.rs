@@ -27,6 +27,10 @@ enum Action {
         app_id: String,
         open: Option<PathBuf>,
     },
+    UnassignApp {
+        workspace: String,
+        app_id: String,
+    },
     AddWorkspace(String),
     AddWorkspaceShortcuts,
     Reload,
@@ -358,6 +362,42 @@ impl State {
             self.notice = Some(message.clone());
             return Ok(());
         }
+        if let Action::UnassignApp { workspace, app_id } = &action {
+            let app_name = self
+                .launcher
+                .read(cx)
+                .apps
+                .as_ref()
+                .and_then(|apps| {
+                    apps.catalog()
+                        .apps()
+                        .iter()
+                        .find(|app| app.bundle_id.as_deref() == Some(app_id.as_str()))
+                })
+                .map(|app| app.name.to_string())
+                .unwrap_or_else(|| app_id.clone());
+            let removed = self
+                .launcher
+                .update(cx, |launcher, cx| -> Result<usize, String> {
+                    let removed = sift_state::Config::remove_workspace_app(
+                        launcher.user.config_path(),
+                        app_id,
+                    )?;
+                    launcher.reload_config(cx);
+                    Ok(removed)
+                })?;
+            if removed == 0 {
+                self.notice = Some(format!(
+                    "{app_name} is not assigned to Workspace {workspace}."
+                ));
+            } else {
+                tracing::info!(app = %app_id, workspace, "workspace assignment removed");
+                self.notice = Some(format!(
+                    "{app_name} removed from Workspace {workspace}. Its windows stay where they are."
+                ));
+            }
+            return Ok(());
+        }
         self.window
             .update(cx, |launcher, window, cx| -> Result<(), String> {
                 match action {
@@ -397,6 +437,7 @@ impl State {
                     }
                     Action::AddWorkspaceShortcuts => unreachable!("handled with the menu state"),
                     Action::AssignApp { .. } => unreachable!("handled after the window update"),
+                    Action::UnassignApp { .. } => unreachable!("handled with the menu state"),
                     Action::Reload => {
                         launcher.reload_config(cx);
                         launcher.retry_window_management(cx);
@@ -739,21 +780,33 @@ fn manage_workspaces(
             .filter(|w| &w.workspace == name)
             .collect();
         let mut children = vec![Item::label(format!("{} windows", windows.len()))];
-        if let Some(apps) = apps {
-            let assigned: Vec<_> = apps
-                .catalog()
-                .apps()
-                .iter()
-                .filter(|app| {
-                    app.bundle_id
-                        .as_deref()
-                        .is_some_and(|id| saved_assignment(config, id) == Some(name.as_str()))
-                })
-                .map(|app| Item::label(app.name.as_ref()))
-                .collect();
-            if !assigned.is_empty() {
-                children.push(submenu("Assigned Apps", assigned));
-            }
+        // Saved assignments, each removable by clicking it. Assignments for
+        // apps that are not installed (or have no bundle name in the
+        // catalog) still appear, by bundle identifier.
+        let assigned: Vec<_> = config
+            .assigned_apps(name)
+            .into_iter()
+            .map(|app_id| {
+                let app_name = apps
+                    .and_then(|apps| {
+                        apps.catalog()
+                            .apps()
+                            .iter()
+                            .find(|app| app.bundle_id.as_deref() == Some(app_id.as_str()))
+                    })
+                    .map(|app| app.name.to_string())
+                    .unwrap_or_else(|| app_id.clone());
+                action(
+                    format!("Remove {} from Workspace {}", short(&app_name, 35), name),
+                    Action::UnassignApp {
+                        workspace: name.clone(),
+                        app_id,
+                    },
+                )
+            })
+            .collect();
+        if !assigned.is_empty() {
+            children.push(submenu("Assigned Apps", assigned));
         }
         if can_control {
             if let Some(focused) = snapshot
@@ -1105,11 +1158,25 @@ mod tests {
             workspace
                 .children
                 .iter()
-                .find(|i| i.title == "Assigned Apps")
+                .find(|i| i.title.starts_with("Assigned Apps"))
                 .unwrap()
                 .children[0]
                 .title,
-            "Editor"
+            "Remove Editor from Workspace 1"
+        );
+        let remove = workspace
+            .children
+            .iter()
+            .find(|i| i.title == "Assigned Apps")
+            .unwrap()
+            .children[0]
+            .clone();
+        assert_eq!(
+            serde_json::from_str::<Action>(remove.action.as_ref().unwrap()).unwrap(),
+            Action::UnassignApp {
+                workspace: "1".into(),
+                app_id: "com.example.editor".into(),
+            }
         );
         let picker = workspace
             .children
@@ -1118,5 +1185,68 @@ mod tests {
             .unwrap();
         assert!(picker.children[0].children[0].checked);
         assert!(assignment_notice("Editor", "1", false).contains("Nothing moved"));
+    }
+    #[test]
+    fn assigned_apps_are_listed_as_removals_even_without_a_catalog() {
+        let config = sift_state::Config::parse(
+            "[[window_manager.rules]]\napp_id = '^com\\.example\\.gone$'\nworkspace = '2'\n[[window_manager.rules]]\napp_id = '^com\\.example\\.editor$'\nworkspace = '1'\n",
+        );
+        assert!(config.problems.is_empty());
+        // No app catalog at all: the assignment is still removable, by
+        // bundle identifier.
+        let menu = manage_workspaces(
+            &Snapshot::default(),
+            &config.config.window_manager,
+            None,
+            false,
+        );
+        let workspace = menu
+            .children
+            .iter()
+            .find(|i| i.title == "Workspace 1")
+            .unwrap();
+        let remove = workspace
+            .children
+            .iter()
+            .find(|i| i.title == "Assigned Apps")
+            .expect("assigned apps submenu")
+            .children[0]
+            .clone();
+        assert_eq!(remove.title, "Remove com.example.editor from Workspace 1");
+        assert_eq!(
+            serde_json::from_str::<Action>(remove.action.as_ref().unwrap()).unwrap(),
+            Action::UnassignApp {
+                workspace: "1".into(),
+                app_id: "com.example.editor".into(),
+            }
+        );
+        let gone = menu
+            .children
+            .iter()
+            .find(|i| i.title == "Workspace 2")
+            .unwrap();
+        let gone_remove = gone
+            .children
+            .iter()
+            .find(|i| i.title == "Assigned Apps")
+            .expect("assigned apps submenu for the uninstalled app")
+            .children[0]
+            .clone();
+        assert_eq!(
+            gone_remove.title,
+            "Remove com.example.gone from Workspace 2"
+        );
+        // A workspace without assignments has no Assigned Apps submenu.
+        let workspace = menu
+            .children
+            .iter()
+            .find(|i| i.title == "Workspace 3")
+            .unwrap();
+        assert!(
+            !workspace
+                .children
+                .iter()
+                .any(|i| i.title == "Assigned Apps")
+        );
     }
 }
