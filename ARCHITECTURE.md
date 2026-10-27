@@ -995,6 +995,11 @@ and no signing key whose loss could push code to every user.
 
 Settings › General › Keyboard Shortcut shows the shortcut as key caps.
 Clicking them records a new one; *Use ⌥Space* goes back to the default.
+Settings › Window Management › Shortcuts does the same for every
+window-management binding: a change writes the mode's whole binding table
+to config.toml (a bindings table replaces the defaults, so the complete
+table is saved), refuses keys another binding or launcher shortcut uses,
+and reloads the configuration to re-register the shortcuts.
 
 **Recording.** `sift_macos::key_capture` adds an AppKit local event
 monitor for key presses. It sees presses in Sift's own windows before

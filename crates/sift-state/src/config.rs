@@ -225,6 +225,26 @@ impl Config {
         Ok(count)
     }
 
+    /// Replaces the bindings of `mode` with `bindings` (an empty table
+    /// clears the mode) and keeps the rest of the file, including other
+    /// binding modes. The whole mode table is written so a change never
+    /// drops the rest of the mode's shortcuts on the next load. Existing
+    /// comments elsewhere survive; malformed configuration and invalid
+    /// window-manager configuration are never written back.
+    pub fn save_bindings(
+        path: &Path,
+        mode: &str,
+        bindings: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Result<(), String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        let edited = apply_binding_table(&text, mode, bindings)?;
+        write_replacing(path, &edited).map_err(|e| format!("Cannot save {}: {e}", path.display()))
+    }
+
     /// Loads `path`. A missing file gives the defaults; a malformed one
     /// gives the defaults plus the parse error; invalid commands are
     /// dropped with a problem each.
@@ -433,9 +453,9 @@ pub fn apply_workspace_shortcuts(text: &str) -> Result<(String, usize), String> 
             .iter()
             .any(|name| name == &n.to_string())
         {
-            wanted.push((format!("ctrl-{n}"), format!("workspace {n}")));
+            wanted.push((format!("alt-{n}"), format!("workspace {n}")));
             wanted.push((
-                format!("ctrl-shift-{n}"),
+                format!("alt-shift-{n}"),
                 format!("move-node-to-workspace {n}"),
             ));
         }
@@ -469,6 +489,89 @@ pub fn apply_workspace_shortcuts(text: &str) -> Result<(String, usize), String> 
         .validate()
         .map_err(|e| e.to_string())?;
     Ok((edited, count))
+}
+
+/// `text` with `mode`'s binding table replaced by `bindings` and
+/// everything else unchanged.
+pub fn apply_binding_table(
+    text: &str,
+    mode: &str,
+    bindings: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<String, String> {
+    use toml_edit::DocumentMut;
+    let original: Config = toml::from_str(text)
+        .map_err(|e| format!("config.toml was not changed: {}", e.message()))?;
+    original
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    validate_binding_entries(mode, bindings)?;
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let wm = doc
+        .as_table_mut()
+        .entry("window_manager")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or("[window_manager] is not a table")?;
+    let modes = wm
+        .entry("bindings")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or("window_manager.bindings is not a table")?;
+    let table = modes
+        .entry(mode)
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or_else(|| format!("window_manager.bindings.{mode} is not a table"))?;
+    let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
+    for key in keys {
+        table.remove(&key);
+    }
+    for (key, commands) in bindings {
+        let mut array = toml_edit::Array::new();
+        for command in commands {
+            array.push(command);
+        }
+        table.insert(key, toml_edit::value(array));
+    }
+    let edited = doc.to_string();
+    let config: Config = toml::from_str(&edited).map_err(|e| e.to_string())?;
+    config
+        .window_manager
+        .validate()
+        .map_err(|e| e.to_string())?;
+    Ok(edited)
+}
+
+/// Checks a binding table before it is written: each key is a physical
+/// shortcut Sift can register and each command is one Sift understands.
+fn validate_binding_entries(
+    mode: &str,
+    bindings: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    if mode.is_empty() || mode.len() > 128 || mode.chars().any(char::is_control) {
+        return Err(format!("{mode:?} is not a usable binding mode name"));
+    }
+    if bindings.is_empty() {
+        return Err(format!("the {mode} mode needs at least one shortcut"));
+    }
+    if bindings.len() > 256 {
+        return Err("too many hotkeys in a mode".into());
+    }
+    for (key, commands) in bindings {
+        if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+            return Err(format!("{key:?} is not a usable shortcut name"));
+        }
+        if commands.is_empty() || commands.len() > 32 {
+            return Err(format!("{key} needs 1 to 32 commands"));
+        }
+        for text in commands {
+            sift_wm::parse(text).map_err(|e| format!("{key}: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// An option the settings window can change.
@@ -586,13 +689,13 @@ mod tests {
     fn workspace_shortcuts_preserve_custom_bindings_and_are_idempotent() {
         let source = "# mine\n[window_manager.bindings.main]\nctrl-alt-t = ['focus --target terminal'] # keep\nctrl-1 = ['focus left']\n[window_manager.targets.terminal]\napp_id = 'com.apple.Terminal'\n";
         let (edited, count) = super::apply_workspace_shortcuts(source).unwrap();
-        assert_eq!(count, 18);
+        assert_eq!(count, 19);
         assert!(edited.contains("# keep"));
         let config = super::Config::parse(&edited).config;
         let main = &config.window_manager.bindings["main"];
         assert_eq!(main["ctrl-1"], ["focus left"]);
-        assert_eq!(main["ctrl-2"], ["workspace 2"]);
-        assert_eq!(main["ctrl-shift-9"], ["move-node-to-workspace 9"]);
+        assert_eq!(main["alt-2"], ["workspace 2"]);
+        assert_eq!(main["alt-shift-9"], ["move-node-to-workspace 9"]);
         assert_eq!(main["ctrl-alt-t"], ["focus --target terminal"]);
         let (again, added) = super::apply_workspace_shortcuts(&edited).unwrap();
         assert_eq!(added, 0);
@@ -619,6 +722,50 @@ mod tests {
         assert!(pattern.is_match("com.example.Editor+Beta"));
         assert!(!pattern.is_match("comXexampleXEditorBeta"));
         assert_eq!(wm.rules[1].floating, Some(true));
+    }
+
+    #[test]
+    fn binding_tables_replace_one_mode_and_keep_the_rest() {
+        let source = "# mine\n[window_manager]\nenabled = true\n[[window_manager.rules]]\napp_id = '^x$'\n[window_manager.bindings.resize]\nh = ['resize smart -10'] # mode comment\n[window_manager.bindings.main]\nalt-1 = ['workspace 1'] # mine\nalt-2 = ['workspace 2']\n";
+        let mut main = std::collections::BTreeMap::new();
+        main.insert("alt-1".to_string(), vec!["focus left".to_string()]);
+        main.insert("alt-3".to_string(), vec!["workspace 3".to_string()]);
+        let edited = super::apply_binding_table(source, "main", &main).unwrap();
+        assert!(edited.contains("# mode"));
+        let loaded = super::Config::parse(&edited);
+        assert!(loaded.problems.is_empty());
+        let main = loaded.config.window_manager.bindings["main"].clone();
+        // The whole table is replaced: the old entry is gone, the new one set.
+        assert_eq!(main["alt-1"], ["focus left"]);
+        assert_eq!(main["alt-3"], ["workspace 3"]);
+        assert!(!main.contains_key("alt-2"));
+        // Other modes are untouched.
+        assert_eq!(
+            loaded.config.window_manager.bindings["resize"]["h"],
+            ["resize smart -10"]
+        );
+
+        // Round trip through save_bindings on a template-only file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        super::Config::save_bindings(&path, "main", &main).unwrap();
+        let loaded = super::Config::load(&path);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(
+            loaded.config.window_manager.bindings["main"]["alt-3"],
+            ["workspace 3"]
+        );
+        // A broken file is never written.
+        std::fs::write(&path, "[broken\n").unwrap();
+        assert!(super::Config::save_bindings(&path, "main", &main).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken\n");
+        // Unusable entries are refused before anything is written.
+        let mut bad = main.clone();
+        bad.insert("bad".into(), vec!["not a command".into()]);
+        assert!(super::Config::save_bindings(&path, "main", &bad).is_err());
+        assert!(super::Config::save_bindings(&path, "", &main).is_err());
+        let empty = std::collections::BTreeMap::new();
+        assert!(super::apply_binding_table(&edited, "main", &empty).is_err());
     }
 
     #[test]

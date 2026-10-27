@@ -61,7 +61,7 @@ more workspaces. **Edit Workspace Names and Rules…** opens `config.toml` for
 custom names and keyboard bindings.
 
 If a custom `[window_manager.bindings.main]` table replaced the numbered
-shortcuts, choose **Add Missing Workspace Shortcuts**. This adds Ctrl–1…9,
+shortcuts, choose **Add Missing Workspace Shortcuts**. This adds Option–1…9,
 their Shift variants for moving windows, and Ctrl–Option–Tab where those keys are
 missing. Existing bindings are preserved. Window shortcuts do not open the Sift
 search panel; permission or paused-state errors appear in the menu status.

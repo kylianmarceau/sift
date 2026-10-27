@@ -155,14 +155,14 @@ workspaces. Enter focuses the window or switches workspace. Window identities
 are temporary and are not added to recents or favorites.
 
 Most default bindings use **Control–Option**, leaving Option–Space for Sift.
-Numbered workspace bindings use **Control**:
+Numbered workspace bindings use **Option**:
 
 | Keys | Action |
 | --- | --- |
 | Control–Option–H/J/K/L | Focus left/down/up/right |
 | Control–Option–Shift–H/J/K/L | Move left/down/up/right |
-| Control–1…9 | Switch workspace |
-| Control–Shift–1…9 | Send window to workspace |
+| Option–1…9 | Switch workspace |
+| Option–Shift–1…9 | Send window to workspace |
 | Control–Option–Tab | Previous workspace |
 | Control–Option–F | Toggle Sift fullscreen |
 | Control–Option–Minus/Equal | Shrink/grow selected tile |
@@ -173,7 +173,10 @@ Numbered workspace bindings use **Control**:
 
 All bindings are registered by physical key. A configured mode replaces the
 default binding table for that mode. No hotkeys are registered when the feature
-is off. Shortcut recording temporarily suspends both launcher and window
+is off. Every main-mode shortcut can also be changed in **Sift Settings →
+Window Management → Shortcuts**: choose a key cap, press the new shortcut, and
+Sift writes the mode's binding table to config.toml and re-registers the
+shortcuts. Shortcut recording temporarily suspends both launcher and window
 shortcuts. A window shortcut conflicting with Sift's launcher shortcut is
 reported; macOS does not reliably report conflicts with other applications.
 Tree layout shortcuts are inactive while Automatic Tiling is off. Directional

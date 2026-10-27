@@ -38,6 +38,57 @@ use sift_state::Setting;
 /// config.toml is shown as an extra choice.
 const CLIP_SIZES: &[usize] = &[50, 200, 500, 1000];
 
+/// What a recording will change: a launcher shortcut or a
+/// window-management binding (by its key in `config.toml`).
+#[derive(Clone, PartialEq, Eq)]
+enum Recording {
+    Slot(Slot),
+    Binding(String),
+}
+
+/// A human description of what a binding's commands do, for the settings
+/// list. Falls back to the command text itself.
+fn describe_commands(commands: Vec<String>) -> String {
+    let text = commands.first().map(String::as_str).unwrap_or("");
+    let mut words = text.split_whitespace();
+    let described = match words.next() {
+        Some("workspace") => words.next().map(|n| format!("Switch to Workspace {n}")),
+        Some("move-node-to-workspace") => words
+            .next()
+            .map(|n| format!("Move the Window to Workspace {n}")),
+        Some("workspace-back-and-forth") => Some("Switch to the Previous Workspace".into()),
+        Some("focus") => match words.next() {
+            Some("left") => Some("Focus the Window to the Left".into()),
+            Some("down") => Some("Focus the Window Below".into()),
+            Some("up") => Some("Focus the Window Above".into()),
+            Some("right") => Some("Focus the Window to the Right".into()),
+            Some("--target") => words.next().map(|t| format!("Focus Target {t}")),
+            _ => None,
+        },
+        Some("move") => match words.next() {
+            Some("left") => Some("Move the Window Left".into()),
+            Some("down") => Some("Move the Window Down".into()),
+            Some("up") => Some("Move the Window Up".into()),
+            Some("right") => Some("Move the Window Right".into()),
+            _ => None,
+        },
+        Some("snap") => words.next().map(|direction| match direction {
+            "left" => "Snap the Window to the Left Half".into(),
+            "right" => "Snap the Window to the Right Half".into(),
+            "center" => "Center the Window".into(),
+            "maximize" => "Maximize the Window".into(),
+            "restore" => "Restore the Window's Size".into(),
+            other => format!("Snap {other}"),
+        }),
+        Some("fullscreen") => Some("Toggle Fullscreen".into()),
+        Some("layout") => Some("Change the Layout".into()),
+        Some("resize") => Some("Resize the Window".into()),
+        Some("balance") => Some("Balance the Layout".into()),
+        _ => None,
+    };
+    described.unwrap_or_else(|| text.to_string())
+}
+
 actions!(settings, [CloseSettings]);
 
 /// The open settings window, so a second request focuses it instead of
@@ -116,11 +167,11 @@ pub struct Settings {
     /// Open at Login, read when the window opens or becomes active (it can
     /// also be changed in System Settings).
     login: LoginStatus,
-    /// While a new shortcut is being recorded: for which slot, and the
-    /// capture of key presses.
-    recording: Option<(Slot, KeyCapture)>,
+    /// While a new shortcut is being recorded: for which slot or binding,
+    /// and the capture of key presses.
+    recording: Option<(Recording, KeyCapture)>,
     /// A note under a shortcut, and whether it reports a problem.
-    shortcut_note: Option<(Slot, SharedString, bool)>,
+    shortcut_note: Option<(Recording, SharedString, bool)>,
     /// Clear History was clicked once and waits for confirmation.
     confirm_clear: bool,
     _subscriptions: Vec<Subscription>,
@@ -211,10 +262,10 @@ impl Settings {
         }
     }
 
-    /// Starts recording a new shortcut for `slot`: the next key press in
+    /// Starts recording a new shortcut for `target`: the next key press in
     /// Sift's windows becomes it. The current shortcuts are off meanwhile,
     /// so they can be pressed too.
-    fn start_recording(&mut self, slot: Slot, cx: &mut Context<Self>) {
+    fn start_recording(&mut self, target: Recording, cx: &mut Context<Self>) {
         if self.recording.is_some() {
             return;
         }
@@ -222,7 +273,7 @@ impl Settings {
         let Some(capture) = KeyCapture::start(move |press| {
             let _ = tx.unbounded_send(press);
         }) else {
-            self.shortcut_note = Some((slot, "Cannot read the keyboard right now.".into(), true));
+            self.shortcut_note = Some((target, "Cannot read the keyboard right now.".into(), true));
             cx.notify();
             return;
         };
@@ -230,7 +281,7 @@ impl Settings {
             let () = hotkeys;
             cx.update_global::<Hotkeys, _>(|hotkeys, _| hotkeys.pause());
         }
-        self.recording = Some((slot, capture));
+        self.recording = Some((target, capture));
         self.shortcut_note = None;
         speak("Recording a shortcut. Press the new shortcut, or Escape to cancel.");
         // The task ends when the capture is dropped, which drops the sender.
@@ -258,25 +309,28 @@ impl Settings {
     }
 
     fn on_key_press(&mut self, press: KeyPress, cx: &mut Context<Self>) {
-        let Some((slot, _)) = &self.recording else {
+        let Some((target, _)) = &self.recording else {
             return;
         };
-        let slot = *slot;
+        let target = target.clone();
         match hotkey::interpret(&press) {
             Recorded::Cancel => {
                 self.stop_recording(cx);
                 speak("Cancelled.");
             }
             Recorded::Rejected(reason) => {
-                self.shortcut_note = Some((slot, reason.into(), true));
+                self.shortcut_note = Some((target, reason.into(), true));
                 speak(reason);
                 cx.notify();
             }
             Recorded::Shortcut(shortcut) => {
-                // Dropping the capture before `use_shortcut` resumes the
-                // other shortcuts.
+                // Dropping the capture before applying resumes the other
+                // shortcuts.
                 self.recording = None;
-                self.use_shortcut(slot, Some(shortcut), cx);
+                match target {
+                    Recording::Slot(slot) => self.use_shortcut(slot, Some(shortcut), cx),
+                    Recording::Binding(key) => self.use_binding(&key, shortcut, cx),
+                }
             }
         }
     }
@@ -303,7 +357,7 @@ impl Settings {
                 speak(&format!("Shortcut set to {}.", shortcut.spoken()));
                 self.shortcut_note = shortcut
                     .system_conflict()
-                    .map(|note| (slot, note.into(), false));
+                    .map(|note| (Recording::Slot(slot), note.into(), false));
                 if slot == Slot::Pop && !sift_macos::wm::trusted() {
                     // Apple's prompt, after the user chose to use it.
                     sift_macos::wm::request_accessibility();
@@ -316,10 +370,114 @@ impl Settings {
             }
             (Err(reason), _) => {
                 speak(&reason);
-                self.shortcut_note = Some((slot, reason.into(), true));
+                self.shortcut_note = Some((Recording::Slot(slot), reason.into(), true));
             }
         }
         cx.notify();
+    }
+
+    /// Makes `shortcut` the key for the window-management binding `key`,
+    /// replacing its previous key, and saves the mode's binding table to
+    /// config.toml.
+    fn use_binding(&mut self, key: &str, shortcut: Shortcut, cx: &mut Context<Self>) {
+        match self.apply_binding_change(key, Some(&shortcut), cx) {
+            Ok(()) => {
+                speak(&format!("Shortcut set to {}.", shortcut.spoken()));
+            }
+            Err(reason) => {
+                speak(&reason);
+                self.shortcut_note =
+                    Some((Recording::Binding(key.to_string()), reason.into(), true));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Removes the window-management binding `key`, or resets it to Sift's
+    /// default when there is one.
+    fn remove_binding(&mut self, key: &str, cx: &mut Context<Self>) {
+        match self.apply_binding_change(key, None, cx) {
+            Ok(()) => speak("Shortcut removed."),
+            Err(reason) => {
+                speak(&reason);
+                self.shortcut_note =
+                    Some((Recording::Binding(key.to_string()), reason.into(), true));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Writes a change to the `main` binding mode and reloads. A key's
+    /// whole mode table is saved, because a bindings table in config.toml
+    /// replaces the default shortcuts entirely.
+    fn apply_binding_change(
+        &mut self,
+        key: &str,
+        shortcut: Option<&Shortcut>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let launcher = self.launcher.read(cx);
+        let config = launcher.user.window_manager_config().clone();
+        let path = launcher.user.config_path().to_path_buf();
+        let mode = config
+            .bindings
+            .get("main")
+            .ok_or("The main binding mode is missing.")?;
+        let commands = mode
+            .get(key)
+            .cloned()
+            .ok_or("That shortcut is no longer configured. Reopen Settings.")?;
+        let mut bindings = mode.clone();
+        if let Some(shortcut) = shortcut {
+            let text = hotkey::binding_text(shortcut);
+            // Main-mode rules: the recorder already requires ⌘, ⌃ or ⌥
+            // (or a function key); this keeps hand-written keys honest too.
+            if hotkey::from_binding(&text).is_none() {
+                return Err(
+                    "Main-mode window shortcuts need Command, Control or Option, or a \
+                     function key."
+                        .into(),
+                );
+            }
+            if let Some(other) = mode
+                .keys()
+                .filter(|k| k.as_str() != key)
+                .find(|k| hotkey::from_binding(k).is_some_and(|s| s.same_key(shortcut)))
+            {
+                return Err(format!(
+                    "{} is already used by {}.",
+                    shortcut.display(),
+                    describe_commands(mode.get(other).cloned().unwrap_or_default())
+                ));
+            }
+            if let Some(hotkeys) = cx.try_global::<Hotkeys>()
+                && let Some(purpose) = hotkey::slot_conflict(hotkeys, shortcut)
+            {
+                return Err(format!(
+                    "{} is already used by Sift's shortcut, which {}.",
+                    shortcut.display(),
+                    purpose
+                ));
+            }
+            bindings.remove(key);
+            bindings.insert(text.clone(), commands.clone());
+        } else {
+            // A default shortcut comes back when it is reset; a custom one
+            // is deleted.
+            let default = sift_wm::Config::default();
+            match default.bindings.get("main").and_then(|m| m.get(key)) {
+                Some(default_commands) => {
+                    bindings.insert(key.to_string(), default_commands.clone());
+                }
+                None => {
+                    bindings.remove(key);
+                }
+            }
+        }
+        sift_state::Config::save_bindings(&path, "main", &bindings)?;
+        self.launcher
+            .update(cx, |launcher, cx| launcher.reload_config(cx));
+        Ok(())
     }
 
     fn send(&self, command: Command, cx: &App) {
@@ -788,7 +946,7 @@ impl Settings {
                     .child(switch(automatic, theme))))
             .child(div().h(px(1.)).bg(theme.divider))
             .child(div().text_size(px(12.)).text_color(theme.muted)
-                .child("Requires Device Control and Data Access on macOS 27, or Accessibility on older macOS. Control–Option with H/J/K/L focuses windows; arrow keys snap the selected window. Configure persistent app/title shortcuts in Edit Rules and Shortcuts. Manual changes stay in place when controls are turned off."))
+                .child("Requires Device Control and Data Access on macOS 27, or Accessibility on older macOS. Control–Option with H/J/K/L focuses windows; arrow keys snap the selected window. The shortcuts below are saved to config.toml and can be changed here."))
             .child(div().flex().gap(px(8.))
                 .child(button("window-management-permission", "Grant Window Control…", Kind::Secondary, theme)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -797,6 +955,144 @@ impl Settings {
                     })))
                 .child(button("window-management-config", "Edit Rules and Shortcuts…", Kind::Secondary, theme)
                     .on_click(cx.listener(|this, _, _, cx| this.open_config_file(cx)))))
+            .child(div().h(px(1.)).bg(theme.divider))
+            .child(self.render_window_bindings(theme, cx))
+            .into_any_element()
+    }
+
+    /// The window-management shortcuts, each with a key-cap recorder that
+    /// saves the change to config.toml and re-registers the shortcuts.
+    fn render_window_bindings(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let mode = self
+            .launcher
+            .read(cx)
+            .user
+            .window_manager_config()
+            .bindings
+            .get("main")
+            .cloned()
+            .unwrap_or_default();
+        let default_main = sift_wm::Config::default()
+            .bindings
+            .get("main")
+            .cloned()
+            .unwrap_or_default();
+        let mut entries: Vec<(String, String)> = mode
+            .iter()
+            .map(|(key, commands)| (key.clone(), describe_commands(commands.clone())))
+            .collect();
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let rows: Vec<AnyElement> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, description))| {
+                let shortcut = hotkey::from_binding(&key);
+                let recording =
+                    matches!(&self.recording, Some((Recording::Binding(k), _)) if k == &key);
+                let (detail, problem) = self
+                    .shortcut_note
+                    .as_ref()
+                    .filter(|(t, ..)| matches!(t, Recording::Binding(k) if k == &key))
+                    .map(|(_, note, problem)| (note.clone(), *problem))
+                    .unwrap_or_else(|| {
+                        let unusable = shortcut.is_none();
+                        (
+                            if unusable {
+                                format!("{description} (not usable)").into()
+                            } else {
+                                description.clone().into()
+                            },
+                            unusable,
+                        )
+                    });
+                let record_key = key.clone();
+                let recorder = div()
+                    .id(("binding-recorder", index))
+                    .flex_none()
+                    .min_w(px(92.))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .map(|el| {
+                        if recording {
+                            el.border_color(theme.accent)
+                                .bg(theme.card)
+                                .text_color(theme.accent)
+                                .child("Type shortcut…")
+                        } else {
+                            let hover = theme.selected;
+                            let el = el
+                                .border_color(gpui::transparent_black())
+                                .bg(theme.key_background)
+                                .text_color(theme.key_text)
+                                .hover(move |style| style.bg(hover));
+                            match &shortcut {
+                                Some(shortcut) => el.children(
+                                    shortcut.parts().into_iter().map(|part| div().child(part)),
+                                ),
+                                None => el.child("Not usable"),
+                            }
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if recording {
+                            this.stop_recording(cx);
+                        } else {
+                            this.stop_recording(cx);
+                            this.start_recording(Recording::Binding(record_key.clone()), cx);
+                        }
+                    }));
+                // A default shortcut can be reset to Sift's default; a
+                // custom one can be removed. Neither makes sense when the
+                // binding already shows the default.
+                let reset_key = key.clone();
+                let reset = (!recording
+                    && shortcut.is_some()
+                    && default_main
+                        .get(&key)
+                        .is_some_and(|default| mode.get(&key) != Some(default)))
+                .then(|| {
+                    button(("binding-reset", index), "Use Default", Kind::Link, theme).on_click(
+                        cx.listener(move |this, _, _, cx| this.remove_binding(&reset_key, cx)),
+                    )
+                });
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(div().font_weight(FontWeight::MEDIUM).child(description))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(if problem { theme.error } else { theme.muted })
+                                    .child(detail),
+                            ),
+                    )
+                    .children(reset)
+                    .child(recorder)
+                    .into_any_element()
+            })
+            .collect();
+        div().flex().flex_col().gap(px(12.))
+            .child(div().font_weight(FontWeight::MEDIUM).child("Shortcuts"))
+            .child(div().text_size(px(12.)).text_color(theme.muted)
+                .child("Choose a key cap and press the new shortcut. Escape cancels. Shortcuts are saved to config.toml and work while Window Shortcuts and Controls is on."))
+            .children(rows)
             .into_any_element()
     }
 
@@ -811,11 +1107,11 @@ impl Settings {
             Slot::Panel => Some(shortcut.unwrap_or_default()),
             Slot::Clipboard | Slot::Pop => shortcut,
         };
-        let recording = matches!(&self.recording, Some((s, _)) if *s == slot);
+        let recording = matches!(&self.recording, Some((Recording::Slot(s), _)) if *s == slot);
         let note = self
             .shortcut_note
             .as_ref()
-            .filter(|(s, ..)| *s == slot)
+            .filter(|(t, ..)| matches!(t, Recording::Slot(s) if *s == slot))
             .map(|(_, note, problem)| (note.clone(), *problem));
         let (detail, problem): (SharedString, bool) = match (note, &shortcut) {
             (Some(note), _) => note,
@@ -898,7 +1194,7 @@ impl Settings {
                     this.stop_recording(cx);
                 } else {
                     this.stop_recording(cx);
-                    this.start_recording(slot, cx);
+                    this.start_recording(Recording::Slot(slot), cx);
                 }
             }));
         let reset = match (slot, &shortcut) {
@@ -1501,6 +1797,76 @@ fn ago(unix: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_descriptions_cover_the_common_commands() {
+        let commands = |text: &str| vec![text.to_string()];
+        assert_eq!(
+            describe_commands(vec!["workspace 3".into()]),
+            "Switch to Workspace 3"
+        );
+        assert_eq!(
+            describe_commands(commands("move-node-to-workspace 7")),
+            "Move the Window to Workspace 7"
+        );
+        assert_eq!(
+            describe_commands(vec!["workspace-back-and-forth".into()]),
+            "Switch to the Previous Workspace"
+        );
+        assert_eq!(
+            describe_commands(vec!["focus left".into()]),
+            "Focus the Window to the Left"
+        );
+        assert_eq!(
+            describe_commands(vec!["focus --target terminal".into()]),
+            "Focus Target terminal"
+        );
+        assert_eq!(
+            describe_commands(vec!["move up".into()]),
+            "Move the Window Up"
+        );
+        assert_eq!(
+            describe_commands(vec!["snap center".into()]),
+            "Center the Window"
+        );
+        assert_eq!(
+            describe_commands(vec!["fullscreen".into()]),
+            "Toggle Fullscreen"
+        );
+        assert_eq!(
+            describe_commands(vec!["layout tiles horizontal vertical".into()]),
+            "Change the Layout"
+        );
+        // A sequence describes its first command; unknown text shows itself.
+        assert_eq!(
+            describe_commands(vec!["focus --target nope".into()]),
+            "Focus Target nope"
+        );
+        assert_eq!(
+            describe_commands(vec![
+                "layout tiles horizontal vertical".into(),
+                "move left".into()
+            ]),
+            "Change the Layout"
+        );
+        assert_eq!(describe_commands(vec![]), "");
+    }
+
+    #[test]
+    fn settings_has_a_usable_default_hotkey_list() {
+        // The window-management settings list needs the same descriptions
+        // the defaults produce, and every default main-mode key must be
+        // usable in the main mode.
+        let default = sift_wm::Config::default();
+        let main = &default.bindings["main"];
+        assert!(main.contains_key("alt-1"));
+        assert!(!main.contains_key("ctrl-1"));
+        for (key, commands) in main {
+            let shortcut = hotkey::from_binding(key).expect("default binding is usable");
+            assert!(!describe_commands(commands.clone()).is_empty(), "{key}");
+            assert!(shortcut.same_key(&shortcut));
+        }
+    }
 
     #[test]
     fn formats_sizes_and_ages() {

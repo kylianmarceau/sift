@@ -149,7 +149,7 @@ pub struct Launcher {
     service: Option<Arc<IndexService>>,
     index_status: Status,
     /// Config file, recents and favorites.
-    user: UserData,
+    pub(crate) user: UserData,
     app_count: usize,
     catalog_loaded_at: Option<Instant>,
     catalog_task: Option<Task<()>>,

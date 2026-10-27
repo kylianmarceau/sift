@@ -175,9 +175,9 @@ impl Default for Config {
             main.insert(key.into(), vec![command.into()]);
         }
         for n in 1..=9 {
-            main.insert(format!("ctrl-{n}"), vec![format!("workspace {n}")]);
+            main.insert(format!("alt-{n}"), vec![format!("workspace {n}")]);
             main.insert(
-                format!("ctrl-shift-{n}"),
+                format!("alt-shift-{n}"),
                 vec![format!("move-node-to-workspace {n}")],
             );
         }

@@ -96,6 +96,11 @@ impl Shortcut {
         self.hotkey == Self::default().hotkey
     }
 
+    /// Whether the two shortcuts press the same physical key.
+    pub fn same_key(&self, other: &Shortcut) -> bool {
+        self.hotkey == other.hotkey
+    }
+
     /// The modifier symbols in macOS order (⌃⌥⇧⌘), then the key.
     pub fn parts(&self) -> Vec<String> {
         let mods = self.hotkey.mods;
@@ -806,6 +811,34 @@ pub(crate) fn window_mode_hotkey(text: &str, mode: &str) -> Result<HotKey, Strin
     Ok(key)
 }
 
+/// The shortcut a window-management binding key stands for, with a label
+/// for display; `None` when the binding is not usable in the main mode.
+pub fn from_binding(text: &str) -> Option<Shortcut> {
+    let hotkey = window_mode_hotkey(text, "main").ok()?;
+    Some(Shortcut {
+        hotkey,
+        key: label(hotkey.key, ""),
+    })
+}
+
+/// The binding key Sift writes to config.toml for `shortcut`, in the same
+/// notation `[window_manager.bindings]` uses.
+pub fn binding_text(shortcut: &Shortcut) -> String {
+    shortcut.hotkey.into_string()
+}
+
+/// Which launcher slot's shortcut would `shortcut` collide with, if any.
+pub fn slot_conflict(hotkeys: &Hotkeys, shortcut: &Shortcut) -> Option<&'static str> {
+    Slot::ALL
+        .into_iter()
+        .find(|&slot| {
+            hotkeys
+                .current(slot)
+                .is_some_and(|s| s.hotkey == shortcut.hotkey)
+        })
+        .map(|slot| slot.purpose())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,6 +852,20 @@ mod tests {
         assert!(window_mode_hotkey("h", "resize").is_ok());
         assert!(window_mode_hotkey("escape", "resize").is_ok());
         assert!(window_mode_hotkey("ctrl-alt-h", "main").is_ok());
+    }
+
+    #[test]
+    fn binding_keys_round_trip_between_text_and_display() {
+        // Every default binding converts to a displayable shortcut, and
+        // the written binding form parses back to the same key.
+        for key in sift_wm::Config::default().bindings["main"].keys() {
+            let shortcut = from_binding(key).expect("usable default binding");
+            let text = binding_text(&shortcut);
+            let again = from_binding(&text).expect("round trip");
+            assert!(shortcut.same_key(&again), "{key} -> {text}");
+        }
+        assert!(from_binding("h").is_none());
+        assert!(from_binding("not a key").is_none());
     }
 
     fn press(key_code: u16, mods: &str, character: &str) -> KeyPress {

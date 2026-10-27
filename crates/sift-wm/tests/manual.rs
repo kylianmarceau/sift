@@ -286,7 +286,7 @@ fn manual_bindings_are_independent_and_configuration_rejects_bad_targets_and_she
     let manual = config.bindings_for_mode("main").expect("valid fixture");
     assert!(manual.contains_key("ctrl-alt-h"));
     assert!(manual.contains_key("ctrl-alt-left"));
-    assert!(manual.contains_key("ctrl-1"));
+    assert!(manual.contains_key("alt-1"));
     assert!(!manual.contains_key("ctrl-alt-slash"));
     let mut bad = config.clone();
     bad.targets

@@ -20,7 +20,7 @@ fn main() -> Result<(), String> {
         Code::Digit9,
     ];
     for code in codes {
-        for modifiers in [Modifiers::CONTROL, Modifiers::CONTROL | Modifiers::SHIFT] {
+        for modifiers in [Modifiers::ALT, Modifiers::ALT | Modifiers::SHIFT] {
             let key = HotKey::new(Some(modifiers), code);
             if let Err(error) = manager.register(key) {
                 for previous in registered {
@@ -34,6 +34,6 @@ fn main() -> Result<(), String> {
     for key in registered {
         manager.unregister(key).map_err(|e| e.to_string())?;
     }
-    println!("macOS accepted Ctrl–1…9 and Ctrl–Shift–1…9");
+    println!("macOS accepted Option–1…9 and Option–Shift–1…9");
     Ok(())
 }
