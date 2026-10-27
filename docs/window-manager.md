@@ -153,7 +153,8 @@ Type `win` or `win project` to search windows only, and `ws` or `ws code` for
 workspaces (only with Automatic Tiling enabled). Enter focuses the window or switches workspace. Window identities
 are temporary and are not added to recents or favorites.
 
-The default bindings use **Control–Option**, leaving Option–Space for Sift:
+Most default bindings use **Control–Option**, leaving Option–Space for Sift.
+Numbered workspace bindings use **Control**:
 
 | Keys | Action |
 | --- | --- |
