@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 (2026-10-27)
+
 - Use Ctrl–1…9 for workspace switching and launch assigned apps on demand;
   workspace shortcuts never open or type into the Sift launcher.
 - Show saved app assignments and confirmations, including an explanation when
