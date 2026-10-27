@@ -43,6 +43,8 @@ fn workspace_shortcut_focuses_existing_assigned_window_and_launches_missing_app(
     dia.app_id = "company.thebrowser.dia".into();
     dia.app_name = "Dia".into();
     e.add_window(dia).unwrap();
+    // An unrelated, more recently focused window must not steal the shortcut.
+    add(&mut e, 18);
     e.execute(Command::Workspace("2".into())).unwrap();
     let effects = e.execute(Command::Workspace("1".into())).unwrap();
     assert!(

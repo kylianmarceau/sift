@@ -874,6 +874,7 @@ impl Engine {
             )),
             Command::Workspace(target) => {
                 let target = self.workspace_target(&target)?;
+                let mut assigned_windows = Vec::new();
                 for app_id in self.config.assigned_apps(&target) {
                     if !self.manages_app(&app_id) {
                         continue;
@@ -894,10 +895,19 @@ impl Engine {
                             if workspace != target {
                                 self.move_to_workspace(id, &target, false)?;
                             }
+                            assigned_windows.push(id);
                         }
                     }
                 }
                 self.switch_workspace(&target)?;
+                if !self
+                    .focused
+                    .is_some_and(|id| assigned_windows.contains(&id))
+                {
+                    if let Some(id) = assigned_windows.first() {
+                        self.set_focus(*id);
+                    }
+                }
             }
             Command::SummonWorkspace(target) => {
                 self.ensure_workspace(&target)?;
