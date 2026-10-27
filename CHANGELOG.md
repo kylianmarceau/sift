@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 (2026-10-27)
+
+- Remove a workspace app assignment by choosing it under **Assigned Apps** in
+  the menu bar, without editing `config.toml`. Assignments of uninstalled apps
+  stay listed by bundle identifier, so stray assignments are always removable.
 
 ## 0.4.1 (2026-10-27)
 
