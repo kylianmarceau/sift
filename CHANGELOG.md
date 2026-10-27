@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use Ctrl–1…9 for workspace switching and launch assigned apps on demand;
+  workspace shortcuts never open or type into the Sift launcher.
 - Show saved app assignments and confirmations, including an explanation when
   window controls cannot move an app. Report blocked window shortcuts in the
   launcher and add missing numbered bindings without replacing custom shortcuts.

@@ -363,9 +363,9 @@ pub fn apply_workspace_shortcuts(text: &str) -> Result<(String, usize), String> 
             .iter()
             .any(|name| name == &n.to_string())
         {
-            wanted.push((format!("ctrl-alt-{n}"), format!("workspace {n}")));
+            wanted.push((format!("ctrl-{n}"), format!("workspace {n}")));
             wanted.push((
-                format!("ctrl-alt-shift-{n}"),
+                format!("ctrl-shift-{n}"),
                 format!("move-node-to-workspace {n}"),
             ));
         }
@@ -514,15 +514,15 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 mod tests {
     #[test]
     fn workspace_shortcuts_preserve_custom_bindings_and_are_idempotent() {
-        let source = "# mine\n[window_manager.bindings.main]\nctrl-alt-t = ['focus --target terminal'] # keep\nctrl-alt-1 = ['focus left']\n[window_manager.targets.terminal]\napp_id = 'com.apple.Terminal'\n";
+        let source = "# mine\n[window_manager.bindings.main]\nctrl-alt-t = ['focus --target terminal'] # keep\nctrl-1 = ['focus left']\n[window_manager.targets.terminal]\napp_id = 'com.apple.Terminal'\n";
         let (edited, count) = super::apply_workspace_shortcuts(source).unwrap();
         assert_eq!(count, 18);
         assert!(edited.contains("# keep"));
         let config = super::Config::parse(&edited).config;
         let main = &config.window_manager.bindings["main"];
-        assert_eq!(main["ctrl-alt-1"], ["focus left"]);
-        assert_eq!(main["ctrl-alt-2"], ["workspace 2"]);
-        assert_eq!(main["ctrl-alt-shift-9"], ["move-node-to-workspace 9"]);
+        assert_eq!(main["ctrl-1"], ["focus left"]);
+        assert_eq!(main["ctrl-2"], ["workspace 2"]);
+        assert_eq!(main["ctrl-shift-9"], ["move-node-to-workspace 9"]);
         assert_eq!(main["ctrl-alt-t"], ["focus --target terminal"]);
         let (again, added) = super::apply_workspace_shortcuts(&edited).unwrap();
         assert_eq!(added, 0);

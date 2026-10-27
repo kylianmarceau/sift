@@ -87,6 +87,10 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
+    LaunchWorkspaceApp {
+        workspace: String,
+        app_id: String,
+    },
     LaunchTarget {
         name: String,
         app_id: String,
@@ -870,6 +874,29 @@ impl Engine {
             )),
             Command::Workspace(target) => {
                 let target = self.workspace_target(&target)?;
+                for app_id in self.config.assigned_apps(&target) {
+                    if !self.manages_app(&app_id) {
+                        continue;
+                    }
+                    let windows: Vec<_> = self
+                        .windows
+                        .values()
+                        .filter(|w| w.app_id == app_id)
+                        .map(|w| (w.id, w.workspace.clone()))
+                        .collect();
+                    if windows.is_empty() {
+                        effects.push(Effect::LaunchWorkspaceApp {
+                            workspace: target.clone(),
+                            app_id,
+                        });
+                    } else {
+                        for (id, workspace) in windows {
+                            if workspace != target {
+                                self.move_to_workspace(id, &target, false)?;
+                            }
+                        }
+                    }
+                }
                 self.switch_workspace(&target)?;
             }
             Command::SummonWorkspace(target) => {

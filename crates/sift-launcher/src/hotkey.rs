@@ -527,8 +527,6 @@ pub fn install(dir: PathBuf, presses: UnboundedSender<(Slot, Instant)>, cx: &mut
                         };
                         if let Err(error) = result {
                             tracing::warn!(%error, "window shortcut blocked");
-                            let _ = crate::launch_failures()
-                                .unbounded_send(sift_macos::LaunchError::Command(error));
                         }
                     }
                 }
@@ -582,7 +580,8 @@ impl Hotkeys {
         mode: &str,
         controller: Option<sift_macos::wm::Controller>,
     ) -> Result<(), String> {
-        if !config.enabled {
+        // Leave system shortcuts alone when Sift cannot manage windows.
+        if !config.enabled || controller.as_ref().is_none_or(|c| !c.snapshot().enabled) {
             if let Some(manager) = &self.manager {
                 for key in self.window_keys.drain(..) {
                     let _ = manager.unregister(key);

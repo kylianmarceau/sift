@@ -230,16 +230,21 @@ impl State {
             if self.key == Some(key) {
                 return;
             }
-            let (title, mut items) = model(launcher, self.error.as_deref(), self.login);
+            let (mut title, mut items) = model(launcher, self.error.as_deref(), self.login);
             if let Some(notice) = &self.notice {
                 items.insert(1, Item::label(notice));
+                if launcher.window_manager.is_none() {
+                    title = " ✓".into();
+                }
             }
             native.update(
                 title,
                 format!(
                     "Sift {} · {}",
                     env!("CARGO_PKG_VERSION"),
-                    launcher.window_management_status()
+                    self.notice
+                        .as_deref()
+                        .unwrap_or(&launcher.window_management_status())
                 ),
                 items,
             );
@@ -271,11 +276,21 @@ impl State {
                     "That window has closed. Reopen the menu and choose another window.".into(),
                 );
             }
-            self.window
-                .update(cx, |launcher, _, cx| launcher.hide(cx))
-                .map_err(|e| e.to_string())?;
-            // The window update has finished before native focus can change.
             return controller.execute(command.clone());
+        }
+        if action == Action::AddWorkspaceShortcuts {
+            let count = self
+                .launcher
+                .update(cx, |launcher, cx| -> Result<usize, String> {
+                    let count =
+                        sift_state::Config::save_workspace_shortcuts(launcher.user.config_path())?;
+                    launcher.reload_config(cx);
+                    Ok(count)
+                })?;
+            self.notice = Some(format!(
+                "Added {count} workspace shortcuts. Existing bindings were kept."
+            ));
+            return Ok(());
         }
         if let Action::AssignApp {
             workspace,
@@ -312,9 +327,6 @@ impl State {
                 .window_manager
                 .as_ref()
                 .map(|r| r.controller());
-            self.window
-                .update(cx, |launcher, _, cx| launcher.hide(cx))
-                .map_err(|e| e.to_string())?;
             let controller = controller.filter(|c| {
                 let snapshot = c.snapshot();
                 snapshot.enabled && snapshot.automatic_tiling
@@ -338,27 +350,12 @@ impl State {
                 commands.push(Command::Workspace(workspace.clone()));
                 controller.execute(Command::Sequence(commands))?;
             }
-            if let Some(path) = open {
-                let failures = crate::launch_failures();
-                sift_macos::open_application(path, move |e| {
-                    let _ = failures.unbounded_send(e);
-                })
-                .map_err(|e| e.to_string())?;
-            }
+            // The workspace command launches a missing assigned app. Avoid
+            // sending a second launch request for the same selection.
+            let _ = open;
             let message = assignment_notice(&app_name, workspace, active);
             tracing::info!(app = %app_id, workspace, active, "workspace assignment saved");
             self.notice = Some(message.clone());
-            if !active {
-                let window = self.window;
-                // Clear-query events from hide() must finish before the
-                // confirmation is shown, or they can erase it immediately.
-                cx.defer(move |cx| {
-                    let _ = window.update(cx, |launcher, window, cx| {
-                        launcher.show(window, cx);
-                        launcher.show_info(message, cx);
-                    });
-                });
-            }
             return Ok(());
         }
         self.window
@@ -398,12 +395,7 @@ impl State {
                         )?;
                         launcher.reload_config(cx);
                     }
-                    Action::AddWorkspaceShortcuts => {
-                        let count = sift_state::Config::save_workspace_shortcuts(launcher.user.config_path())?;
-                        launcher.reload_config(cx);
-                        launcher.show(window, cx);
-                        launcher.show_info(format!("Added {count} missing workspace shortcuts. Existing bindings were kept. Ctrl–Option–1…9 switches workspaces when window controls are running."), cx);
-                    }
+                    Action::AddWorkspaceShortcuts => unreachable!("handled with the menu state"),
                     Action::AssignApp { .. } => unreachable!("handled after the window update"),
                     Action::Reload => {
                         launcher.reload_config(cx);

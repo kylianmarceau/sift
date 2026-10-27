@@ -175,9 +175,9 @@ impl Default for Config {
             main.insert(key.into(), vec![command.into()]);
         }
         for n in 1..=9 {
-            main.insert(format!("ctrl-alt-{n}"), vec![format!("workspace {n}")]);
+            main.insert(format!("ctrl-{n}"), vec![format!("workspace {n}")]);
             main.insert(
-                format!("ctrl-alt-shift-{n}"),
+                format!("ctrl-shift-{n}"),
                 vec![format!("move-node-to-workspace {n}")],
             );
         }
@@ -203,6 +203,46 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Exact app-wide assignments can safely be launched by bundle ID.
+    pub fn assigned_apps(&self, workspace: &str) -> Vec<String> {
+        let mut apps = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for rule in &self.rules {
+            if rule.title.is_some() || rule.app_name.is_some() || rule.check_further {
+                continue;
+            }
+            let Some(pattern) = rule
+                .app_id
+                .as_deref()
+                .and_then(|p| p.strip_prefix('^'))
+                .and_then(|p| p.strip_suffix('$'))
+            else {
+                continue;
+            };
+            let mut chars = pattern.chars();
+            let mut id = String::new();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        id.push(escaped);
+                    } else {
+                        id.clear();
+                        break;
+                    }
+                } else {
+                    id.push(c);
+                }
+            }
+            if !id.is_empty()
+                && regex::escape(&id) == pattern
+                && seen.insert(id.clone())
+                && rule.workspace.as_deref() == Some(workspace)
+            {
+                apps.push(id);
+            }
+        }
+        apps
+    }
     pub fn bindings_for_mode(&self, mode: &str) -> Result<BTreeMap<String, Vec<String>>> {
         let mut bindings = self
             .bindings

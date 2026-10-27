@@ -159,8 +159,8 @@ The default bindings use **Control–Option**, leaving Option–Space for Sift:
 | --- | --- |
 | Control–Option–H/J/K/L | Focus left/down/up/right |
 | Control–Option–Shift–H/J/K/L | Move left/down/up/right |
-| Control–Option–1…9 | Switch workspace |
-| Control–Option–Shift–1…9 | Send window to workspace |
+| Control–1…9 | Switch workspace |
+| Control–Shift–1…9 | Send window to workspace |
 | Control–Option–Tab | Previous workspace |
 | Control–Option–F | Toggle Sift fullscreen |
 | Control–Option–Minus/Equal | Shrink/grow selected tile |

@@ -105,8 +105,17 @@ struct Service {
 
 struct PendingLaunch {
     command: Command,
+    workspace: Option<(String, String)>,
+    awaiting_existing: bool,
     deadline: Instant,
     serial: u64,
+}
+
+fn workspace_is_current(snapshot: &Snapshot, workspace: &str) -> bool {
+    snapshot
+        .visible
+        .get(&snapshot.active_monitor)
+        .is_some_and(|name| name == workspace)
 }
 
 pub(super) fn start(
@@ -367,13 +376,16 @@ pub(super) fn start(
 
 impl Service {
     fn applications(&mut self, apps: Vec<AppInfo>, refresh_all: bool) {
-        let targets: BTreeSet<_> = self
+        let mut targets: BTreeSet<String> = self
             .engine
             .config
             .targets
             .values()
-            .filter_map(|target| target.app_id.as_deref())
+            .filter_map(|target| target.app_id.clone())
             .collect();
+        for workspace in &self.engine.config.workspaces {
+            targets.extend(self.engine.config.assigned_apps(workspace));
+        }
         self.known_apps
             .retain(|app_id, _| targets.contains(app_id.as_str()));
         for app in &apps {
@@ -696,6 +708,10 @@ impl Service {
                     self.launch_target(name, app_id, *command);
                     continue;
                 }
+                Effect::LaunchWorkspaceApp { workspace, app_id } => {
+                    self.launch_workspace_app(workspace, app_id);
+                    continue;
+                }
                 Effect::Exec(ref shell) => {
                     spawn_shell(shell);
                     continue;
@@ -792,13 +808,20 @@ impl Service {
             name.clone(),
             PendingLaunch {
                 command,
+                workspace: None,
+                awaiting_existing: false,
                 deadline: Instant::now() + Duration::from_secs(8),
                 serial,
             },
         );
-        self.message = Some(format!("Opening {app_id} for target {name:?}…"));
+        self.message = Some(if name.starts_with("@workspace:") {
+            format!("Opening {app_id}…")
+        } else {
+            format!("Opening {app_id} for target {name:?}…")
+        });
         let tx = self.tx.clone();
         let target = name.clone();
+        let background = name.starts_with("@workspace:");
         let path = self.known_apps.get(&app_id).cloned();
         // Launch Services via a fixed executable and separate arguments; no shell,
         // per-keystroke process, or main-thread work for an existing match.
@@ -807,6 +830,9 @@ impl Service {
             .spawn(move || {
                 let open = |path: Option<&Path>| {
                     let mut process = std::process::Command::new("/usr/bin/open");
+                    if background {
+                        process.arg("-g");
+                    }
                     if let Some(path) = path {
                         process.arg("-a").arg(path);
                     } else {
@@ -844,18 +870,84 @@ impl Service {
         }
     }
 
+    fn launch_workspace_app(&mut self, workspace: String, app_id: String) {
+        let key = format!("@workspace:{app_id}");
+        if let Some(pending) = self.pending_launches.get_mut(&key) {
+            self.message = Some(if pending.awaiting_existing {
+                format!("Finding {app_id} window…")
+            } else {
+                format!("Opening {app_id}…")
+            });
+            pending.workspace = Some((workspace, app_id));
+            return;
+        }
+        if self.available_apps.iter().any(|app| app.bundle == app_id) {
+            // The app is running but its AX worker may still be discovering
+            // windows. Give it a moment before asking macOS to reopen it.
+            if self.pending_launches.len() >= 32 {
+                self.message = Some("Too many pending application launches".into());
+                return;
+            }
+            self.message = Some(format!("Finding {app_id} window…"));
+            self.pending_launches.insert(
+                key,
+                PendingLaunch {
+                    command: Command::Status,
+                    workspace: Some((workspace, app_id)),
+                    awaiting_existing: true,
+                    deadline: Instant::now() + Duration::from_millis(750),
+                    serial: 0,
+                },
+            );
+            return;
+        }
+        self.launch_target(key.clone(), app_id.clone(), Command::Status);
+        if let Some(pending) = self.pending_launches.get_mut(&key) {
+            pending.workspace = Some((workspace, app_id));
+        }
+    }
+
     fn finish_launches(&mut self) {
         let ready: Vec<_> = self
             .pending_launches
             .iter()
             .filter_map(|(name, pending)| {
-                let matched = self.engine.resolve_target(name).ok().flatten().is_some();
-                (matched || Instant::now() >= pending.deadline).then(|| (name.clone(), matched))
+                let matched = if let Some((workspace, app_id)) = &pending.workspace {
+                    self.engine
+                        .windows
+                        .values()
+                        .find(|w| &w.workspace == workspace && &w.app_id == app_id)
+                        .map(|w| w.id)
+                } else {
+                    self.engine.resolve_target(name).ok().flatten()
+                };
+                (matched.is_some() || Instant::now() >= pending.deadline)
+                    .then(|| (name.clone(), matched))
             })
             .collect();
         for (name, matched) in ready {
             let pending = self.pending_launches.remove(&name).expect("pending launch");
-            if matched {
+            if matched.is_none() && pending.awaiting_existing {
+                if let Some((workspace, app_id)) = pending.workspace {
+                    self.launch_target(name.clone(), app_id.clone(), Command::Status);
+                    if let Some(next) = self.pending_launches.get_mut(&name) {
+                        next.workspace = Some((workspace, app_id));
+                    }
+                }
+                continue;
+            }
+            if let Some(id) = matched {
+                if let Some((workspace, _)) = pending.workspace {
+                    self.message = None;
+                    let snapshot = self.engine.snapshot();
+                    if workspace_is_current(&snapshot, &workspace) {
+                        match self.engine.execute(Command::FocusId(id)) {
+                            Ok(effects) => self.apply(effects),
+                            Err(error) => self.message = Some(error.to_string()),
+                        }
+                    }
+                    continue;
+                }
                 match self.engine.execute(pending.command) {
                     Ok(effects) => {
                         self.message = None;
@@ -864,9 +956,13 @@ impl Service {
                     Err(error) => self.message = Some(error.to_string()),
                 }
             } else {
-                self.message = Some(format!(
-                    "No window matched target {name:?} after opening its app. Sift cannot recreate a particular document or tab."
-                ));
+                self.message = Some(if let Some((workspace, app_id)) = pending.workspace {
+                    format!("No window for {app_id} appeared on workspace {workspace}.")
+                } else {
+                    format!(
+                        "No window matched target {name:?} after opening its app. Sift cannot recreate a particular document or tab."
+                    )
+                });
             }
         }
     }
@@ -1204,6 +1300,134 @@ mod tests {
         let second = service(dir.path());
         second.shutdown();
         assert!(second.wait_stopped(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn workspace_launch_failure_is_reported_without_opening_launcher() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = Config {
+            automatic_tiling: true,
+            enabled: true,
+            ..Config::default()
+        };
+        config.rules.push(sift_wm::Rule {
+            app_id: Some(r"^org\.sift\.nonexistent\.workspace\.test$".into()),
+            workspace: Some("1".into()),
+            ..Default::default()
+        });
+        let controller = service_with_config(dir.path(), config, |_| {});
+        let reply =
+            protocol::request(dir.path(), vec!["workspace".into(), "1".into()]).expect("request");
+        assert!(reply.ok);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = controller.snapshot();
+            if snapshot
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("Could not open") || m.contains("No window for"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "launch failure was not reported: {:?}",
+                snapshot.message
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        controller.shutdown();
+        assert!(controller.wait_stopped(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn running_app_gets_time_for_window_discovery_before_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = Config {
+            automatic_tiling: true,
+            enabled: true,
+            ..Config::default()
+        };
+        config.rules.push(sift_wm::Rule {
+            app_id: Some(r"^org\.sift\.nonexistent\.workspace\.test$".into()),
+            workspace: Some("1".into()),
+            ..Default::default()
+        });
+        let app = super::super::AppInfo {
+            pid: i32::MAX,
+            name: "Fixture".into(),
+            bundle: "org.sift.nonexistent.workspace.test".into(),
+            hidden: false,
+            path: None,
+        };
+        let (tx, rx) = mpsc::sync_channel(256);
+        let controller = start(
+            config,
+            dir.path(),
+            &dir.path().join("config.toml"),
+            vec![Monitor {
+                id: 1,
+                name: "Test".into(),
+                frame: Rect::new(0., 0., 1200., 900.),
+                usable: Rect::new(0., 24., 1200., 850.),
+                main: true,
+            }],
+            (vec![app], None),
+            (tx, rx),
+            |_| {},
+        )
+        .expect("headless service");
+        let args = vec!["workspace".into(), "1".into()];
+        for _ in 0..2 {
+            let reply = protocol::request(dir.path(), args.clone()).expect("request");
+            assert!(reply.ok);
+            assert!(
+                controller
+                    .snapshot()
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("Finding "))
+            );
+        }
+        // Repeated presses must not force an immediate reopen.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            controller
+                .snapshot()
+                .message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Finding "))
+        );
+        controller.shutdown();
+        assert!(controller.wait_stopped(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn a_late_workspace_launch_must_not_steal_focus_after_switching_away() {
+        let config = Config {
+            automatic_tiling: true,
+            enabled: true,
+            ..Config::default()
+        };
+        let mut engine = Engine::new(
+            config,
+            vec![Monitor {
+                id: 1,
+                name: "Test".into(),
+                frame: Rect::new(0., 0., 1200., 900.),
+                usable: Rect::new(0., 24., 1200., 850.),
+                main: true,
+            }],
+        )
+        .expect("engine");
+        engine
+            .execute(Command::Workspace("1".into()))
+            .expect("first workspace");
+        assert!(workspace_is_current(&engine.snapshot(), "1"));
+        engine
+            .execute(Command::Workspace("2".into()))
+            .expect("switch away");
+        assert!(!workspace_is_current(&engine.snapshot(), "1"));
     }
 
     #[test]

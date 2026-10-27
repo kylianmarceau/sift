@@ -27,6 +27,97 @@ fn add(e: &mut Engine, id: u32) {
     e.observed_focus(id).expect("valid fixture");
     e.reflow();
 }
+
+#[test]
+fn workspace_shortcut_focuses_existing_assigned_window_and_launches_missing_app() {
+    let mut config = tiling_config();
+    config.rules.push(Rule {
+        app_id: Some(r"^company\.thebrowser\.dia$".into()),
+        workspace: Some("1".into()),
+        ..Rule::default()
+    });
+    let mut e = Engine::new(config, vec![monitor(1, 0.)]).unwrap();
+    let effects = e.execute(Command::Workspace("1".into())).unwrap();
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { workspace, app_id } if workspace == "1" && app_id == "company.thebrowser.dia")));
+    let mut dia = Window::new(17, 20, Rect::new(20., 40., 600., 400.));
+    dia.app_id = "company.thebrowser.dia".into();
+    dia.app_name = "Dia".into();
+    e.add_window(dia).unwrap();
+    e.execute(Command::Workspace("2".into())).unwrap();
+    let effects = e.execute(Command::Workspace("1".into())).unwrap();
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Focus(17)))
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { .. }))
+    );
+    // Repeating the shortcut still focuses the existing window.
+    assert!(
+        e.execute(Command::Workspace("1".into()))
+            .unwrap()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Focus(17)))
+    );
+    e.remove_window(17);
+    assert!(
+        e.execute(Command::Workspace("1".into()))
+            .unwrap()
+            .iter()
+            .any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { .. }))
+    );
+}
+
+#[test]
+fn workspace_shortcut_does_not_launch_general_regex_or_excluded_apps() {
+    let mut config = tiling_config();
+    config.rules.push(Rule {
+        app_id: Some(".*".into()),
+        workspace: Some("1".into()),
+        ..Rule::default()
+    });
+    config.rules.push(Rule {
+        app_id: Some(r"^com\.example\.blocked$".into()),
+        workspace: Some("1".into()),
+        ..Rule::default()
+    });
+    config.exclude_apps.push(r"^com\.example\.blocked$".into());
+    let mut e = Engine::new(config, vec![monitor(1, 0.)]).unwrap();
+    assert!(
+        !e.execute(Command::Workspace("1".into()))
+            .unwrap()
+            .iter()
+            .any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { .. }))
+    );
+}
+
+#[test]
+fn workspace_launch_respects_first_matching_app_rule() {
+    let mut config = tiling_config();
+    for workspace in ["2", "1"] {
+        config.rules.push(Rule {
+            app_id: Some(r"^com\.example\.app$".into()),
+            workspace: Some(workspace.into()),
+            ..Rule::default()
+        });
+    }
+    let mut e = Engine::new(config, vec![monitor(1, 0.)]).unwrap();
+    assert!(
+        !e.execute(Command::Workspace("1".into()))
+            .unwrap()
+            .iter()
+            .any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { .. }))
+    );
+    assert!(
+        e.execute(Command::Workspace("2".into()))
+            .unwrap()
+            .iter()
+            .any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { .. }))
+    );
+}
 fn command(e: &mut Engine, text: &str) {
     e.execute(parse(text).expect("valid fixture"))
         .expect("valid fixture");
