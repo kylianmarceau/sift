@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.1 (2026-10-27)
+
 - Use workspaces and assigned-app shortcuts without automatic tiling, while
   preserving window positions when switching workspaces.
 
