@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 (2026-10-27)
+
+- Workspace shortcuts default to Option–1…9 (Option–Shift–1…9 moves a window)
+  instead of Control–1…9, which many applications and macOS features use.
+- Change any window-management shortcut in **Settings → Window Management →
+  Shortcuts**: choose a key cap and press the new shortcut. Conflicts with
+  other bindings or Sift's launcher shortcuts are refused, and changes are
+  saved to config.toml and re-registered immediately.
+
 ## 0.4.2 (2026-10-27)
 
 - Remove a workspace app assignment by choosing it under **Assigned Apps** in
