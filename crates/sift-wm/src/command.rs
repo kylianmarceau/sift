@@ -132,11 +132,6 @@ impl Command {
     pub fn requires_automatic_tiling(&self) -> bool {
         match self {
             Self::Layout(_, _)
-            | Self::Workspace(_)
-            | Self::WorkspaceBack
-            | Self::MoveToWorkspace(_, _)
-            | Self::MoveWorkspaceToMonitor(_)
-            | Self::SummonWorkspace(_)
             | Self::Split(_)
             | Self::Join(_)
             | Self::Swap(_)

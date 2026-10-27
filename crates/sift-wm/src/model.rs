@@ -421,6 +421,16 @@ impl Engine {
                 }
             }
         }
+        if !self.config.automatic_tiling {
+            if let Some(name) = self.config.workspaces.iter().find(|name| {
+                self.config
+                    .assigned_apps(name)
+                    .iter()
+                    .any(|app| app == &window.app_id)
+            }) {
+                target.clone_from(name);
+            }
+        }
         self.ensure_workspace(&target)?;
         window.workspace = target.clone();
         let id = window.id;
@@ -447,7 +457,7 @@ impl Engine {
         old.native_fullscreen = observed.native_fullscreen;
         old.hidden = observed.hidden;
         let is_tiled = old.is_tiled();
-        if (!self.config.automatic_tiling
+        if ((!self.config.automatic_tiling && self.visible.values().any(|n| n == &old.workspace))
             || (old.floating && self.visible.values().any(|n| n == &old.workspace)))
             && observed.frame.valid()
         {
@@ -500,11 +510,7 @@ impl Engine {
         };
         let workspace = window.workspace.clone();
         // Activation via Dock or another launcher reveals the owning workspace.
-        if self.config.automatic_tiling {
-            self.switch_workspace(&workspace)?;
-        } else {
-            self.active_monitor = self.window_monitor(id)?;
-        }
+        self.switch_workspace(&workspace)?;
         self.set_focus(id);
         if previous != Some(id) {
             self.previous_window = previous;
@@ -787,7 +793,15 @@ impl Engine {
         if let Command::NamedTarget(name, inner) = &command {
             return self.execute_named(name.clone(), Some((**inner).clone()));
         }
-        if !self.config.automatic_tiling {
+        let workspace_command = matches!(
+            &command,
+            Command::Workspace(_)
+                | Command::WorkspaceBack
+                | Command::MoveToWorkspace(_, _)
+                | Command::SummonWorkspace(_)
+                | Command::MoveWorkspaceToMonitor(_)
+        ) || matches!(&command, Command::Target(_, inner) if matches!(inner.as_ref(), Command::MoveToWorkspace(_, _)));
+        if !self.config.automatic_tiling && !workspace_command {
             return self.execute_manual(command);
         }
         let previous_focus = self.focused;
@@ -1322,7 +1336,7 @@ impl Engine {
     }
 
     pub fn hidden(&self) -> Vec<WindowId> {
-        if !self.enabled || !self.config.automatic_tiling {
+        if !self.enabled {
             return Vec::new();
         }
         self.windows

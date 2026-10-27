@@ -782,7 +782,7 @@ impl Settings {
             .child(div().flex().items_center().gap_3()
                 .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(4.))
                     .child(div().font_weight(FontWeight::MEDIUM).child("Automatic Tiling"))
-                    .child(div().text_size(px(12.)).text_color(theme.muted).child("Automatically arrange windows and use Sift workspaces. Off leaves positions alone until you use a shortcut.")))
+                    .child(div().text_size(px(12.)).text_color(theme.muted).child("Automatically arrange windows. Workspaces are available with tiling on or off.")))
                 .child(div().id("window-management-automatic-tiling").cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.change(Setting::WindowManagerAutomaticTiling(!automatic), cx)))
                     .child(switch(automatic, theme))))

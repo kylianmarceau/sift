@@ -383,6 +383,17 @@ fn main() {
             .sync_mouse_monitor()
             .expect("remove native mouse listener");
     }
+    for window in &controller.snapshot().windows {
+        controller
+            .execute(Command::Target(
+                window.id,
+                Box::new(Command::MoveToWorkspace("1".into(), false)),
+            ))
+            .expect("gather fixture windows");
+    }
+    controller
+        .execute(Command::Workspace("1".into()))
+        .expect("show fixture workspace");
     let mut manual = original_config.clone();
     manual.automatic_tiling = false;
     manual.targets.insert(
@@ -523,15 +534,73 @@ title = '^Sift WM Test 0$'
         "passive refresh moved manual windows"
     );
     println!("PASS passive refresh preserves manual positions");
+    let workspace_window = manual_frames[0].0;
+    controller
+        .execute(Command::Target(
+            workspace_window,
+            Box::new(Command::MoveToWorkspace("2".into(), false)),
+        ))
+        .expect("move to workspace");
+    wait("manual workspace hides only the moved window", &|| {
+        let snapshot = controller.snapshot();
+        snapshot
+            .windows
+            .iter()
+            .any(|w| w.id == workspace_window && w.workspace == "2")
+            && matches(
+                &manual_frames
+                    .iter()
+                    .copied()
+                    .filter(|(id, _)| *id != workspace_window)
+                    .collect::<Vec<_>>(),
+            )
+            && !matches(
+                &manual_frames
+                    .iter()
+                    .copied()
+                    .filter(|(id, _)| *id == workspace_window)
+                    .collect::<Vec<_>>(),
+            )
+    });
+    controller
+        .execute(Command::Workspace("2".into()))
+        .expect("switch workspace");
+    wait("manual workspace restores the original position", &|| {
+        matches(
+            &manual_frames
+                .iter()
+                .copied()
+                .filter(|(id, _)| *id == workspace_window)
+                .collect::<Vec<_>>(),
+        )
+    });
+    controller
+        .execute(Command::Workspace("1".into()))
+        .expect("switch back");
+    controller
+        .execute(Command::Target(
+            workspace_window,
+            Box::new(Command::MoveToWorkspace("1".into(), false)),
+        ))
+        .expect("restore workspace");
+    wait("manual workspace restores all windows", &|| {
+        matches(&manual_frames)
+    });
+    println!("PASS manual workspaces preserve window positions");
+    controller
+        .execute(Command::Workspace("2".into()))
+        .expect("hide windows before shutdown");
+    wait("manual workspace parks windows before shutdown", &|| {
+        !matches(&manual_frames)
+    });
     drop(runtime);
     assert!(
         controller.wait_stopped(Duration::from_secs(4)),
         "shutdown did not release ownership"
     );
-    assert!(
-        matches(&manual_frames),
-        "manual shutdown changed window positions"
-    );
+    wait("manual shutdown restores parked window positions", &|| {
+        matches(&manual_frames)
+    });
     println!("PASS manual shutdown preserves chosen positions");
     #[derive(serde::Deserialize)]
     struct Saved {

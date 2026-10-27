@@ -30,13 +30,14 @@ Open Sift Settings → Window Management. Grant window-control permission to Sif
 return to Settings, and enable **Window Shortcuts and Controls**. Leave
 **Automatic Tiling off** for manual control: windows stay where you put them,
 and only an explicit shortcut or CLI command moves/resizes/focuses a window.
-Discovery, app launches, focus changes and window closure never arrange other
-windows in manual mode. Manual changes stay in place when controls stop or Sift
-quits. Other launcher features do not need window-control permission.
+In manual mode, workspace switching preserves window sizes and positions; Sift
+parks windows from other workspaces and restores their positions when they are
+shown again. Manual changes stay in place when controls stop or Sift quits.
+Other launcher features do not need window-control permission.
 
-Automatic Tiling is a separate opt-in for AeroSpace-style arrangement and Sift
-workspaces. Turning that option off restores the pre-tiling positions and leaves
-manual controls running. Upgrading from 0.2.0 also defaults to manual control
+Automatic Tiling is a separate opt-in for AeroSpace-style arrangement.
+Workspaces also work without tiling. Turning tiling off restores pre-tiling
+positions and leaves workspace and manual controls running. Upgrading from 0.2.0 also defaults to manual control
 unless `automatic_tiling = true` is explicitly configured.
 
 On macOS 27 this permission is named **Device Control and Data Access** under
@@ -47,7 +48,7 @@ The same option can be set in `config.toml`:
 ```toml
 [window_manager]
 enabled = true
-automatic_tiling = false          # manual controls; true enables tiling/workspaces
+automatic_tiling = false          # workspaces and manual controls without tiling
 default_layout = "tiles"          # tiles or accordion
 default_orientation = "horizontal" # horizontal or vertical
 accordion_padding = 30
@@ -150,7 +151,7 @@ Sift session; these temporary restore frames are not persistent bindings.
 
 Open windows and workspaces appear in ordinary search while the manager runs.
 Type `win` or `win project` to search windows only, and `ws` or `ws code` for
-workspaces (only with Automatic Tiling enabled). Enter focuses the window or switches workspace. Window identities
+workspaces. Enter focuses the window or switches workspace. Window identities
 are temporary and are not added to recents or favorites.
 
 Most default bindings use **Control–Option**, leaving Option–Space for Sift.
@@ -175,11 +176,11 @@ default binding table for that mode. No hotkeys are registered when the feature
 is off. Shortcut recording temporarily suspends both launcher and window
 shortcuts. A window shortcut conflicting with Sift's launcher shortcut is
 reported; macOS does not reliably report conflicts with other applications.
-Workspace/tree shortcuts are inactive while Automatic Tiling is off. Directional
+Tree layout shortcuts are inactive while Automatic Tiling is off. Directional
 focus, move (50-point nudges), resize and fullscreen also work in manual mode.
 Manual fullscreen fills the usable screen and restores the previous frame when
-toggled again. Workspace routing rules, automatic mouse behavior, and automatic
-frame writes are inactive in manual mode.
+toggled again. Automatic mouse behavior and automatic tiling frame writes are
+inactive in manual mode; workspace switches temporarily park hidden windows.
 
 ```toml
 [window_manager.bindings.main]

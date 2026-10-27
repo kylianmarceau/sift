@@ -32,9 +32,8 @@ Saved assignments appear under **Assigned Apps** and have checkmarks in the app
 picker. When controls are unavailable, the menu bar shows a checkmark and the
 menu explains that the assignment was saved without moving a window.
 
-Turn on **Window Management → Automatic Tiling and Workspaces**. This also enables
-Window Shortcuts and Controls. macOS window-control permission must be granted
-before workspaces work. Manual controls remain available with tiling off.
+Turn on **Window Management → Window Shortcuts and Controls** and grant macOS
+window-control permission. Workspaces work with Automatic Tiling on or off.
 
 The active monitor's workspace appears beside the Sieve icon; paused management
 shows a pause mark. **Workspaces** lists all configured workspaces with the apps

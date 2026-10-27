@@ -329,7 +329,7 @@ impl State {
                 .map(|r| r.controller());
             let controller = controller.filter(|c| {
                 let snapshot = c.snapshot();
-                snapshot.enabled && snapshot.automatic_tiling
+                snapshot.enabled
             });
             let active = controller.is_some();
             if let Some(controller) = controller {
@@ -531,7 +531,7 @@ fn model(
             let paused = !snapshot.enabled;
             if paused {
                 title = " Ⅱ".into();
-            } else if snapshot.automatic_tiling {
+            } else {
                 title = snapshot
                     .visible
                     .get(&snapshot.active_monitor)
@@ -546,9 +546,7 @@ fn model(
             } else {
                 launcher.window_management_status()
             }));
-            if snapshot.automatic_tiling {
-                items.push(workspace_menu(snapshot));
-            }
+            items.push(workspace_menu(snapshot));
             items.push(window_menu(snapshot));
             items.push(action("Search Open Windows", Action::Search("win ".into())));
             items.push(action(
@@ -561,8 +559,7 @@ fn model(
             ));
         }
     }
-    let can_control =
-        launcher.window_manager.is_some() && snapshot.enabled && snapshot.automatic_tiling;
+    let can_control = launcher.window_manager.is_some() && snapshot.enabled;
     items.push(manage_workspaces(
         snapshot,
         launcher.user.window_manager_config(),
@@ -580,7 +577,7 @@ fn model(
                 launcher.window_management_enabled(),
             ),
             check(
-                "Automatic Tiling and Workspaces",
+                "Automatic Tiling",
                 Action::Setting(SettingAction::Tiling(!launcher.automatic_tiling_enabled())),
                 launcher.automatic_tiling_enabled(),
             ),

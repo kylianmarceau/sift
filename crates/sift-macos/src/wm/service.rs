@@ -489,8 +489,23 @@ impl Service {
                 self.recovery.retain(|r| r.id != id || r.pid != report.pid);
             }
             for mut window in report.windows {
+                let observed_frame = window.frame;
+                // A delayed AX report can still contain the parking frame
+                // after the workspace has become visible. Keep the saved
+                // manual frame until the restore has been acknowledged.
+                if !self.engine.config.automatic_tiling
+                    && (self.parked.contains(&window.id)
+                        || self
+                            .restoring
+                            .iter()
+                            .any(|r| r.id == window.id && r.pid == window.pid))
+                {
+                    if let Some(existing) = self.engine.windows.get(&window.id) {
+                        window.frame = existing.frame;
+                    }
+                }
                 self.restoring.retain(|r| {
-                    !(r.id == window.id && r.pid == window.pid && window.frame.nearly(r.frame))
+                    !(r.id == window.id && r.pid == window.pid && observed_frame.nearly(r.frame))
                 });
                 // Recovery matching requires both pid and native window id,
                 // plus the bundle id. Never restore unrelated new windows.
@@ -530,6 +545,7 @@ impl Service {
         if !self.engine.config.automatic_tiling {
             let mut frames = self.recovery.clone();
             frames.extend(self.restoring.iter().cloned());
+            frames.extend(self.manual_parked_recovery(&self.parked));
             if let Err(error) = self.write_journal(frames) {
                 self.message = Some(format!("Could not update window recovery journal: {error}"));
             }
@@ -630,6 +646,21 @@ impl Service {
         let mut by_pid: BTreeMap<i32, Vec<Effect>> = BTreeMap::new();
         let mut effects = effects;
         effects.extend(self.engine.reflow());
+        let hidden: BTreeSet<_> = self.engine.hidden().into_iter().collect();
+        if !self.engine.config.automatic_tiling {
+            for id in self.parked.difference(&hidden) {
+                if let Some(w) = self.engine.windows.get(id) {
+                    effects.push(Effect::Frame(*id, w.frame));
+                }
+            }
+            for frame in
+                self.manual_parked_recovery(&self.parked.difference(&hidden).copied().collect())
+            {
+                self.restoring
+                    .retain(|r| r.id != frame.id || r.pid != frame.pid);
+                self.restoring.push(frame);
+            }
+        }
         if let Some(target) = self
             .engine
             .config
@@ -656,7 +687,9 @@ impl Service {
             let moved: BTreeSet<_> = effects
                 .iter()
                 .filter_map(|e| {
-                    if let Effect::Frame(id, _) = e {
+                    if let Effect::Frame(id, _) = e
+                        && !self.parked.contains(id)
+                    {
                         Some(*id)
                     } else {
                         None
@@ -667,6 +700,7 @@ impl Service {
             self.restoring.retain(|r| !moved.contains(&r.id));
             let mut frames = self.recovery.clone();
             frames.extend(self.restoring.iter().cloned());
+            frames.extend(self.manual_parked_recovery(&hidden));
             self.write_journal(frames)
         } {
             self.message = Some(format!(
@@ -674,7 +708,6 @@ impl Service {
             ));
             return;
         }
-        let hidden: BTreeSet<_> = self.engine.hidden().into_iter().collect();
         for id in &hidden {
             if let Some(frame) = self.engine.parking_frame(*id) {
                 // macOS keeps a small part of a window on screen. Park at
@@ -744,6 +777,17 @@ impl Service {
 
     fn restore(&mut self) {
         if !self.engine.config.automatic_tiling {
+            for (pid, worker) in &self.workers {
+                let frames: Vec<_> = self
+                    .parked
+                    .iter()
+                    .filter_map(|id| self.engine.windows.get(id))
+                    .filter(|w| w.pid == *pid)
+                    .map(|w| (w.id, w.frame))
+                    .collect();
+                worker.send(Task::Restore(frames));
+            }
+            self.parked.clear();
             return;
         }
         for (pid, worker) in &self.workers {
@@ -991,6 +1035,19 @@ impl Service {
                 .cloned(),
         );
         self.write_journal(frames)
+    }
+
+    fn manual_parked_recovery(&self, ids: &BTreeSet<u32>) -> Vec<RecoveryFrame> {
+        ids.iter()
+            .filter_map(|id| self.engine.windows.get(id))
+            .map(|w| RecoveryFrame {
+                id: w.id,
+                pid: w.pid,
+                app_id: w.app_id.clone(),
+                process_started: self.workers.get(&w.pid).map(|worker| worker.identity),
+                frame: w.frame,
+            })
+            .collect()
     }
 
     fn write_journal(&mut self, mut frames: Vec<RecoveryFrame>) -> std::io::Result<()> {

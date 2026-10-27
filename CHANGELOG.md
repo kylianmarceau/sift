@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Use workspaces and assigned-app shortcuts without automatic tiling, while
+  preserving window positions when switching workspaces.
+
 ## 0.4.0 (2026-10-27)
 
 - Use Ctrl–1…9 for workspace switching and launch assigned apps on demand;

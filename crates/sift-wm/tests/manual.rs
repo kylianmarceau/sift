@@ -54,6 +54,39 @@ fn config() -> Config {
 fn engine() -> Engine {
     Engine::new(config(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("valid fixture")
 }
+
+#[test]
+fn workspace_switching_without_tiling_preserves_frames_and_routes_assigned_apps() {
+    let mut config = config();
+    config.rules.push(Rule {
+        app_id: Some(r"^company\.thebrowser\.dia$".into()),
+        workspace: Some("1".into()),
+        ..Rule::default()
+    });
+    let mut e = Engine::new(config, vec![monitor(1, 0.)]).unwrap();
+    let dia = window(10, "company.thebrowser.dia", "Dia", 100.);
+    let other = window(11, "other.app", "Other", 650.);
+    e.add_window(dia.clone()).unwrap();
+    e.add_window(other.clone()).unwrap();
+    e.observed_focus(11).unwrap();
+    let effects = e.execute(Command::Workspace("1".into())).unwrap();
+    assert!(effects.contains(&Effect::Focus(10)));
+    assert_eq!(e.windows[&10].frame, dia.frame);
+    assert_eq!(e.windows[&11].frame, other.frame);
+    e.execute(Command::Target(
+        11,
+        Box::new(Command::MoveToWorkspace("2".into(), false)),
+    ))
+    .unwrap();
+    assert_eq!(e.hidden(), vec![11]);
+    e.execute(Command::Workspace("2".into())).unwrap();
+    assert_eq!(e.hidden(), vec![10]);
+    assert_eq!(e.windows[&10].frame, dia.frame);
+    assert_eq!(e.windows[&11].frame, other.frame);
+    e.remove_window(10);
+    let effects = e.execute(Command::Workspace("1".into())).unwrap();
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::LaunchWorkspaceApp { app_id, .. } if app_id == "company.thebrowser.dia")));
+}
 fn window(id: u32, app_id: &str, title: &str, x: f64) -> Window {
     let mut w = Window::new(id, 100, Rect::new(x, 100., 500., 400.));
     w.app_id = app_id.into();
@@ -92,10 +125,9 @@ fn manual_mode_never_reflows_parks_routes_or_constrains_observed_windows() {
     assert!(e.reflow().is_empty());
     assert!(e.hidden().is_empty());
     assert_eq!(e.windows[&1].frame, moved.frame);
-    assert!(
-        e.execute(parse("workspace 2").expect("valid fixture"))
-            .is_err()
-    );
+    e.execute(parse("workspace 2").expect("valid fixture"))
+        .unwrap();
+    assert_eq!(e.hidden(), vec![1]);
     assert!(e.reflow().is_empty());
     e.verify().expect("valid fixture");
 }
@@ -254,7 +286,7 @@ fn manual_bindings_are_independent_and_configuration_rejects_bad_targets_and_she
     let manual = config.bindings_for_mode("main").expect("valid fixture");
     assert!(manual.contains_key("ctrl-alt-h"));
     assert!(manual.contains_key("ctrl-alt-left"));
-    assert!(!manual.contains_key("ctrl-1"));
+    assert!(manual.contains_key("ctrl-1"));
     assert!(!manual.contains_key("ctrl-alt-slash"));
     let mut bad = config.clone();
     bad.targets
