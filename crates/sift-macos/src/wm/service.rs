@@ -490,22 +490,29 @@ impl Service {
             }
             for mut window in report.windows {
                 let observed_frame = window.frame;
+                let observed_offscreen = self.engine.offscreen(observed_frame);
                 // A delayed AX report can still contain the parking frame
                 // after the workspace has become visible. Keep the saved
                 // manual frame until the restore has been acknowledged.
+                let restoring = self
+                    .restoring
+                    .iter()
+                    .any(|r| r.id == window.id && r.pid == window.pid);
                 if !self.engine.config.automatic_tiling
-                    && (self.parked.contains(&window.id)
-                        || self
-                            .restoring
-                            .iter()
-                            .any(|r| r.id == window.id && r.pid == window.pid))
+                    && (self.parked.contains(&window.id) || (restoring && observed_offscreen))
                 {
                     if let Some(existing) = self.engine.windows.get(&window.id) {
                         window.frame = existing.frame;
                     }
                 }
+                // Any on-screen frame acknowledges a manual restore: an app
+                // may adjust the exact frame (minimum sizes, menu bar), and
+                // waiting for an exact match would ignore later user moves.
                 self.restoring.retain(|r| {
-                    !(r.id == window.id && r.pid == window.pid && observed_frame.nearly(r.frame))
+                    !(r.id == window.id
+                        && r.pid == window.pid
+                        && (observed_frame.nearly(r.frame)
+                            || (!self.engine.config.automatic_tiling && !observed_offscreen)))
                 });
                 // Recovery matching requires both pid and native window id,
                 // plus the bundle id. Never restore unrelated new windows.
@@ -532,7 +539,10 @@ impl Service {
                         self.restoring.push(recovery);
                     }
                 }
+                let id = window.id;
+                let pid = window.pid;
                 let _ = self.engine.add_window(window);
+                self.rescue(id, pid);
             }
             // Inactive apps also report their last focused window. Only
             // the frontmost app can change the global focus/workspace.
@@ -548,6 +558,31 @@ impl Service {
             frames.extend(self.manual_parked_recovery(&self.parked));
             if let Err(error) = self.write_journal(frames) {
                 self.message = Some(format!("Could not update window recovery journal: {error}"));
+            }
+        }
+    }
+
+    /// Manual mode: a window found at a parking spot that Sift is not
+    /// holding there (lost while on another Space, left by a crash, or
+    /// reopened where its app saved a parked frame) comes back on screen.
+    fn rescue(&mut self, id: WindowId, pid: i32) {
+        if self.engine.config.automatic_tiling
+            || self.parked.contains(&id)
+            || self.restoring.iter().any(|r| r.id == id && r.pid == pid)
+        {
+            return;
+        }
+        let Some(frame) = self.engine.rescue_offscreen(id) else {
+            return;
+        };
+        let visible = self.engine.windows.get(&id).is_some_and(|w| {
+            w.available() && self.engine.visible.values().any(|n| n == &w.workspace)
+        });
+        tracing::info!(id, visible, "moved a stranded window back on screen");
+        // A hidden workspace's window keeps the rescued frame for its return.
+        if visible {
+            if let Some(worker) = self.workers.get(&pid) {
+                worker.send(Task::Restore(vec![(id, frame)]));
             }
         }
     }

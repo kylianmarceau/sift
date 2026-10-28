@@ -312,3 +312,95 @@ fn manual_bindings_are_independent_and_configuration_rejects_bad_targets_and_she
     );
     assert!(config.validate().is_ok());
 }
+
+#[test]
+fn workspace_switch_focuses_a_remaining_window_when_the_remembered_one_closed() {
+    let mut e = Engine::new(config(), vec![monitor(1, 0.)]).expect("valid fixture");
+    let mut first = window(1, "a.app", "A", 100.);
+    first.floating = true;
+    let mut second = window(2, "b.app", "B", 650.);
+    second.floating = true;
+    e.add_window(first).expect("valid fixture");
+    e.add_window(second).expect("valid fixture");
+    execute(&mut e, "focus --window-id 1");
+    execute(&mut e, "focus --window-id 2");
+    e.execute(Command::Target(
+        1,
+        Box::new(Command::MoveToWorkspace("5".into(), false)),
+    ))
+    .expect("valid fixture");
+    e.execute(Command::Target(
+        2,
+        Box::new(Command::MoveToWorkspace("5".into(), false)),
+    ))
+    .expect("valid fixture");
+    e.remove_window(2);
+    let effects = execute(&mut e, "workspace 5");
+    assert!(effects.contains(&Effect::Focus(1)), "{effects:?}");
+    assert_eq!(e.focused, Some(1));
+}
+
+#[test]
+fn workspace_switch_returns_to_a_native_fullscreen_window() {
+    let mut e = Engine::new(config(), vec![monitor(1, 0.)]).expect("valid fixture");
+    e.add_window(window(1, "browser.app", "Netflix", 100.))
+        .expect("valid fixture");
+    e.add_window(window(2, "chat.app", "Claude", 650.))
+        .expect("valid fixture");
+    execute(&mut e, "focus --window-id 2");
+    e.execute(Command::Target(
+        2,
+        Box::new(Command::MoveToWorkspace("5".into(), false)),
+    ))
+    .expect("valid fixture");
+    execute(&mut e, "focus --window-id 1");
+    let mut fullscreen = window(1, "browser.app", "Netflix", 100.);
+    fullscreen.native_fullscreen = true;
+    fullscreen.frame = Rect::new(0., 0., 1200., 900.);
+    e.update_window(fullscreen);
+    // The screen-sized native fullscreen frame is not the window's own frame.
+    assert_eq!(e.windows[&1].frame, Rect::new(100., 100., 500., 400.));
+    let home = e.windows[&1].workspace.clone();
+    assert!(execute(&mut e, "workspace 5").contains(&Effect::Focus(2)));
+    // A fullscreen window lives in its own Space: never parked.
+    assert!(!e.hidden().contains(&1));
+    assert!(execute(&mut e, &format!("workspace {home}")).contains(&Effect::Focus(1)));
+}
+
+#[test]
+fn stranded_parked_windows_are_rescued_but_partly_offscreen_ones_are_left_alone() {
+    let mut e =
+        Engine::new(config(), vec![monitor(1, 0.), monitor(2, 1200.)]).expect("valid fixture");
+    e.add_window(window(1, "a.app", "A", 100.))
+        .expect("valid fixture");
+    let parking = e.parking_frame(1).expect("parking frame");
+    assert!(e.offscreen(parking));
+    let mut stranded = window(2, "b.app", "B", 0.);
+    stranded.frame = parking;
+    stranded.original_frame = parking;
+    e.add_window(stranded).expect("valid fixture");
+    let rescued = e.rescue_offscreen(2).expect("rescued");
+    assert!(!e.offscreen(rescued));
+    assert_eq!((rescued.width, rescued.height), (500., 400.));
+    assert_eq!(e.windows[&2].frame, rescued);
+    assert_eq!(e.windows[&2].original_frame, rescued);
+    // A window the user pushed mostly off the left edge stays where it is.
+    let mut partial = window(3, "c.app", "C", -450.);
+    partial.frame.x = -450.;
+    e.add_window(partial.clone()).expect("valid fixture");
+    assert!(!e.offscreen(partial.frame));
+    assert_eq!(e.rescue_offscreen(3), None);
+    assert_eq!(e.rescue_offscreen(1), None);
+    e.verify().expect("valid fixture");
+}
+
+#[test]
+fn automatic_tiling_never_uses_the_manual_rescue() {
+    let mut config = config();
+    config.automatic_tiling = true;
+    let mut e = Engine::new(config, vec![monitor(1, 0.)]).expect("valid fixture");
+    let mut w = window(1, "a.app", "A", 0.);
+    w.frame = Rect::new(1199., 899., 500., 400.);
+    e.add_window(w).expect("valid fixture");
+    assert_eq!(e.rescue_offscreen(1), None);
+}

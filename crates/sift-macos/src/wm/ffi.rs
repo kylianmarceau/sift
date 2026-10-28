@@ -70,7 +70,14 @@ unsafe extern "C" {
     pub fn CGEventCreate(source: Ref) -> Ref;
     pub fn CGEventGetLocation(event: Ref) -> Point;
     pub fn CGWarpMouseCursorPosition(point: Point) -> i32;
+    pub fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Ref;
+    pub static kCGWindowNumber: Ref;
+    pub static kCGWindowOwnerPID: Ref;
 }
+
+pub const K_CG_WINDOW_LIST_OPTION_INCLUDING_WINDOW: u32 = 1 << 3;
+pub const K_CF_NUMBER_SINT32_TYPE: Index = 3;
+pub const K_CF_NUMBER_SINT64_TYPE: Index = 4;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -84,6 +91,12 @@ unsafe extern "C" {
     pub fn CFArrayGetTypeID() -> usize;
     pub fn CFArrayGetCount(array: Ref) -> Index;
     pub fn CFArrayGetValueAtIndex(array: Ref, index: Index) -> Ref;
+    /// Only its address is used, as `CFArrayCreate`'s callbacks.
+    pub static kCFTypeArrayCallBacks: [usize; 5];
+    pub fn CFArrayCreate(allocator: Ref, values: *const Ref, count: Index, callbacks: Ref) -> Ref;
+    pub fn CFNumberCreate(allocator: Ref, kind: Index, value: Ref) -> Ref;
+    pub fn CFNumberGetValue(number: Ref, kind: Index, value: MutRef) -> bool;
+    pub fn CFDictionaryGetValue(dictionary: Ref, key: Ref) -> Ref;
     pub fn CFStringGetTypeID() -> usize;
     pub fn CFStringCreateWithCString(allocator: Ref, string: *const c_char, encoding: u32) -> Ref;
     pub fn CFStringGetLength(string: Ref) -> Index;

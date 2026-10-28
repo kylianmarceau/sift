@@ -508,6 +508,26 @@ impl Context {
                 }
             }
         }
+        // Many apps list only the active Space's windows. Behind a native
+        // fullscreen app every other window would look closed, losing its
+        // workspace and the frame saved before it was parked. Keep a window
+        // the window server still places on some Space; its retained AX
+        // element can still be moved, raised and focused from here.
+        let unlisted: Vec<_> = self
+            .windows
+            .keys()
+            .filter(|id| !next.contains_key(id))
+            .copied()
+            .collect();
+        for id in unlisted {
+            if super::spaces::open_on_another_space(id, self.app.pid) {
+                if let Some(element) = self.windows.remove(&id) {
+                    tracing::debug!(pid = self.app.pid, id, "window kept on another Space");
+                    next.insert(id, element);
+                    present_ids.push(id);
+                }
+            }
+        }
         self.windows = next;
         self.observed.retain(|id| self.windows.contains_key(id));
         self.frames.retain(|id, _| self.windows.contains_key(id));

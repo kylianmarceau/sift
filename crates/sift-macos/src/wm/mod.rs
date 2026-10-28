@@ -5,6 +5,7 @@ mod ffi;
 mod hooks;
 mod mouse;
 mod service;
+mod spaces;
 mod worker;
 
 use block2::RcBlock;

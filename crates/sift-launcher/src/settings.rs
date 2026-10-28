@@ -89,6 +89,89 @@ fn describe_commands(commands: Vec<String>) -> String {
     described.unwrap_or_else(|| text.to_string())
 }
 
+/// The dropdown section a binding is listed under, in display order.
+fn binding_group(commands: &[String]) -> (u8, &'static str) {
+    let first = commands.first().map(String::as_str).unwrap_or("");
+    match first.split_whitespace().next() {
+        Some("workspace" | "workspace-back-and-forth" | "summon-workspace") => (0, "Workspaces"),
+        Some("move-node-to-workspace") => (1, "Send the Window to a Workspace"),
+        Some("focus" | "focus-back-and-forth" | "focus-monitor") => (2, "Focus"),
+        Some("move" | "swap" | "move-node-to-monitor") => (3, "Move"),
+        Some("snap" | "fullscreen" | "macos-native-fullscreen") => (4, "Size and Position"),
+        Some(
+            "layout"
+            | "resize"
+            | "balance-sizes"
+            | "balance"
+            | "split"
+            | "join-with"
+            | "flatten-workspace-tree",
+        ) => (5, "Layout"),
+        _ => (6, "Other"),
+    }
+}
+
+/// Orders text with numbers by value, so "Workspace 2" precedes "Workspace 10".
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn chunks(text: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in text.chars() {
+            let digit = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((d, chunk)) if *d == digit => chunk.push(c),
+                _ => out.push((digit, c.to_string())),
+            }
+        }
+        out
+    }
+    let (a, b) = (chunks(a), chunks(b));
+    for (x, y) in a.iter().zip(&b) {
+        let order = match (x, y) {
+            ((true, x), (true, y)) => {
+                let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+            }
+            ((_, x), (_, y)) => x.to_lowercase().cmp(&y.to_lowercase()),
+        };
+        if order.is_ne() {
+            return order;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// One window shortcut in the dropdown.
+struct BindingEntry {
+    key: String,
+    commands: Vec<String>,
+    description: String,
+    group: (u8, &'static str),
+}
+
+/// The main mode's bindings, grouped and ordered for the dropdown.
+fn binding_entries(mode: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<BindingEntry> {
+    let mut entries: Vec<BindingEntry> = mode
+        .iter()
+        .map(|(key, commands)| BindingEntry {
+            key: key.clone(),
+            commands: commands.clone(),
+            description: describe_commands(commands.clone()),
+            group: binding_group(commands),
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        // Numbered actions (Workspace 1…9) lead their group.
+        let unnumbered = |e: &BindingEntry| !e.description.chars().any(|c| c.is_ascii_digit());
+        a.group
+            .0
+            .cmp(&b.group.0)
+            .then_with(|| unnumbered(a).cmp(&unnumbered(b)))
+            .then_with(|| natural_cmp(&a.description, &b.description))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    entries
+}
+
 actions!(settings, [CloseSettings]);
 
 /// The open settings window, so a second request focuses it instead of
@@ -172,6 +255,11 @@ pub struct Settings {
     recording: Option<(Recording, KeyCapture)>,
     /// A note under a shortcut, and whether it reports a problem.
     shortcut_note: Option<(Recording, SharedString, bool)>,
+    /// The window shortcut shown under the dropdown, by its commands (its
+    /// key changes when it is re-recorded). `None` shows the first one.
+    selected_binding: Option<Vec<String>>,
+    /// Whether the window shortcut dropdown is open.
+    binding_menu_open: bool,
     /// Clear History was clicked once and waits for confirmation.
     confirm_clear: bool,
     _subscriptions: Vec<Subscription>,
@@ -235,6 +323,8 @@ impl Settings {
             login,
             recording: None,
             shortcut_note: None,
+            selected_binding: None,
+            binding_menu_open: false,
             confirm_clear: false,
         }
     }
@@ -960,8 +1050,9 @@ impl Settings {
             .into_any_element()
     }
 
-    /// The window-management shortcuts, each with a key-cap recorder that
-    /// saves the change to config.toml and re-registers the shortcuts.
+    /// The window-management shortcuts as a dropdown: pick an action, then
+    /// use its key-cap recorder, which saves the change to config.toml and
+    /// re-registers the shortcuts.
     fn render_window_bindings(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let mode = self
             .launcher
@@ -977,122 +1068,293 @@ impl Settings {
             .get("main")
             .cloned()
             .unwrap_or_default();
-        let mut entries: Vec<(String, String)> = mode
-            .iter()
-            .map(|(key, commands)| (key.clone(), describe_commands(commands.clone())))
-            .collect();
-        entries.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        let rows: Vec<AnyElement> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(index, (key, description))| {
-                let shortcut = hotkey::from_binding(&key);
-                let recording =
-                    matches!(&self.recording, Some((Recording::Binding(k), _)) if k == &key);
-                let (detail, problem) = self
-                    .shortcut_note
-                    .as_ref()
-                    .filter(|(t, ..)| matches!(t, Recording::Binding(k) if k == &key))
-                    .map(|(_, note, problem)| (note.clone(), *problem))
-                    .unwrap_or_else(|| {
-                        let unusable = shortcut.is_none();
-                        (
-                            if unusable {
-                                format!("{description} (not usable)").into()
-                            } else {
-                                description.clone().into()
-                            },
-                            unusable,
-                        )
-                    });
-                let record_key = key.clone();
-                let recorder = div()
-                    .id(("binding-recorder", index))
+        let entries = binding_entries(&mode);
+        let heading = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(div().font_weight(FontWeight::MEDIUM).child("Shortcuts"))
+            .child(div().text_size(px(12.)).text_color(theme.muted).child(
+                "Choose an action, then click its key cap and press the new shortcut. Escape cancels. Shortcuts are saved to config.toml and work while Window Shortcuts and Controls is on.",
+            ));
+        if entries.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(heading)
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .child("No shortcuts are configured. Edit Rules and Shortcuts… adds them."),
+                )
+                .into_any_element();
+        }
+        // While a binding is being recorded, keep it selected even if the
+        // selection was never set.
+        let selected = match &self.recording {
+            Some((Recording::Binding(key), _)) => entries.iter().position(|e| &e.key == key),
+            _ => None,
+        }
+        .or_else(|| {
+            self.selected_binding
+                .as_ref()
+                .and_then(|commands| entries.iter().position(|e| &e.commands == commands))
+        })
+        .unwrap_or(0);
+        let open = self.binding_menu_open;
+        let caps = |key: &str| {
+            hotkey::from_binding(key)
+                .map(|shortcut| shortcut.display())
+                .unwrap_or_else(|| "Not usable".into())
+        };
+
+        let current = &entries[selected];
+        let picker = div()
+            .id("binding-picker")
+            .h(px(30.))
+            .px(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(if open { theme.accent } else { theme.divider })
+            .bg(theme.key_background)
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .hover({
+                let hover = theme.selected;
+                move |style| style.bg(hover)
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(theme.text)
+                    .child(current.description.clone()),
+            )
+            .child(
+                div()
                     .flex_none()
-                    .min_w(px(92.))
-                    .h(px(26.))
-                    .px(px(8.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(3.))
                     .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .map(|el| {
-                        if recording {
-                            el.border_color(theme.accent)
-                                .bg(theme.card)
-                                .text_color(theme.accent)
-                                .child("Type shortcut…")
-                        } else {
+                    .text_color(theme.muted)
+                    .child(caps(&current.key)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme.muted)
+                    .child(if open { "▲" } else { "▼" }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.stop_recording(cx);
+                this.binding_menu_open = !this.binding_menu_open;
+                cx.notify();
+            }));
+
+        let menu = open.then(|| {
+            let mut items: Vec<AnyElement> = Vec::new();
+            let mut last_group = None;
+            for (index, entry) in entries.iter().enumerate() {
+                if last_group != Some(entry.group.0) {
+                    last_group = Some(entry.group.0);
+                    items.push(
+                        div()
+                            .px(px(8.))
+                            .pt(px(if index == 0 { 2. } else { 8. }))
+                            .pb(px(2.))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.placeholder)
+                            .child(entry.group.1)
+                            .into_any_element(),
+                    );
+                }
+                let commands = entry.commands.clone();
+                let usable = hotkey::from_binding(&entry.key).is_some();
+                let is_selected = index == selected;
+                items.push(
+                    div()
+                        .id(("binding-option", index))
+                        .h(px(26.))
+                        .px(px(8.))
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .when(is_selected, |row| row.bg(theme.selected))
+                        .hover({
                             let hover = theme.selected;
-                            let el = el
-                                .border_color(gpui::transparent_black())
-                                .bg(theme.key_background)
-                                .text_color(theme.key_text)
-                                .hover(move |style| style.bg(hover));
-                            match &shortcut {
-                                Some(shortcut) => el.children(
-                                    shortcut.parts().into_iter().map(|part| div().child(part)),
-                                ),
-                                None => el.child("Not usable"),
-                            }
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if recording {
+                            move |style| style.bg(hover)
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(13.))
+                                .text_color(theme.text)
+                                .when(is_selected, |text| text.font_weight(FontWeight::MEDIUM))
+                                .child(entry.description.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(if usable { theme.muted } else { theme.error })
+                                .child(caps(&entry.key)),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             this.stop_recording(cx);
-                        } else {
-                            this.stop_recording(cx);
-                            this.start_recording(Recording::Binding(record_key.clone()), cx);
+                            this.selected_binding = Some(commands.clone());
+                            this.binding_menu_open = false;
+                            this.shortcut_note = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+            div()
+                .id("binding-menu")
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .p(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.divider)
+                .bg(theme.card)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .children(items)
+        });
+
+        // The selected action's key-cap recorder.
+        let key = current.key.clone();
+        let description = current.description.clone();
+        let shortcut = hotkey::from_binding(&key);
+        let recording = matches!(&self.recording, Some((Recording::Binding(k), _)) if k == &key);
+        let (detail, problem) = self
+            .shortcut_note
+            .as_ref()
+            .filter(|(t, ..)| matches!(t, Recording::Binding(k) if k == &key))
+            .map(|(_, note, problem)| (note.clone(), *problem))
+            .unwrap_or_else(|| {
+                let unusable = shortcut.is_none();
+                (
+                    if unusable {
+                        "This shortcut cannot be used. Record a new one.".into()
+                    } else if recording {
+                        "Press the new shortcut, or Escape to cancel.".into()
+                    } else {
+                        "Click the key cap to change it.".into()
+                    },
+                    unusable,
+                )
+            });
+        let record_key = key.clone();
+        let recorder = div()
+            .id("binding-recorder")
+            .flex_none()
+            .min_w(px(92.))
+            .h(px(26.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(3.))
+            .text_size(px(12.))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .map(|el| {
+                if recording {
+                    el.border_color(theme.accent)
+                        .bg(theme.card)
+                        .text_color(theme.accent)
+                        .child("Type shortcut…")
+                } else {
+                    let hover = theme.selected;
+                    let el = el
+                        .border_color(gpui::transparent_black())
+                        .bg(theme.key_background)
+                        .text_color(theme.key_text)
+                        .hover(move |style| style.bg(hover));
+                    match &shortcut {
+                        Some(shortcut) => {
+                            el.children(shortcut.parts().into_iter().map(|part| div().child(part)))
                         }
-                    }));
-                // A default shortcut can be reset to Sift's default; a
-                // custom one can be removed. Neither makes sense when the
-                // binding already shows the default.
-                let reset_key = key.clone();
-                let reset = (!recording
-                    && shortcut.is_some()
-                    && default_main
-                        .get(&key)
-                        .is_some_and(|default| mode.get(&key) != Some(default)))
-                .then(|| {
-                    button(("binding-reset", index), "Use Default", Kind::Link, theme).on_click(
-                        cx.listener(move |this, _, _, cx| this.remove_binding(&reset_key, cx)),
-                    )
-                });
+                        None => el.child("Not usable"),
+                    }
+                }
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.binding_menu_open = false;
+                if recording {
+                    this.stop_recording(cx);
+                } else {
+                    this.stop_recording(cx);
+                    this.start_recording(Recording::Binding(record_key.clone()), cx);
+                }
+            }));
+        // A changed default can be reset to Sift's default. Nothing to reset
+        // when the binding already shows the default.
+        let reset_key = key.clone();
+        let reset = (!recording
+            && shortcut.is_some()
+            && default_main
+                .get(&key)
+                .is_some_and(|default| mode.get(&key) != Some(default)))
+        .then(|| {
+            button("binding-reset", "Use Default", Kind::Link, theme)
+                .on_click(cx.listener(move |this, _, _, cx| this.remove_binding(&reset_key, cx)))
+        });
+        let editor = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_3()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(2.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(description))
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .gap(px(2.))
-                            .child(div().font_weight(FontWeight::MEDIUM).child(description))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(if problem { theme.error } else { theme.muted })
-                                    .child(detail),
-                            ),
-                    )
-                    .children(reset)
-                    .child(recorder)
-                    .into_any_element()
-            })
-            .collect();
-        div().flex().flex_col().gap(px(12.))
-            .child(div().font_weight(FontWeight::MEDIUM).child("Shortcuts"))
-            .child(div().text_size(px(12.)).text_color(theme.muted)
-                .child("Choose a key cap and press the new shortcut. Escape cancels. Shortcuts are saved to config.toml and work while Window Shortcuts and Controls is on."))
-            .children(rows)
+                            .text_size(px(12.))
+                            .text_color(if problem { theme.error } else { theme.muted })
+                            .child(detail),
+                    ),
+            )
+            .children(reset)
+            .child(recorder);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(heading)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(picker)
+                    .children(menu),
+            )
+            .child(editor)
             .into_any_element()
     }
 
@@ -1866,6 +2128,41 @@ mod tests {
             assert!(!describe_commands(commands.clone()).is_empty(), "{key}");
             assert!(shortcut.same_key(&shortcut));
         }
+    }
+
+    #[test]
+    fn the_shortcut_dropdown_groups_and_orders_actions() {
+        let default = sift_wm::Config::default();
+        let entries = binding_entries(&default.bindings["main"]);
+        assert_eq!(entries.len(), default.bindings["main"].len());
+        // Groups appear in order, each one contiguous.
+        assert!(entries.windows(2).all(|w| w[0].group.0 <= w[1].group.0));
+        let switches: Vec<_> = entries
+            .iter()
+            .filter(|e| e.commands[0].starts_with("workspace "))
+            .map(|e| e.description.as_str())
+            .collect();
+        assert_eq!(switches.first(), Some(&"Switch to Workspace 1"));
+        assert_eq!(switches.last(), Some(&"Switch to Workspace 9"));
+        assert_eq!(entries[0].description, "Switch to Workspace 1");
+        assert_eq!(entries[9].description, "Switch to the Previous Workspace");
+        assert_eq!(
+            binding_group(&["move-node-to-workspace 3".into(), "workspace 3".into()]).1,
+            "Send the Window to a Workspace"
+        );
+        assert_eq!(binding_group(&["snap left".into()]).1, "Size and Position");
+        assert_eq!(binding_group(&["exec-and-forget open .".into()]).1, "Other");
+        assert_eq!(binding_group(&[]).1, "Other");
+    }
+
+    #[test]
+    fn natural_order_puts_two_before_ten() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("Workspace 2", "Workspace 10"), Less);
+        assert_eq!(natural_cmp("Workspace 10", "Workspace 9"), Greater);
+        assert_eq!(natural_cmp("workspace 02", "Workspace 2"), Equal);
+        assert_eq!(natural_cmp("Focus", "Focus Up"), Less);
+        assert_eq!(natural_cmp("b", "A"), Greater);
     }
 
     #[test]
