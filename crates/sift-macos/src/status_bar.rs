@@ -99,15 +99,24 @@ impl MenuBar {
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
         item.setAutosaveName(Some(&NSString::from_str("SiftMenuBar")));
         if let Some(button) = item.button(mtm) {
+            // The same sieve glyph as packaging/icon.svg: three pills narrow
+            // toward one small square result. Coordinates are the app icon's
+            // 1024 pt glyph scaled to an 18 pt template image, which the menu
+            // bar recolors for light and dark appearances.
             let drawing = RcBlock::new(|_: NSRect| {
                 NSColor::blackColor().setFill();
-                for (x, y, w, h) in [
-                    (1., 3., 12., 2.),
-                    (1., 8., 9., 2.),
-                    (1., 13., 12., 2.),
-                    (13., 8., 4., 4.),
+                for (x, y, w, h, r) in [
+                    (1.0, 13.4, 16.0, 3.3, 1.65), // svg 212,250 · 600x124 r62
+                    (2.9, 9.3, 12.2, 2.9, 1.45),  // svg 284,421 · 456x108 r54
+                    (5.3, 5.4, 7.5, 2.6, 1.3),    // svg 372,576 · 280x96 r48
+                    (7.5, 1.3, 2.9, 2.9, 0.5),    // svg 457,719 · 110x110 r20
                 ] {
-                    NSBezierPath::fillRect(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+                    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                        NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)),
+                        r,
+                        r,
+                    );
+                    path.fill();
                 }
                 true.into()
             });
