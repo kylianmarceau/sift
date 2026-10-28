@@ -457,9 +457,12 @@ impl Engine {
         old.native_fullscreen = observed.native_fullscreen;
         old.hidden = observed.hidden;
         let is_tiled = old.is_tiled();
+        // A native fullscreen frame belongs to macOS's own Space. Recording
+        // it would make the screen-sized frame the window's restore frame.
         if ((!self.config.automatic_tiling && self.visible.values().any(|n| n == &old.workspace))
             || (old.floating && self.visible.values().any(|n| n == &old.workspace)))
             && observed.frame.valid()
+            && !observed.native_fullscreen
         {
             old.frame = observed.frame;
         }
@@ -667,11 +670,91 @@ impl Engine {
             }
         }
         self.active_monitor = monitor;
-        self.focused = self.workspaces[name].focused;
+        self.focused = self.workspace_focus(name);
+        if let Some(workspace) = self.workspaces.get_mut(name) {
+            workspace.focused = self.focused;
+        }
         if self.focused != previous_focus {
             self.previous_window = previous_focus;
         }
         Ok(())
+    }
+
+    /// The window a workspace switch focuses: the remembered one while it
+    /// still belongs there, else the most recently focused one. Without a
+    /// focus target macOS would stay on the current (possibly fullscreen)
+    /// Space and the switch would look like it did nothing.
+    fn workspace_focus(&self, name: &str) -> Option<WindowId> {
+        let on_workspace =
+            |id: &WindowId| self.windows.get(id).is_some_and(|w| w.workspace == name);
+        let usable = |id: &WindowId| {
+            self.windows
+                .get(id)
+                .is_some_and(|w| w.workspace == name && !w.minimized)
+        };
+        let remembered = self.workspaces.get(name).and_then(|w| w.focused);
+        remembered
+            .filter(usable)
+            .or_else(|| {
+                self.windows
+                    .values()
+                    .filter(|w| w.workspace == name && !w.minimized)
+                    .max_by_key(|w| {
+                        (
+                            self.focus_order.get(&w.id).copied().unwrap_or(0),
+                            std::cmp::Reverse(w.id),
+                        )
+                    })
+                    .map(|w| w.id)
+            })
+            .or_else(|| remembered.filter(on_workspace))
+    }
+
+    /// True when a frame is (almost) entirely outside every display, as a
+    /// parked window is. macOS keeps a sliver of such windows on screen.
+    pub fn offscreen(&self, frame: Rect) -> bool {
+        const VISIBLE: f64 = 12.;
+        frame.valid()
+            && !self.monitors.values().any(|m| {
+                let width = frame.right().min(m.frame.right()) - frame.x.max(m.frame.x);
+                let height = frame.bottom().min(m.frame.bottom()) - frame.y.max(m.frame.y);
+                width >= VISIBLE && height >= VISIBLE
+            })
+    }
+
+    /// Manual mode only: a window whose remembered frame is a parking spot
+    /// (left behind by a lost window, a crash, or an app that saved its
+    /// parked position) is moved back onto its workspace's display. Returns
+    /// the new frame when the window was rescued.
+    pub fn rescue_offscreen(&mut self, id: WindowId) -> Option<Rect> {
+        if self.config.automatic_tiling {
+            return None;
+        }
+        let window = self.windows.get(&id)?;
+        if window.native_fullscreen || window.minimized || !self.offscreen(window.frame) {
+            return None;
+        }
+        let monitor = self
+            .workspaces
+            .get(&window.workspace)
+            .and_then(|w| self.monitors.get(&w.monitor))
+            .or_else(|| self.monitors.get(&self.active_monitor))?;
+        let area = monitor.usable;
+        let width = window.frame.width.min(area.width);
+        let height = window.frame.height.min(area.height);
+        let frame = Rect::new(
+            area.x + (area.width - width) / 2.,
+            area.y + (area.height - height) / 2.,
+            width,
+            height,
+        );
+        let original_offscreen = self.offscreen(self.windows[&id].original_frame);
+        let window = self.windows.get_mut(&id)?;
+        window.frame = frame;
+        if original_offscreen {
+            window.original_frame = frame;
+        }
+        Some(frame)
     }
 
     fn move_to_workspace(&mut self, id: WindowId, target: &str, follow: bool) -> Result<()> {
@@ -968,7 +1051,7 @@ impl Engine {
             Command::FocusMonitor(selector) => {
                 self.active_monitor = self.select_monitor(&selector)?;
                 let current = self.current_name()?;
-                self.focused = self.workspaces[&current].focused;
+                self.focused = self.workspace_focus(&current);
             }
             Command::MoveWorkspaceToMonitor(selector) => {
                 let monitor = self.select_monitor(&selector)?;
@@ -1052,7 +1135,7 @@ impl Engine {
                         }) {
                             self.active_monitor = monitor;
                             let n = self.current_name()?;
-                            self.focused = self.workspaces[&n].focused;
+                            self.focused = self.workspace_focus(&n);
                         }
                     }
                     Command::Move(direction) => {

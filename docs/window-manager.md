@@ -174,7 +174,8 @@ Numbered workspace bindings use **Option**:
 All bindings are registered by physical key. A configured mode replaces the
 default binding table for that mode. No hotkeys are registered when the feature
 is off. Every main-mode shortcut can also be changed in **Sift Settings →
-Window Management → Shortcuts**: choose a key cap, press the new shortcut, and
+Window Management → Shortcuts**: pick the action from the dropdown (grouped
+by category, with each current key), click its key cap, press the new shortcut, and
 Sift writes the mode's binding table to config.toml and re-registers the
 shortcuts. Shortcut recording temporarily suspends both launcher and window
 shortcuts. A window shortcut conflicting with Sift's launcher shortcut is
@@ -244,6 +245,18 @@ constrains floating windows to a remaining display.
 Dialogs and utility windows float by default. Explicit application rules can
 override that choice. Native minimized/fullscreen windows are kept out of the
 tiling tree until they return.
+
+Native fullscreen apps run in their own macOS Space, and while one is in front
+many apps stop listing windows on other Spaces. Sift keeps such a window (and
+its workspace and saved position) as long as the window server still places it
+on a Space, so Option–number works from a fullscreen app and brings the window
+back. This uses the private `SLSCopySpacesForWindows` call, resolved at run
+time, with the public window list as a fallback. A switch to a workspace whose
+remembered window closed focuses its most recently used window instead. In
+manual mode a window found stranded at a parking corner (for example after a
+crash, or reopened where its app saved a parked position) is moved back to the
+centre of its display, and a fullscreen window's screen-sized frame is never
+saved as its restore position.
 
 ## Callback hooks
 
