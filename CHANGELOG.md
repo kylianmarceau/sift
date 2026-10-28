@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4 (2026-10-28)
+
+- Windows no longer disappear after using a native full-screen app. Sift keeps
+  windows that macOS places on other Spaces, so Option–number works from a
+  full-screen app and brings the window back.
+- A window stranded at the workspace parking corner is moved back on screen.
+- Switching to a workspace whose remembered window closed now focuses its most
+  recently used window.
+- Window shortcuts in **Settings → Window Management** are a grouped dropdown
+  instead of one long list.
+
 ## 0.4.3 (2026-10-27)
 
 - Workspace shortcuts default to Option–1…9 (Option–Shift–1…9 moves a window)
