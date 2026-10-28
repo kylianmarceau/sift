@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 (2026-10-28)
+
+- The menu bar icon matches the app icon: the same three narrowing bars
+  with the small square result, instead of an unrelated bar layout.
+
 ## 0.4.4 (2026-10-28)
 
 - Windows no longer disappear after using a native full-screen app. Sift keeps
