@@ -416,7 +416,16 @@ is retained alongside the earlier automatic-mode measurements.
 - Window presence is separate from successful metadata reads. A frame/role
   timeout for an existing native identity preserves its model and original
   recovery position; it is removed only when absent from the app's window list.
-- Recovery positions are atomically written before arranging/parking windows.
+- A workspace switch shows the incoming workspace before hiding the outgoing
+  one: every app bringing a window on screen (and focusing it) goes first,
+  and other apps park their windows only after that, or after 150 ms if an
+  app is slow. A focused window is raised before its app is activated, so the
+  app's previous window never shows first. For half a second after Sift asks
+  for focus, focus reports for any other window are treated as late echoes of
+  an earlier switch and ignored; otherwise quick Option-1, Option-2 presses
+  could bounce back to workspace 1 for a moment.
+- Recovery positions are atomically written (with `fsync`) before
+  arranging/parking windows.
   Recovery matches the process start time, PID, native window ID and bundle ID,
   so recycled process/window IDs do not restore another application's windows.
   Reload and shutdown retain positions for apps that have not responded. Quit

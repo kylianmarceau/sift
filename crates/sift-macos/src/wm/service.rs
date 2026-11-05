@@ -1,4 +1,4 @@
-use super::worker::{Task, Worker};
+use super::worker::{Batch, Gate, Task, Worker};
 use super::{AppInfo, Event};
 use serde::{Deserialize, Serialize};
 use sift_wm::protocol::{self, Reply, Request};
@@ -101,7 +101,15 @@ struct Service {
     launch_serial: u64,
     restoring: Vec<RecoveryFrame>,
     known_apps: BTreeMap<String, PathBuf>,
+    /// The window Sift last asked macOS to focus, and when. Activation
+    /// notifications from an earlier request can arrive after a newer one;
+    /// see `accept_observed_focus`.
+    requested_focus: Option<(WindowId, Instant)>,
 }
+
+/// How long focus reports that disagree with Sift's own latest focus request
+/// are treated as echoes of an earlier request rather than a user's choice.
+const FOCUS_SETTLE: Duration = Duration::from_millis(500);
 
 struct PendingLaunch {
     command: Command,
@@ -200,6 +208,7 @@ pub(super) fn start(
         launch_serial: 0,
         restoring: Vec::new(),
         known_apps: BTreeMap::new(),
+        requested_focus: None,
     };
     let socket_copy = socket.clone();
     let ipc_thread = std::thread::Builder::new()
@@ -546,10 +555,11 @@ impl Service {
             }
             // Inactive apps also report their last focused window. Only
             // the frontmost app can change the global focus/workspace.
-            if self.frontmost == Some(report.pid) {
-                if let Some(id) = report.focused {
-                    let _ = self.engine.observed_focus(id);
-                }
+            if self.frontmost == Some(report.pid)
+                && let Some(id) = report.focused
+                && self.accept_observed_focus(id)
+            {
+                let _ = self.engine.observed_focus(id);
             }
         }
         if !self.engine.config.automatic_tiling {
@@ -558,6 +568,29 @@ impl Service {
             frames.extend(self.manual_parked_recovery(&self.parked));
             if let Err(error) = self.write_journal(frames) {
                 self.message = Some(format!("Could not update window recovery journal: {error}"));
+            }
+        }
+    }
+
+    /// Switching workspaces quickly (Option-1, Option-2) activates one app
+    /// and then another. The first app's activation report can arrive after
+    /// the second request; taken as a user's focus change it would switch
+    /// back to the first workspace and then forward again, a visible flicker.
+    /// Briefly after a request, only a report of the requested window counts.
+    fn accept_observed_focus(&mut self, id: WindowId) -> bool {
+        match self.requested_focus {
+            Some((requested, at)) if at.elapsed() < FOCUS_SETTLE => {
+                if requested == id {
+                    self.requested_focus = None;
+                    true
+                } else {
+                    tracing::debug!(id, requested, "ignored a stale focus report");
+                    false
+                }
+            }
+            _ => {
+                self.requested_focus = None;
+                true
             }
         }
     }
@@ -743,13 +776,16 @@ impl Service {
             ));
             return;
         }
+        let mut parking = BTreeSet::new();
         for id in &hidden {
             if let Some(frame) = self.engine.parking_frame(*id) {
                 // macOS keeps a small part of a window on screen. Park at
                 // the lower-right edge; do not minimize or change native Spaces.
                 effects.push(Effect::Frame(*id, frame));
+                parking.insert(*id);
             }
         }
+        let newly_parked: BTreeSet<WindowId> = parking.difference(&self.parked).copied().collect();
         self.parked = hidden;
         // Keep the last desired frame and focus per window; a single command
         // must not perform a tile frame followed by a fullscreen frame.
@@ -766,6 +802,7 @@ impl Service {
             _ => true,
         });
         effects.reverse();
+        let mut parks: BTreeMap<i32, Vec<(WindowId, Rect)>> = BTreeMap::new();
         for effect in effects {
             let id = match effect {
                 Effect::LaunchTarget {
@@ -792,6 +829,12 @@ impl Service {
                     continue;
                 }
                 Effect::Frame(_, _) if self.mouse_held => continue,
+                Effect::Frame(id, frame) if parking.contains(&id) => {
+                    if let Some(w) = self.engine.windows.get(&id) {
+                        parks.entry(w.pid).or_default().push((id, frame));
+                    }
+                    continue;
+                }
                 Effect::Frame(id, _)
                 | Effect::Focus(id)
                 | Effect::Raise(id)
@@ -799,14 +842,38 @@ impl Service {
                 | Effect::Minimize(id) => id,
                 Effect::NativeFullscreen(id, _) => id,
             };
+            if let Effect::Focus(id) = effect {
+                self.requested_focus = Some((id, Instant::now()));
+            }
             if let Some(w) = self.engine.windows.get(&id) {
                 by_pid.entry(w.pid).or_default().push(effect);
             }
         }
-        for (pid, effects) in by_pid {
-            if let Some(worker) = self.workers.get(&pid) {
-                worker.send(Task::Apply(effects));
-            }
+        // Parking waits until every app bringing a window on screen has done
+        // so. Most calls park nothing new (workers skip unchanged frames),
+        // and those need no gate.
+        by_pid.retain(|pid, _| self.workers.contains_key(pid));
+        let gate =
+            (!by_pid.is_empty() && !newly_parked.is_empty()).then(|| Gate::new(by_pid.len()));
+        let pids: BTreeSet<i32> = by_pid.keys().chain(parks.keys()).copied().collect();
+        for pid in pids {
+            let Some(worker) = self.workers.get(&pid) else {
+                continue;
+            };
+            let effects = by_pid.remove(&pid).unwrap_or_default();
+            let arrive = (!effects.is_empty()).then(|| gate.clone()).flatten();
+            let parks = parks.remove(&pid).unwrap_or_default();
+            let wait = parks
+                .iter()
+                .any(|(id, _)| newly_parked.contains(id))
+                .then(|| gate.clone())
+                .flatten();
+            worker.send(Task::Apply(Batch {
+                effects,
+                parks,
+                arrive,
+                wait,
+            }));
         }
     }
 
@@ -1108,7 +1175,14 @@ impl Service {
             .open(&temp)?;
         serde_json::to_writer(&mut file, &frames)?;
         file.flush()?;
-        file.sync_all()?;
+        // This write precedes every workspace switch, so it is on the
+        // shortcut's critical path. Plain fsync survives a crash of Sift or
+        // the system (~0.35 ms); sync_all's F_FULLFSYNC also flushes the
+        // drive cache for power loss (~3 ms). A window stranded by power
+        // loss is moved back on screen at startup anyway (see `rescue`).
+        if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         std::fs::rename(temp, &self.journal)?;
         self.last_journal = frames;
         Ok(())

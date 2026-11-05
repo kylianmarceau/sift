@@ -61,6 +61,42 @@ impl WindowProvider {
     }
 }
 
+/// Whether two snapshots give the same window and workspace results.
+/// Frames are not searched, so moving or resizing a window changes nothing.
+pub fn same_search_content(a: &Snapshot, b: &Snapshot) -> bool {
+    a.enabled == b.enabled
+        && a.windows.len() == b.windows.len()
+        && a.workspaces.len() == b.workspaces.len()
+        && a.windows.iter().zip(&b.windows).all(|(a, b)| {
+            a.id == b.id
+                && a.pid == b.pid
+                && a.minimized == b.minimized
+                && a.workspace == b.workspace
+                && a.title == b.title
+                && a.app_name == b.app_name
+        })
+        && a.workspaces
+            .iter()
+            .zip(&b.workspaces)
+            .all(|(a, b)| a.name == b.name)
+}
+
+/// Whether the menu and Settings would show the same thing for both:
+/// search content plus focus, visible workspaces, mode and status.
+pub fn same_overview(a: &Snapshot, b: &Snapshot) -> bool {
+    same_search_content(a, b)
+        && a.focused == b.focused
+        && a.visible == b.visible
+        && a.active_monitor == b.active_monitor
+        && a.mode == b.mode
+        && a.message == b.message
+        && a.automatic_tiling == b.automatic_tiling
+        && a.workspaces
+            .iter()
+            .zip(&b.workspaces)
+            .all(|(a, b)| a.monitor == b.monitor)
+}
+
 impl Provider for WindowProvider {
     fn name(&self) -> &'static str {
         "windows"
@@ -108,6 +144,35 @@ impl Provider for WindowProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_window_does_not_change_search_content() {
+        let mut w = sift_wm::Window::new(1, 2, sift_wm::Rect::new(0., 0., 100., 100.));
+        w.title = "Notes".into();
+        let a = Snapshot {
+            enabled: true,
+            windows: vec![w],
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.windows[0].frame = sift_wm::Rect::new(50., 50., 300., 200.);
+        b.revision += 1;
+        assert!(same_search_content(&a, &b));
+        b.windows[0].title = "Notes — edited".into();
+        assert!(!same_search_content(&a, &b));
+        let mut c = a.clone();
+        c.windows[0].workspace = "2".into();
+        assert!(!same_search_content(&a, &c));
+        let mut d = a.clone();
+        d.enabled = false;
+        assert!(!same_search_content(&a, &d));
+        assert!(same_overview(&a, &b) == same_search_content(&a, &b));
+        let mut e = a.clone();
+        e.windows[0].frame = sift_wm::Rect::new(9., 9., 9., 9.);
+        assert!(same_overview(&a, &e));
+        e.focused = Some(1);
+        assert!(!same_overview(&a, &e));
+    }
     #[test]
     fn scoped_queries_only_search_cached_window_state() {
         let mut snapshot = Snapshot {

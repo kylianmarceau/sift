@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{CString, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
@@ -19,8 +19,54 @@ pub struct Report {
     pub failure: Option<String>,
 }
 
+/// Orders one workspace switch across application workers: every worker
+/// that brings a window on screen (or focuses one) arrives first, and only
+/// then do workers park the old workspace's windows. Parking first would
+/// show the desktop for a frame between the two workspaces.
+pub struct Gate {
+    remaining: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl Gate {
+    /// The longest a worker holds parked windows back for a slow app.
+    const WAIT: Duration = Duration::from_millis(150);
+
+    pub fn new(arrivals: usize) -> Arc<Self> {
+        Arc::new(Self {
+            remaining: Mutex::new(arrivals),
+            ready: Condvar::new(),
+        })
+    }
+    fn arrive(&self) {
+        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            self.ready.notify_all();
+        }
+    }
+    fn wait(&self) {
+        let remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .ready
+            .wait_timeout_while(remaining, Self::WAIT, |n| *n > 0)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+/// Effects for one application. `parks` move windows of hidden workspaces
+/// off screen; they run after `effects` and after `gate` opens.
+pub struct Batch {
+    pub effects: Vec<Effect>,
+    pub parks: Vec<(WindowId, Rect)>,
+    /// Arrive at this gate once `effects` are applied.
+    pub arrive: Option<Arc<Gate>>,
+    /// Wait for this gate before applying `parks`.
+    pub wait: Option<Arc<Gate>>,
+}
+
 pub enum Task {
-    Apply(Vec<Effect>),
+    Apply(Batch),
     Refresh { focus: bool, hidden: bool },
     Restore(Vec<(WindowId, Rect)>),
     Stop,
@@ -28,7 +74,8 @@ pub enum Task {
 
 #[derive(Default)]
 struct Pending {
-    frames: BTreeMap<WindowId, Rect>,
+    /// The latest frame per window; `true` marks a parking move.
+    frames: BTreeMap<WindowId, (Rect, bool)>,
     forced: HashSet<WindowId>,
     focus: Option<WindowId>,
     raise: Option<WindowId>,
@@ -36,6 +83,8 @@ struct Pending {
     refresh: bool,
     refresh_focus: bool,
     app_hidden: Option<bool>,
+    arrive: Option<Arc<Gate>>,
+    wait: Option<Arc<Gate>>,
     stop: bool,
 }
 
@@ -137,17 +186,30 @@ impl Worker {
                 }
                 Task::Restore(frames) => {
                     for (id, frame) in frames {
-                        pending.frames.insert(id, frame);
+                        pending.frames.insert(id, (frame, false));
                         pending.forced.insert(id);
                     }
                     pending.focus = None;
                     pending.raise = None;
                 }
-                Task::Apply(effects) => {
-                    for effect in effects {
+                Task::Apply(batch) => {
+                    // A newer switch supersedes one this worker has not run
+                    // yet. Release the old gate so nobody waits on us for it.
+                    if let Some(gate) = batch.arrive {
+                        if let Some(old) = pending.arrive.replace(gate) {
+                            old.arrive();
+                        }
+                    }
+                    if batch.wait.is_some() {
+                        pending.wait = batch.wait;
+                    }
+                    for (id, frame) in batch.parks {
+                        pending.frames.insert(id, (frame, true));
+                    }
+                    for effect in batch.effects {
                         match effect {
                             Effect::Frame(id, frame) => {
-                                pending.frames.insert(id, frame);
+                                pending.frames.insert(id, (frame, false));
                             }
                             Effect::Focus(id) => pending.focus = Some(id),
                             Effect::Raise(id) => pending.raise = Some(id),
@@ -202,6 +264,17 @@ pub(super) fn process_identity(pid: i32) -> Option<(u64, u64)> {
 impl Drop for Worker {
     fn drop(&mut self) {
         self.send(Task::Stop);
+        // A stopped worker never runs its pending batch; never leave
+        // another worker waiting on it.
+        if let Some(gate) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .arrive
+            .take()
+        {
+            gate.arrive();
+        }
     }
 }
 
@@ -376,7 +449,12 @@ impl Context {
         if let Some(hidden) = pending.app_hidden {
             self.app.hidden = hidden;
         }
-        for (id, frame) in pending.frames {
+        // Show, then focus, then park: the incoming workspace is on screen
+        // and in front before the outgoing one leaves, so a switch never
+        // shows the desktop or a stale window in between.
+        let (parks, shows): (Vec<_>, Vec<_>) =
+            pending.frames.into_iter().partition(|(_, (_, park))| *park);
+        for (id, (frame, _)) in shows {
             if pending.forced.contains(&id) {
                 self.last_attempt.remove(&id);
             }
@@ -390,6 +468,17 @@ impl Context {
         }
         for effect in pending.actions {
             self.apply(effect);
+        }
+        if let Some(gate) = pending.arrive {
+            gate.arrive();
+        }
+        if !parks.is_empty() {
+            if let Some(gate) = pending.wait {
+                gate.wait();
+            }
+            for (id, (frame, _)) in parks {
+                self.apply(Effect::Frame(id, frame));
+            }
         }
         if pending.stop {
             self.stopping = true;
@@ -587,13 +676,29 @@ impl Context {
                 self.frames.insert(id, rect);
             }
             Effect::Focus(_) => {
-                let minimized = Owned::string("AXMinimized");
-                unsafe {
-                    AXUIElementSetAttributeValue(window, minimized.0, kCFBooleanFalse);
+                if boolean(window, "AXMinimized") {
+                    let minimized = Owned::string("AXMinimized");
+                    unsafe {
+                        AXUIElementSetAttributeValue(window, minimized.0, kCFBooleanFalse);
+                    }
                 }
-                // AXRaise changes stacking, but does not reliably activate an
-                // inactive application. NSRunningApplication supports background
-                // callers; request activation before selecting the AX window.
+                // Raise and select the window before activating its app.
+                // Activation brings the app's current main window forward,
+                // so activating first shows that window for a frame before
+                // the requested one replaces it: a visible flicker.
+                let main = Owned::string("AXMain");
+                let main = unsafe { AXUIElementSetAttributeValue(window, main.0, kCFBooleanTrue) };
+                action(window, "AXRaise");
+                if let Some(app) = &self.app_element {
+                    let hidden = Owned::string("AXHidden");
+                    let frontmost = Owned::string("AXFrontmost");
+                    unsafe {
+                        AXUIElementSetAttributeValue(app.0, hidden.0, kCFBooleanFalse);
+                        AXUIElementSetAttributeValue(app.0, frontmost.0, kCFBooleanTrue);
+                    }
+                }
+                // AXFrontmost does not reliably activate every inactive
+                // app; NSRunningApplication also accepts background callers.
                 if let Some(app) =
                     objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
                         self.app.pid,
@@ -609,22 +714,10 @@ impl Context {
                         "application activation requested"
                     );
                 }
-                let key = Owned::string("AXFrontmost");
-                if let Some(app) = &self.app_element {
-                    let hidden = Owned::string("AXHidden");
-                    unsafe {
-                        AXUIElementSetAttributeValue(app.0, hidden.0, kCFBooleanFalse);
-                        AXUIElementSetAttributeValue(app.0, key.0, kCFBooleanTrue);
-                    }
-                }
-                action(window, "AXRaise");
-                let main = Owned::string("AXMain");
                 let focused = Owned::string("AXFocused");
-                unsafe {
-                    let main = AXUIElementSetAttributeValue(window, main.0, kCFBooleanTrue);
-                    let focused = AXUIElementSetAttributeValue(window, focused.0, kCFBooleanTrue);
-                    tracing::debug!(id, main, focused, "window focus attributes requested");
-                }
+                let focused =
+                    unsafe { AXUIElementSetAttributeValue(window, focused.0, kCFBooleanTrue) };
+                tracing::debug!(id, main, focused, "window focus attributes requested");
             }
             Effect::Raise(_) => action(window, "AXRaise"),
             Effect::Close(_) => {
@@ -741,17 +834,58 @@ mod tests {
             done,
         };
         for x in 0..10_000 {
-            worker.send(Task::Apply(vec![Effect::Frame(
-                1,
-                Rect::new(x as f64, 0., 400., 300.),
-            )]));
+            worker.send(Task::Apply(Batch {
+                effects: vec![Effect::Frame(1, Rect::new(x as f64, 0., 400., 300.))],
+                parks: vec![],
+                arrive: None,
+                wait: None,
+            }));
         }
         assert_eq!(worker.pending.lock().expect("pending").frames.len(), 1);
         worker.send(Task::Restore(vec![(1, Rect::new(100., 100., 400., 300.))]));
         worker.send(Task::Stop);
         let pending = worker.pending.lock().expect("pending");
-        assert_eq!(pending.frames[&1].x, 100.);
+        assert_eq!(pending.frames[&1].0.x, 100.);
+        assert!(!pending.frames[&1].1);
         assert!(pending.forced.contains(&1));
         assert!(pending.stop);
+    }
+
+    #[test]
+    fn a_superseded_switch_releases_its_gate() {
+        let (_, done) = mpsc::channel();
+        let worker = Worker {
+            identity: (1, 0),
+            pending: Arc::default(),
+            wake: Arc::default(),
+            latest: Arc::default(),
+            done,
+        };
+        let first = Gate::new(1);
+        let second = Gate::new(1);
+        let batch = |gate: &Arc<Gate>| Batch {
+            effects: vec![Effect::Focus(1)],
+            parks: vec![(2, Rect::new(5000., 5000., 400., 300.))],
+            arrive: Some(gate.clone()),
+            wait: Some(gate.clone()),
+        };
+        worker.send(Task::Apply(batch(&first)));
+        worker.send(Task::Apply(batch(&second)));
+        // The first switch never runs, so its gate opens without waiting.
+        let started = Instant::now();
+        first.wait();
+        assert!(started.elapsed() < Gate::WAIT);
+        // A later show for a parked window cancels the park.
+        worker.send(Task::Apply(Batch {
+            effects: vec![Effect::Frame(2, Rect::new(0., 0., 400., 300.))],
+            parks: vec![],
+            arrive: None,
+            wait: None,
+        }));
+        assert!(!worker.pending.lock().expect("pending").frames[&2].1);
+        drop(worker);
+        let started = Instant::now();
+        second.wait();
+        assert!(started.elapsed() < Gate::WAIT);
     }
 }
