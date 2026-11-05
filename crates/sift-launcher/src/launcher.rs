@@ -10,8 +10,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat,
-    RenderImage, SharedString, Subscription, Task, Window, actions, div, img, prelude::*, px,
-    relative, svg,
+    RenderImage, SharedString, Subscription, Task, Window, actions, div, img, prelude::*, px, svg,
 };
 use sift_apps::{AppCatalog, AppProvider, Location};
 use sift_calc::CalculatorProvider;
@@ -62,8 +61,16 @@ const ICON_SIZE: f32 = 28.;
 const ICON_GAP: f32 = 12.;
 /// Rows visible at once; more results scroll with the selection.
 pub const VISIBLE_ROWS: usize = 8;
-/// Width of the result list beside the clipboard preview.
-const CLIP_LIST_WIDTH: f32 = 300.;
+/// Width of the result list beside the preview pane.
+const LIST_WIDTH: f32 = 300.;
+/// The selected item's icon in the preview pane, in points, and the pixels
+/// it is rendered at (sharp on Retina screens).
+const PREVIEW_ICON_SIZE: f32 = 64.;
+const PREVIEW_ICON_PX: u32 = 128;
+/// Padding inside the preview pane.
+const PANE_PADDING: f32 = 18.;
+/// One action in the preview pane's action list.
+const ACTION_HEIGHT: f32 = 28.;
 /// Characters of an entry shown in the preview; the rest is counted.
 const PREVIEW_CHARS: usize = 3_000;
 /// Fixed-width font for code in the preview.
@@ -161,6 +168,10 @@ pub struct Launcher {
     icons: IconCache<Arc<RenderImage>>,
     /// Icons being rendered in the background.
     icon_jobs: HashSet<IconKey>,
+    /// The selected file's large icon and details for the preview pane,
+    /// read in the background (see `details_for`).
+    details: Option<Details>,
+    details_task: Option<Task<()>>,
     panel: Option<Panel>,
     /// Previews of the selected file (⌘Y). All calls that show, move or
     /// close the preview run outside GPUI updates, since they change which
@@ -347,6 +358,8 @@ impl Launcher {
             scroll_top: 0,
             icons: IconCache::new(IconCache::<Arc<RenderImage>>::LIMIT),
             icon_jobs: HashSet::new(),
+            details: None,
+            details_task: None,
             panel: None,
             quick_look: None,
             message: None,
@@ -868,7 +881,7 @@ impl Launcher {
     }
 
     fn height(&self) -> f32 {
-        // The preview needs room even for one entry.
+        // The preview needs room even for one result.
         let rows = if self.shows_preview() {
             VISIBLE_ROWS
         } else {
@@ -877,10 +890,10 @@ impl Launcher {
         window_height(rows, self.shows_message())
     }
 
-    /// A clip search with results: the list shares the panel with a
-    /// preview of the selected entry.
+    /// Any results: the list shares the panel with a preview of the
+    /// selected one.
     fn shows_preview(&self) -> bool {
-        self.message.is_none() && !self.results.is_empty() && self.in_clipboard_scope(&self.query)
+        self.message.is_none() && !self.results.is_empty()
     }
 
     /// What to say when a query finds nothing.
@@ -1672,6 +1685,40 @@ impl Launcher {
         None
     }
 
+    /// The large icon and details of the file or app at `path`, as far as
+    /// they have been read. The first time a path is shown they are read
+    /// in the background; selecting something else cancels that read.
+    fn details_for(&mut self, path: &Path, app: bool, cx: &mut Context<Self>) -> Details {
+        if self.details.as_ref().is_none_or(|d| d.path != path) {
+            if let Some(icon) = self.details.take().and_then(|d| d.icon) {
+                free_textures(vec![icon], cx);
+            }
+            self.details = Some(Details::pending(path.to_path_buf()));
+            let decode = icon_decoder(cx);
+            let owned = path.to_path_buf();
+            let read = cx.background_spawn(async move { Details::read(owned, app, &decode) });
+            self.details_task = Some(cx.spawn(async move |this, cx| {
+                let details = read.await;
+                this.update(cx, |this, cx| {
+                    if this
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.path == details.path)
+                    {
+                        this.details = Some(details);
+                        cx.notify();
+                    } else if let Some(icon) = details.icon {
+                        free_textures(vec![icon], cx);
+                    }
+                })
+                .ok();
+            }));
+        }
+        self.details
+            .get_or_insert_with(|| Details::pending(path.to_path_buf()))
+            .clone()
+    }
+
     fn render_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let item = &self.results[index];
@@ -1684,9 +1731,14 @@ impl Launcher {
         let kind = item.kind;
         let item = item.clone();
         let icon = self.icon(&item, cx);
-        // Beside the preview every row is a clipboard entry; the label
-        // would only take room.
-        let show_kind = !self.shows_preview();
+        // The selected row is filled with the accent colour, so it is clear
+        // which result the preview pane describes.
+        let (text, quiet, star) = if selected {
+            let on = theme.on_accent;
+            (on, on.opacity(0.8), on)
+        } else {
+            (theme.text, theme.muted, theme.favorite)
+        };
 
         div()
             .id(("result", index))
@@ -1697,7 +1749,7 @@ impl Launcher {
             .items_center()
             .gap(px(ICON_GAP))
             .rounded(px(8.))
-            .when(selected, |row| row.bg(theme.selected))
+            .when(selected, |row| row.bg(theme.accent))
             .when(!selected, |row| row.hover(|style| style.bg(theme.hover)))
             .when_some(theme.outline, |row, outline| {
                 // Every row gets the border so that rows keep one size.
@@ -1711,62 +1763,50 @@ impl Launcher {
                 this.selection.select(index);
                 this.activate_selected(cx);
             }))
-            .child(result_icon(kind, icon, content))
+            .child(result_icon(kind, icon, content, ICON_SIZE))
             .child(
-                // Title, then the folder or detail in quieter text on the
-                // same line; the detail gives way first when space runs out.
+                // Title, with the folder or detail on a quieter second line.
                 div()
-                    .flex()
                     .flex_1()
                     .min_w(px(0.))
-                    .items_center()
-                    .gap(px(8.))
+                    .flex()
+                    .flex_col()
+                    .justify_center()
                     .child(
                         div()
-                            .flex_none()
-                            .max_w(relative(0.75))
                             .truncate()
-                            .text_size(px(14.))
+                            .text_size(px(13.5))
+                            .line_height(px(17.))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
+                            .text_color(text)
                             .child(title),
                     )
-                    .when_some(subtitle, |line, subtitle| {
-                        line.child(
+                    .when_some(subtitle, |lines, subtitle| {
+                        lines.child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.))
                                 .truncate()
-                                .text_size(px(13.))
-                                .text_color(theme.muted)
+                                .text_size(px(11.5))
+                                .line_height(px(15.))
+                                .text_color(quiet)
                                 .child(subtitle),
                         )
                     }),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme.placeholder)
-                    .when(favorite, |accessory| {
-                        accessory.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(theme.favorite)
-                                .child("★"),
-                        )
-                    })
-                    .when(show_kind, |accessory| accessory.child(kind.label())),
-            )
+            .when(favorite, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(star)
+                        .child("★"),
+                )
+            })
             .into_any_element()
     }
 
     /// The selected clipboard entry in full (up to [`PREVIEW_CHARS`]),
     /// with where and when it was copied.
-    fn render_clip_preview(&self) -> AnyElement {
+    fn render_clip_preview(&self, cx: &Context<Self>) -> AnyElement {
         let theme = self.theme;
         let clipboard = self.user.clipboard();
         let selected = self.selected();
@@ -1867,6 +1907,280 @@ impl Launcher {
                     .child(div().truncate().child(origin))
                     .child(div().truncate().child(stats.join(" · "))),
             )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(8.))
+                    .pb(px(8.))
+                    .child(self.render_actions(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The selected result described in full: a large icon, its path,
+    /// what is known about it and everything that can be done with it.
+    fn render_item_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(item) = self.selected().cloned() else {
+            return div().flex_1().into_any_element();
+        };
+        let path = item.action.path().map(Path::to_path_buf);
+        let app = matches!(item.action, Action::OpenApplication(_));
+        let details = path.as_deref().map(|p| self.details_for(p, app, cx));
+        let icon = match details.as_ref().and_then(|d| d.icon.clone()) {
+            Some(icon) => Some(icon),
+            // Until the large icon is ready, the list's smaller one.
+            None => self.icon(&item, cx),
+        };
+        let favorite = self.user.is_favorite(&item.id);
+        let subtitle: Option<SharedString> = match &path {
+            Some(path) => {
+                Some(sift_files::abbreviate_home(path, std::env::home_dir().as_deref()).into())
+            }
+            None => item.subtitle.clone().map(SharedString::new),
+        };
+        let mut facts: Vec<(&'static str, SharedString)> = vec![("Kind", item.kind.label().into())];
+        if let Some(details) = &details {
+            if let Some(version) = &details.version {
+                facts.push(("Version", version.clone().into()));
+            }
+            if let Some(size) = details.size {
+                facts.push(("Size", file_size(size).into()));
+            }
+            if let Some(modified) = details.modified {
+                facts.push(("Modified", ago(modified, sift_state::now()).into()));
+            }
+        }
+        // What a result that is not a file runs, opens or copies.
+        let source: Option<(&'static str, String)> = match &item.action {
+            Action::Shell(command) | Action::WindowCommand(command) => {
+                Some(("Runs", command.to_string()))
+            }
+            Action::OpenUrl(url) => Some(("Opens", url.to_string())),
+            Action::CopyText(text) if item.kind == ResultKind::Snippet => {
+                Some(("Inserts", text.chars().take(PREVIEW_CHARS).collect()))
+            }
+            _ => None,
+        };
+
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .p(px(PANE_PADDING))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(14.))
+                            .child(result_icon(item.kind, icon, None, PREVIEW_ICON_SIZE))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.))
+                                    .child(
+                                        div()
+                                            .line_clamp(2)
+                                            .text_size(px(17.))
+                                            .line_height(px(22.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text)
+                                            .child(SharedString::new(item.title.clone())),
+                                    )
+                                    .when_some(subtitle, |lines, subtitle| {
+                                        lines.child(
+                                            div()
+                                                .line_clamp(2)
+                                                .text_size(px(12.))
+                                                .line_height(px(16.))
+                                                .text_color(theme.muted)
+                                                .child(subtitle),
+                                        )
+                                    }),
+                            )
+                            .when(favorite, |header| {
+                                header.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(15.))
+                                        .text_color(theme.favorite)
+                                        .child("★"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .mt(px(16.))
+                            .py(px(12.))
+                            .border_t_1()
+                            .border_b_1()
+                            .border_color(theme.divider)
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .text_size(px(12.))
+                            .children(facts.into_iter().map(|(label, value)| {
+                                div()
+                                    .flex()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .w(px(84.))
+                                            .text_color(theme.placeholder)
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_color(theme.muted)
+                                            .child(value),
+                                    )
+                            })),
+                    )
+                    .when_some(source, |pane, (label, text)| {
+                        pane.child(
+                            div()
+                                .mt(px(12.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(theme.placeholder)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .line_clamp(5)
+                                        .font_family(CODE_FONT)
+                                        .text_size(px(12.))
+                                        .line_height(px(17.))
+                                        .text_color(theme.text)
+                                        .child(text),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(8.))
+                    .pb(px(8.))
+                    .child(self.render_actions(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// What can be done with the selected result, in the order shown, with
+    /// the keys that do it.
+    fn pane_actions(&self) -> Vec<(PaneAction, &'static str, &'static [&'static str])> {
+        let Some(item) = self.selected() else {
+            return Vec::new();
+        };
+        let clipboard = self.user.clipboard();
+        let open = match &item.action {
+            Action::Run(_) | Action::Shell(_) => "Run",
+            Action::CopyText(_) => "Copy",
+            Action::WindowCommand(_) => "Switch",
+            _ => "Open",
+        };
+        let mut actions: Vec<(PaneAction, &'static str, &'static [&'static str])> =
+            vec![(PaneAction::Open, open, &["↵"])];
+        if item.action.path().is_some() {
+            actions.push((PaneAction::Reveal, "Show in Finder", &["⌘", "↵"]));
+            actions.push((PaneAction::QuickLook, "Quick Look", &["⌘", "Y"]));
+        }
+        if let Some(label) = clipboard
+            .content(item)
+            .and_then(clipboard::Content::secondary_action)
+        {
+            actions.push((PaneAction::Reveal, label, &["⌘", "↵"]));
+        }
+        let favorite = self.user.is_favorite(&item.id);
+        let keep = match item.kind {
+            ResultKind::Calculator | ResultKind::Window | ResultKind::Workspace => None,
+            ResultKind::Clipboard if clipboard.is_pinned(item) => Some("Unpin"),
+            ResultKind::Clipboard => Some("Pin"),
+            _ if favorite => Some("Remove from favorites"),
+            _ => Some("Add to favorites"),
+        };
+        if let Some(label) = keep {
+            actions.push((PaneAction::Favorite, label, &["⌘", "D"]));
+        }
+        if item.kind == ResultKind::Clipboard {
+            actions.push((PaneAction::Forget, "Delete", &["⌃", "X"]));
+        } else if self.query.trim().is_empty() && !favorite {
+            actions.push((PaneAction::Forget, "Remove from recents", &["⌃", "X"]));
+        }
+        actions
+    }
+
+    fn run_pane_action(&mut self, action: PaneAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            PaneAction::Open => self.activate_selected(cx),
+            PaneAction::Reveal => self.reveal(&RevealSelected, window, cx),
+            PaneAction::QuickLook => self.toggle_quick_look(&QuickLookSelected, window, cx),
+            PaneAction::Favorite => self.toggle_favorite(&ToggleFavorite, window, cx),
+            PaneAction::Forget => self.forget_selected(&ForgetSelected, window, cx),
+        }
+    }
+
+    /// The selected result's actions as a clickable list; the first, done
+    /// by Return, is highlighted.
+    fn render_actions(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .text_size(px(13.))
+            .children(self.pane_actions().into_iter().enumerate().map(
+                |(i, (action, label, keys))| {
+                    let primary = i == 0;
+                    div()
+                        .id(("pane-action", i))
+                        .h(px(ACTION_HEIGHT))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .rounded(px(7.))
+                        .when(primary, |row| {
+                            row.bg(theme.selected)
+                                .text_color(theme.text)
+                                .font_weight(FontWeight::MEDIUM)
+                        })
+                        .when(!primary, |row| {
+                            row.text_color(theme.muted)
+                                .hover(|style| style.bg(theme.hover))
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_pane_action(action, window, cx);
+                        }))
+                        .child(div().truncate().child(label))
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .gap(px(3.))
+                                .children(keys.iter().map(|k| key_cap(k, &theme))),
+                        )
+                },
+            ))
             .into_any_element()
     }
 
@@ -1882,26 +2196,15 @@ impl Launcher {
     }
 
     fn render_section(&self) -> AnyElement {
-        let theme = self.theme;
-        let position = format!(
-            "{} of {}",
-            self.selection.index().map_or(0, |i| i + 1),
-            self.results.len()
-        );
         div()
             .h(px(SECTION_HEIGHT))
             .px(px(INSET))
             .flex()
             .items_center()
-            .justify_between()
             .text_size(px(11.))
-            .text_color(theme.placeholder)
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.section_label()),
-            )
-            .child(position)
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(self.theme.placeholder)
+            .child(self.section_label())
             .into_any_element()
     }
 
@@ -1948,75 +2251,20 @@ impl Launcher {
         }
     }
 
+    /// The status, and where the selection is in the list. The actions
+    /// are in the preview pane.
     fn render_footer(&self) -> AnyElement {
         let theme = self.theme;
         let (dot, status) = self.status_line();
-        let selected = self.selected();
-        let can_reveal = selected.is_some_and(|i| i.action.path().is_some());
-        let clipping = selected.is_some_and(|i| i.kind == ResultKind::Clipboard);
-        let clip_action = selected
-            .and_then(|i| self.user.clipboard().content(i))
-            .and_then(clipboard::Content::secondary_action);
-        let favorite_label = selected.and_then(|i| match i.kind {
-            ResultKind::Calculator | ResultKind::Window | ResultKind::Workspace => None,
-            ResultKind::Clipboard if self.user.clipboard().is_pinned(i) => Some("Unpin"),
-            ResultKind::Clipboard => Some("Pin"),
-            _ if self.user.is_favorite(&i.id) => Some("Unfavorite"),
-            _ => Some("Favorite"),
-        });
-        let open_label = match selected.map(|i| &i.action) {
-            Some(Action::Run(_) | Action::Shell(_)) => "Run",
-            Some(Action::CopyText(_)) => "Copy",
-            Some(Action::WindowCommand(_)) => "Switch",
-            _ => "Open",
-        };
-        let hint = |label: &'static str, keys: &'static [&'static str], primary: bool| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .text_color(if primary { theme.text } else { theme.muted })
-                        .when(primary, |label| label.font_weight(FontWeight::MEDIUM))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(3.))
-                        .children(keys.iter().map(|k| key_cap(k, &theme))),
-                )
-        };
-        let actions = match selected {
-            Some(_) => div()
-                .flex()
-                .items_center()
-                .gap(px(14.))
-                .child(hint(open_label, &["↵"], true))
-                .child(div().w(px(1.)).h(px(14.)).bg(theme.divider))
-                .when(can_reveal, |row| {
-                    row.child(hint("Show in Finder", &["⌘", "↵"], false))
-                        .child(hint("Quick Look", &["⌘", "Y"], false))
-                })
-                .when_some(clip_action, |row, label| {
-                    row.child(hint(label, &["⌘", "↵"], false))
-                })
-                .when_some(favorite_label, |row, label| {
-                    row.child(hint(label, &["⌘", "D"], false))
-                })
-                .when(clipping, |row| {
-                    row.child(hint("Delete", &["⌃", "X"], false))
-                })
-                .when(!can_reveal && favorite_label.is_none(), |row| {
-                    row.child(hint("Close", &["esc"], false))
-                }),
-            None => div().child(hint("Close", &["esc"], false)),
-        };
+        let position = self
+            .selection
+            .index()
+            .filter(|_| self.shows_preview())
+            .map(|i| format!("{} of {}", i + 1, self.results.len()));
         div()
             .h(px(FOOTER_HEIGHT))
             .pl(px(INSET))
-            .pr(px(10.))
+            .pr(px(14.))
             .flex()
             .items_center()
             .justify_between()
@@ -2034,7 +2282,24 @@ impl Launcher {
                     .child(div().flex_none().size(px(6.)).rounded_full().bg(dot))
                     .child(div().min_w(px(0.)).truncate().child(status)),
             )
-            .child(actions.flex_none())
+            .map(|footer| match position {
+                Some(position) => footer.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.placeholder)
+                        .child(position),
+                ),
+                None => footer.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_color(theme.muted)
+                        .child("Close")
+                        .child(key_cap("esc", &theme)),
+                ),
+            })
             .into_any_element()
     }
 }
@@ -2064,18 +2329,17 @@ fn result_icon(
     kind: ResultKind,
     icon: Option<Arc<RenderImage>>,
     content: Option<clipboard::Content>,
+    size: f32,
 ) -> AnyElement {
+    let radius = size / 4.;
     if let Some(image) = icon {
-        return img(image)
-            .flex_none()
-            .size(px(ICON_SIZE))
-            .into_any_element();
+        return img(image).flex_none().size(px(size)).into_any_element();
     }
     if let Some(clipboard::Content::Color(rgba)) = content {
         return div()
             .flex_none()
-            .size(px(ICON_SIZE))
-            .rounded(px(7.))
+            .size(px(size))
+            .rounded(px(radius))
             .bg(gpui::rgba(rgba))
             // Keeps white and black swatches visible on either theme.
             .border_1()
@@ -2097,27 +2361,27 @@ fn result_icon(
         ResultKind::Workspace => Some("▦"),
         // Its icon is still being rendered: keep the space.
         ResultKind::Application | ResultKind::File | ResultKind::Folder => {
-            return div().flex_none().size(px(ICON_SIZE)).into_any_element();
+            return div().flex_none().size(px(size)).into_any_element();
         }
     };
     let white = gpui::white();
     div()
         .flex_none()
-        .size(px(ICON_SIZE))
+        .size(px(size))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(7.))
+        .rounded(px(radius))
         .bg(tile_color(kind))
         .text_color(white)
-        .text_size(px(15.))
+        .text_size(px(size * 0.54))
         .font_weight(FontWeight::SEMIBOLD)
         .map(|tile| match symbol {
             Some(symbol) => tile.child(symbol),
             None => tile.child(
                 svg()
                     .path(crate::assets::CLIPBOARD)
-                    .size(px(16.))
+                    .size(px(size * 0.57))
                     .text_color(white),
             ),
         })
@@ -2211,6 +2475,117 @@ fn thousands(n: usize) -> String {
     out
 }
 
+/// Something the preview pane's action list can do to the selected result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneAction {
+    Open,
+    /// Show in Finder, or open what a clipboard entry names.
+    Reveal,
+    QuickLook,
+    /// Favorite, or pin a clipboard entry.
+    Favorite,
+    /// Remove from recents, or delete a clipboard entry.
+    Forget,
+}
+
+/// What the preview pane shows about a file, folder or app beyond its
+/// result: read from disk, so never on the frame path.
+#[derive(Clone)]
+struct Details {
+    path: PathBuf,
+    /// Rendered at [`PREVIEW_ICON_PX`].
+    icon: Option<Arc<RenderImage>>,
+    /// In bytes, for files only.
+    size: Option<u64>,
+    /// Seconds since 1970.
+    modified: Option<i64>,
+    /// For applications.
+    version: Option<String>,
+}
+
+impl Details {
+    /// Nothing read yet.
+    fn pending(path: PathBuf) -> Self {
+        Self {
+            path,
+            icon: None,
+            size: None,
+            modified: None,
+            version: None,
+        }
+    }
+
+    /// Reads everything (background thread).
+    fn read(
+        path: PathBuf,
+        app: bool,
+        decode: &impl Fn(Vec<u8>) -> Option<Arc<RenderImage>>,
+    ) -> Self {
+        let icon = sift_macos::icon_png(&path, PREVIEW_ICON_PX).and_then(decode);
+        let metadata = std::fs::metadata(&path).ok();
+        let size = metadata
+            .as_ref()
+            .filter(|m| m.is_file())
+            .map(std::fs::Metadata::len);
+        let modified = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_secs()).ok());
+        let version = app.then(|| sift_apps::bundle_version(&path)).flatten();
+        Self {
+            path,
+            icon,
+            size,
+            modified,
+            version,
+        }
+    }
+}
+
+/// "Just now", "5 min ago", "Yesterday", "3 months ago".
+fn ago(then: i64, now: i64) -> String {
+    let age = (now - then).max(0);
+    let days = age / 86_400;
+    let count = |n: i64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{n} {unit}s ago")
+        }
+    };
+    match age {
+        0..60 => "Just now".to_owned(),
+        60..3_600 => format!("{} min ago", age / 60),
+        3_600..86_400 => count(age / 3_600, "hour"),
+        _ if days == 1 => "Yesterday".to_owned(),
+        _ if days < 30 => count(days, "day"),
+        _ if days < 365 => count(days / 30, "month"),
+        _ => count(days / 365, "year"),
+    }
+}
+
+/// A file size the way Finder shows it (powers of 1,000): "812 bytes",
+/// "4.2 MB", "38 GB".
+fn file_size(bytes: u64) -> String {
+    if bytes < 1_000 {
+        return plural(bytes as usize, "byte");
+    }
+    let mut value = bytes as f64;
+    let mut unit = "bytes";
+    for next in ["KB", "MB", "GB", "TB"] {
+        if value < 1_000. {
+            break;
+        }
+        value /= 1_000.;
+        unit = next;
+    }
+    if value < 10. {
+        format!("{value:.1} {unit}")
+    } else {
+        format!("{value:.0} {unit}")
+    }
+}
+
 fn apply_theme(input: &mut SearchInput, theme: &Theme) {
     input.text_color = theme.text;
     input.placeholder_color = theme.placeholder;
@@ -2258,7 +2633,16 @@ impl Render for Launcher {
                 .child(self.render_section())
                 .children(rows)
         });
-        let preview = self.shows_preview().then(|| self.render_clip_preview());
+        let preview = self.shows_preview().then(|| {
+            let clip = self
+                .selected()
+                .is_some_and(|item| clipboard::entry_id(item).is_some());
+            if clip {
+                self.render_clip_preview(cx)
+            } else {
+                self.render_item_preview(cx)
+            }
+        });
         let message: Option<SharedString> = self
             .message
             .clone()
@@ -2316,20 +2700,18 @@ impl Render for Launcher {
                             .child(self.input.clone()),
                     ),
             )
-            .when_some(list, |root, list| {
-                let body = match preview {
-                    Some(preview) => div()
+            .when_some(list.zip(preview), |root, (list, preview)| {
+                root.child(divider()).child(
+                    div()
                         .h(px(window_height(VISIBLE_ROWS, false)
                             - HEADER_HEIGHT
                             - 2. * DIVIDER
                             - FOOTER_HEIGHT))
                         .flex()
-                        .child(list.flex_none().w(px(CLIP_LIST_WIDTH)))
+                        .child(list.flex_none().w(px(LIST_WIDTH)))
                         .child(div().flex_none().w(px(DIVIDER)).bg(theme.divider))
                         .child(preview),
-                    None => list,
-                };
-                root.child(divider()).child(body)
+                )
             })
             .when(self.visible_rows() == 0, |root| {
                 root.when_some(message, |root, message| {
@@ -2374,6 +2756,30 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(54_206), "54,206");
         assert_eq!(thousands(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn formats_file_sizes_like_finder() {
+        assert_eq!(file_size(0), "0 bytes");
+        assert_eq!(file_size(1), "1 byte");
+        assert_eq!(file_size(999), "999 bytes");
+        assert_eq!(file_size(1_000), "1.0 KB");
+        assert_eq!(file_size(4_230_000), "4.2 MB");
+        assert_eq!(file_size(38_400_000_000), "38 GB");
+    }
+
+    #[test]
+    fn says_how_long_ago() {
+        let now = 1_000_000_000;
+        assert_eq!(ago(now, now), "Just now");
+        assert_eq!(ago(now + 30, now), "Just now");
+        assert_eq!(ago(now - 5 * 60, now), "5 min ago");
+        assert_eq!(ago(now - 3_600, now), "1 hour ago");
+        assert_eq!(ago(now - 5 * 3_600, now), "5 hours ago");
+        assert_eq!(ago(now - 86_400, now), "Yesterday");
+        assert_eq!(ago(now - 4 * 86_400, now), "4 days ago");
+        assert_eq!(ago(now - 45 * 86_400, now), "1 month ago");
+        assert_eq!(ago(now - 800 * 86_400, now), "2 years ago");
     }
 
     #[test]

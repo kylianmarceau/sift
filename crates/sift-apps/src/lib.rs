@@ -192,6 +192,20 @@ fn read_bundle_id(bundle: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The version an app shows in its About window (`CFBundleShortVersionString`,
+/// else `CFBundleVersion`), read from its Info.plist. Reads the disk, so
+/// call it off the main thread.
+pub fn bundle_version(bundle: &Path) -> Option<String> {
+    let value = plist::Value::from_file(bundle.join("Contents/Info.plist")).ok()?;
+    let info = value.as_dictionary()?;
+    ["CFBundleShortVersionString", "CFBundleVersion"]
+        .iter()
+        .find_map(|key| info.get(key)?.as_string())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
 /// Searches installed applications by name.
 pub struct AppProvider {
     catalog: AppCatalog,
