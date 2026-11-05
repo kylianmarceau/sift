@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Cmd-Tab and workspace switches no longer lag for apps that answer
+  Accessibility requests slowly, such as WhatsApp (a Mac Catalyst app).
+  Activating an app no longer triggers an immediate scan of all its windows:
+  Sift reads only the focused window, and rescans 300 ms later once the app
+  has settled. When all of an app's windows are on one workspace, Cmd-Tab
+  reveals that workspace from what Sift already knows, without asking the
+  app first. Showing or hiding a workspace sends each window one position
+  change instead of three size and position changes.
+- A window resized by hand keeps its size across workspace switches even
+  when its app sends no resize notifications (WhatsApp did not): Sift reads
+  the real frame just before hiding the window.
+
 ## 0.4.6 (2026-11-05)
 
 - A redesigned menu bar. With window controls running, the icon shows your

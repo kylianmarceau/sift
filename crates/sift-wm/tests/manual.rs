@@ -404,3 +404,55 @@ fn automatic_tiling_never_uses_the_manual_rescue() {
     e.add_window(w).expect("valid fixture");
     assert_eq!(e.rescue_offscreen(1), None);
 }
+
+#[test]
+fn app_activation_targets_the_apps_window_without_asking_it() {
+    let mut e = Engine::new(config(), vec![monitor(1, 0.)]).unwrap();
+    let mut chat = window(20, "net.whatsapp.WhatsApp", "Chats", 100.);
+    chat.pid = 300;
+    e.add_window(chat).unwrap();
+    let mut a = window(21, "company.thebrowser.dia", "A", 100.);
+    a.pid = 400;
+    let mut b = window(22, "company.thebrowser.dia", "B", 650.);
+    b.pid = 400;
+    e.add_window(a).unwrap();
+    e.add_window(b).unwrap();
+    assert_eq!(e.app_focus_target(300), Some(20));
+    // Most recently focused wins among windows on one workspace.
+    e.observed_focus(22).unwrap();
+    e.observed_focus(21).unwrap();
+    assert_eq!(e.app_focus_target(400), Some(21));
+    // Windows on two workspaces: the app must be asked which one is focused.
+    e.execute(Command::Target(
+        22,
+        Box::new(Command::MoveToWorkspace("2".into(), false)),
+    ))
+    .unwrap();
+    assert_eq!(e.app_focus_target(400), None);
+    assert_eq!(e.app_focus_target(999), None);
+    // A Cmd-Tab to an app on a hidden workspace reveals that workspace.
+    e.execute(Command::Workspace("3".into())).unwrap();
+    let id = e.app_focus_target(300).unwrap();
+    e.observed_focus(id).unwrap();
+    assert_eq!(e.snapshot().visible[&1], "1");
+}
+
+#[test]
+fn a_frame_read_before_parking_replaces_a_stale_size() {
+    let mut e = Engine::new(config(), vec![monitor(1, 0.)]).unwrap();
+    e.add_window(window(30, "net.whatsapp.WhatsApp", "Chats", 100.))
+        .unwrap();
+    // The app was resized by hand but sent no notification.
+    let resized = Rect::new(80., 60., 900., 700.);
+    e.observed_frame(30, resized);
+    assert_eq!(e.windows[&30].frame, resized);
+    // Parking spots and invalid frames are never recorded.
+    e.observed_frame(30, Rect::new(1199., 899., 900., 700.));
+    e.observed_frame(30, Rect::new(0., 0., 0., 0.));
+    assert_eq!(e.windows[&30].frame, resized);
+    e.execute(Command::Workspace("2".into())).unwrap();
+    assert_eq!(e.hidden(), vec![30]);
+    assert_eq!(e.parking_frame(30).unwrap().width, 900.);
+    e.execute(Command::Workspace("1".into())).unwrap();
+    assert_eq!(e.windows[&30].frame, resized);
+}
