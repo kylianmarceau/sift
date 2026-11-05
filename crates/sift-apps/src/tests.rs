@@ -207,3 +207,33 @@ fn discovers_real_system_apps() {
     paths.dedup();
     assert_eq!(paths.len(), total, "duplicate bundles");
 }
+
+#[test]
+fn reads_the_version_shown_in_about() {
+    let (_t, base) = temp();
+    let plist = |keys: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>{keys}</dict></plist>"#
+        )
+    };
+    let both = bundle(
+        &base,
+        "Both",
+        Some(&plist(
+            "<key>CFBundleShortVersionString</key><string>1.4.2</string>\
+             <key>CFBundleVersion</key><string>1402</string>",
+        )),
+    );
+    let build_only = bundle(
+        &base,
+        "BuildOnly",
+        Some(&plist("<key>CFBundleVersion</key><string>88</string>")),
+    );
+    let none = bundle(&base, "None", Some(&info("com.example.none")));
+    let missing = bundle(&base, "Missing", None);
+    assert_eq!(bundle_version(&both).as_deref(), Some("1.4.2"));
+    assert_eq!(bundle_version(&build_only).as_deref(), Some("88"));
+    assert_eq!(bundle_version(&none), None);
+    assert_eq!(bundle_version(&missing), None);
+}
