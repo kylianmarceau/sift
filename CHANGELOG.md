@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.6 (2026-11-05)
 
 - A redesigned menu bar. With window controls running, the icon shows your
   workspaces: the current one in a filled badge and the others with windows
