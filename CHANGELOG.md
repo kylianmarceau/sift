@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.4.7 (2026-11-05)
 
+- The launcher shows the selected result in a preview pane beside the
+  list, as the clipboard view already did. Rows show the name over the
+  folder, with the selected row filled in the accent colour. The pane shows
+  a large icon, the full path and the kind, plus a file's size and
+  modification date or an app's version, read off the main thread. Every
+  action for the selected result is listed at the bottom of the pane with
+  its keys and can be clicked, in the clipboard view too. The footer keeps
+  only the status and the position in the list, so the status line is no
+  longer cut off.
 - Cmd-Tab and workspace switches no longer lag for apps that answer
   Accessibility requests slowly, such as WhatsApp (a Mac Catalyst app).
   Activating an app no longer triggers an immediate scan of all its windows:
