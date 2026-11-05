@@ -17,6 +17,9 @@ pub struct Report {
     pub present_ids: Vec<WindowId>,
     pub focused: Option<WindowId>,
     pub failure: Option<String>,
+    /// Only `focused` is meaningful: no window list was read, so absent
+    /// windows must not be taken as closed.
+    pub focus_only: bool,
 }
 
 /// Orders one workspace switch across application workers: every worker
@@ -124,6 +127,8 @@ pub struct Worker {
     pending: Arc<Mutex<Pending>>,
     wake: Arc<Mutex<Option<Wake>>>,
     pub latest: Arc<Mutex<Option<Report>>>,
+    /// Real frames read just before parking, drained by the service.
+    pub before_park: Arc<Mutex<Vec<(WindowId, Rect)>>>,
     done: mpsc::Receiver<()>,
 }
 
@@ -138,6 +143,8 @@ impl Worker {
         let ready = wake.clone();
         let latest = Arc::new(Mutex::new(None));
         let output = latest.clone();
+        let before_park = Arc::new(Mutex::new(Vec::new()));
+        let parked_frames = before_park.clone();
         let (done_tx, done) = mpsc::channel();
         std::thread::Builder::new()
             .name(format!("sift-ax-{}", app.pid))
@@ -154,6 +161,7 @@ impl Worker {
                         pending: input,
                         events,
                         output,
+                        parked_frames,
                         signals: Arc::new(Signals {
                             wake: ready,
                             dirty: AtomicBool::new(true),
@@ -170,6 +178,7 @@ impl Worker {
             pending,
             wake,
             latest,
+            before_park,
             done,
         })
     }
@@ -289,6 +298,7 @@ struct Context {
     pending: Arc<Mutex<Pending>>,
     events: mpsc::SyncSender<Event>,
     output: Arc<Mutex<Option<Report>>>,
+    parked_frames: Arc<Mutex<Vec<(WindowId, Rect)>>>,
     signals: Arc<Signals>,
     stopping: bool,
 }
@@ -399,13 +409,16 @@ unsafe extern "C" fn notification(_observer: Ref, _element: Ref, name: Ref, ptr:
     // AX messaging can re-enter a run loop. This context is deliberately
     // independent of Context's RefCell borrow while remote AX calls execute.
     let signals = unsafe { &*ptr.cast::<Signals>() };
+    // Focus changes need only the focused window; structural changes
+    // (created, destroyed, moved, resized, renamed, minimized) need a scan.
     if matches!(
         string(name).as_str(),
-        "AXFocusedWindowChanged" | "AXApplicationActivated"
+        "AXFocusedWindowChanged" | "AXMainWindowChanged" | "AXApplicationActivated"
     ) {
         signals.focus_dirty.store(true, Ordering::Relaxed);
+    } else {
+        signals.dirty.store(true, Ordering::Relaxed);
     }
-    signals.dirty.store(true, Ordering::Relaxed);
     signals.signal();
 }
 
@@ -437,8 +450,14 @@ unsafe extern "C" fn perform(ptr: MutRef) {
 }
 
 impl Context {
-    fn publish(&self, report: Report) {
-        *self.output.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+    fn publish(&self, mut report: Report) {
+        let mut output = self.output.lock().unwrap_or_else(|e| e.into_inner());
+        // Keep a focus change the service has not read yet.
+        if report.focused.is_none() {
+            report.focused = output.as_ref().and_then(|old| old.focused);
+        }
+        *output = Some(report);
+        drop(output);
         // A full service channel is fine: it drains every worker's latest
         // report on each turn, so events coalesce rather than accumulating.
         let _ = self.events.try_send(Event::Reports);
@@ -458,7 +477,7 @@ impl Context {
             if pending.forced.contains(&id) {
                 self.last_attempt.remove(&id);
             }
-            self.apply(Effect::Frame(id, frame));
+            self.set_frame(id, frame, false);
         }
         if let Some(id) = pending.raise {
             self.apply(Effect::Raise(id));
@@ -476,8 +495,26 @@ impl Context {
             if let Some(gate) = pending.wait {
                 gate.wait();
             }
+            let mut read = Vec::new();
             for (id, (frame, _)) in parks {
-                self.apply(Effect::Frame(id, frame));
+                // Apps without move/resize notifications (Mac Catalyst apps
+                // like WhatsApp) leave a stale frame in the model. Read the
+                // real one first, so the window returns as the user left it.
+                if !self.frames.get(&id).is_some_and(|f| f.nearly(frame))
+                    && let Some(element) = self.windows.get(&id).map(|w| w.0)
+                    && let Some(actual) = super::worker::frame(element)
+                {
+                    self.frames.insert(id, actual);
+                    read.push((id, actual));
+                }
+                self.set_frame(id, frame, true);
+            }
+            if !read.is_empty() {
+                self.parked_frames
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(read);
+                let _ = self.events.try_send(Event::Reports);
             }
         }
         if pending.stop {
@@ -493,10 +530,46 @@ impl Context {
                 self.signals.focus_dirty.store(true, Ordering::Relaxed);
             }
         }
-        if self.stopping || !self.signals.dirty.swap(false, Ordering::Relaxed) {
+        if self.stopping {
             return;
         }
-        self.scan();
+        if self.signals.dirty.swap(false, Ordering::Relaxed) {
+            self.scan();
+        } else if self.signals.focus_dirty.swap(false, Ordering::Relaxed) {
+            self.report_focus();
+        }
+    }
+
+    /// A focus or activation notification needs one AX request, not a scan
+    /// of every window: scanning a slow app (WhatsApp) while it activates
+    /// makes it visibly hang. The service rescans once activation settles.
+    fn report_focus(&mut self) {
+        let Some(app) = self.app_element.as_ref().map(|a| a.0) else {
+            return;
+        };
+        let Some(id) = attribute(app, "AXFocusedWindow").and_then(|w| window_id(w.0)) else {
+            return;
+        };
+        if !self.windows.contains_key(&id) {
+            // A window this worker has not seen yet: read everything.
+            self.signals.focus_dirty.store(true, Ordering::Relaxed);
+            self.scan();
+            return;
+        }
+        let mut output = self.output.lock().unwrap_or_else(|e| e.into_inner());
+        match output.as_mut() {
+            Some(report) => report.focused = Some(id),
+            None => {
+                *output = Some(Report {
+                    pid: self.app.pid,
+                    focused: Some(id),
+                    focus_only: true,
+                    ..Report::default()
+                })
+            }
+        }
+        drop(output);
+        let _ = self.events.try_send(Event::Reports);
     }
 
     fn scan(&mut self) {
@@ -633,7 +706,57 @@ impl Context {
             present_ids,
             focused,
             failure: None,
+            focus_only: false,
         });
+    }
+
+    /// Moves and sizes a window. Each AX message is answered on the app's
+    /// main thread, and some apps (Mac Catalyst ones such as WhatsApp) are
+    /// slow to answer, so send only the position when the size is unchanged:
+    /// one message instead of three. Showing or parking a workspace only
+    /// ever changes positions; parking never resizes.
+    fn set_frame(&mut self, id: WindowId, rect: Rect, park: bool) {
+        let Some(window) = self.windows.get(&id).map(|w| w.0) else {
+            return;
+        };
+        let cached = self.frames.get(&id).copied();
+        if !rect.valid() || cached.is_some_and(|f| f.nearly(rect)) {
+            return;
+        }
+        if self
+            .last_attempt
+            .get(&id)
+            .is_some_and(|(r, at)| r.nearly(rect) && at.elapsed() < Duration::from_millis(250))
+        {
+            return;
+        }
+        self.last_attempt.insert(id, (rect, Instant::now()));
+        let point = Point {
+            x: rect.x,
+            y: rect.y,
+        };
+        let size = Size {
+            width: rect.width,
+            height: rect.height,
+        };
+        let same_size = cached.is_some_and(|f| {
+            (f.width - rect.width).abs() < 1. && (f.height - rect.height).abs() < 1.
+        });
+        let mut stored = rect;
+        if park || same_size {
+            set_value(window, "AXPosition", 1, &point as *const Point as Ref);
+            if let Some(f) = cached {
+                stored.width = f.width;
+                stored.height = f.height;
+            }
+        } else {
+            // A second size set handles applications that constrain size
+            // using the old monitor before accepting the new position.
+            set_value(window, "AXSize", 2, &size as *const Size as Ref);
+            set_value(window, "AXPosition", 1, &point as *const Point as Ref);
+            set_value(window, "AXSize", 2, &size as *const Size as Ref);
+        }
+        self.frames.insert(id, stored);
     }
 
     fn apply(&mut self, effect: Effect) {
@@ -651,29 +774,7 @@ impl Context {
         };
         match effect {
             Effect::Frame(_, rect) => {
-                if !rect.valid() || self.frames.get(&id).is_some_and(|f| f.nearly(rect)) {
-                    return;
-                }
-                if self.last_attempt.get(&id).is_some_and(|(r, at)| {
-                    r.nearly(rect) && at.elapsed() < Duration::from_millis(250)
-                }) {
-                    return;
-                }
-                self.last_attempt.insert(id, (rect, Instant::now()));
-                let point = Point {
-                    x: rect.x,
-                    y: rect.y,
-                };
-                let size = Size {
-                    width: rect.width,
-                    height: rect.height,
-                };
-                // A second size set handles applications that constrain size
-                // using the old monitor before accepting the new position.
-                set_value(window, "AXSize", 2, &size as *const Size as Ref);
-                set_value(window, "AXPosition", 1, &point as *const Point as Ref);
-                set_value(window, "AXSize", 2, &size as *const Size as Ref);
-                self.frames.insert(id, rect);
+                self.set_frame(id, rect, false);
             }
             Effect::Focus(_) => {
                 if boolean(window, "AXMinimized") {
@@ -690,10 +791,16 @@ impl Context {
                 let main = unsafe { AXUIElementSetAttributeValue(window, main.0, kCFBooleanTrue) };
                 action(window, "AXRaise");
                 if let Some(app) = &self.app_element {
-                    let hidden = Owned::string("AXHidden");
+                    // Each request costs a round trip to the app's main
+                    // thread; skip unhiding an app that is not hidden.
+                    if self.app.hidden {
+                        let hidden = Owned::string("AXHidden");
+                        unsafe {
+                            AXUIElementSetAttributeValue(app.0, hidden.0, kCFBooleanFalse);
+                        }
+                    }
                     let frontmost = Owned::string("AXFrontmost");
                     unsafe {
-                        AXUIElementSetAttributeValue(app.0, hidden.0, kCFBooleanFalse);
                         AXUIElementSetAttributeValue(app.0, frontmost.0, kCFBooleanTrue);
                     }
                 }
@@ -831,6 +938,7 @@ mod tests {
             pending: Arc::default(),
             wake: Arc::default(),
             latest: Arc::default(),
+            before_park: Arc::default(),
             done,
         };
         for x in 0..10_000 {
@@ -859,6 +967,7 @@ mod tests {
             pending: Arc::default(),
             wake: Arc::default(),
             latest: Arc::default(),
+            before_park: Arc::default(),
             done,
         };
         let first = Gate::new(1);

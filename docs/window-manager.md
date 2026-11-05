@@ -424,6 +424,12 @@ is retained alongside the earlier automatic-mode measurements.
   for focus, focus reports for any other window are treated as late echoes of
   an earlier switch and ignored; otherwise quick Option-1, Option-2 presses
   could bounce back to workspace 1 for a moment.
+- Some apps answer AX requests slowly, on their main thread (Mac Catalyst
+  apps such as WhatsApp), and some send no move or resize notifications.
+  So an activation reads only the focused window and rescans 300 ms later;
+  Cmd-Tab to an app whose windows share one workspace switches without
+  asking the app; showing or parking a workspace sends one position change
+  per window; and a window's real frame is read just before it is parked.
 - Recovery positions are atomically written (with `fsync`) before
   arranging/parking windows.
   Recovery matches the process start time, PID, native window ID and bundle ID,

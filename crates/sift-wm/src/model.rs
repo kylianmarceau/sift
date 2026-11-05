@@ -521,6 +521,50 @@ impl Engine {
         Ok(())
     }
 
+    /// The window an app's activation (Cmd-Tab, Dock, a click) most likely
+    /// brought forward, known without asking the app: its most recently
+    /// focused window. `None` when the app's windows span workspaces, where
+    /// guessing could switch to the wrong one; ask the app instead.
+    pub fn app_focus_target(&self, pid: i32) -> Option<WindowId> {
+        let mut windows = self
+            .windows
+            .values()
+            .filter(|w| w.pid == pid && w.available() && !w.minimized);
+        let first = windows.next()?;
+        let mut best = first;
+        for w in windows {
+            if w.workspace != first.workspace {
+                return None;
+            }
+            let order = |w: &Window| {
+                (
+                    self.focus_order.get(&w.id).copied().unwrap_or(0),
+                    std::cmp::Reverse(w.id),
+                )
+            };
+            if order(w) > order(best) {
+                best = w;
+            }
+        }
+        Some(best.id)
+    }
+
+    /// Records a window's real frame, read just before it is parked. Apps
+    /// that send no move or resize notifications (Mac Catalyst apps such as
+    /// WhatsApp) would otherwise return at their old size.
+    pub fn observed_frame(&mut self, id: WindowId, frame: Rect) {
+        if !frame.valid() || self.offscreen(frame) {
+            return;
+        }
+        let manual = !self.config.automatic_tiling;
+        if let Some(w) = self.windows.get_mut(&id)
+            && !w.native_fullscreen
+            && (manual || w.floating)
+        {
+            w.frame = frame;
+        }
+    }
+
     pub fn cursor_destination(&self, target: crate::CursorTarget) -> Result<Rect> {
         if target.window() {
             let window = self

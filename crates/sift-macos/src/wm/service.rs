@@ -105,7 +105,14 @@ struct Service {
     /// notifications from an earlier request can arrive after a newer one;
     /// see `accept_observed_focus`.
     requested_focus: Option<(WindowId, Instant)>,
+    /// Apps whose window scan waits until they finish activating.
+    deferred_refresh: BTreeMap<i32, Instant>,
 }
+
+/// How long an activated app is left alone before Sift scans its windows.
+/// AX requests are answered on the app's main thread, so a scan during
+/// activation slows the app down just as it comes forward.
+const ACTIVATION_SETTLE: Duration = Duration::from_millis(300);
 
 /// How long focus reports that disagree with Sift's own latest focus request
 /// are treated as echoes of an earlier request rather than a user's choice.
@@ -209,6 +216,7 @@ pub(super) fn start(
         restoring: Vec::new(),
         known_apps: BTreeMap::new(),
         requested_focus: None,
+        deferred_refresh: BTreeMap::new(),
     };
     let socket_copy = socket.clone();
     let ipc_thread = std::thread::Builder::new()
@@ -223,14 +231,20 @@ pub(super) fn start(
                 service.applications(applications.0, true);
                 service.publish();
                 loop {
-                    // Only a user-requested app launch creates a one-shot wait.
-                    // Once it completes or expires the service blocks indefinitely.
-                    let event = if let Some(deadline) =
-                        service.pending_launches.values().map(|p| p.deadline).min()
+                    // Only a user-requested app launch or a deferred scan after
+                    // an activation creates a one-shot wait. Once it completes
+                    // or expires the service blocks indefinitely.
+                    let event = if let Some(deadline) = service
+                        .pending_launches
+                        .values()
+                        .map(|p| p.deadline)
+                        .chain(service.deferred_refresh.values().copied())
+                        .min()
                     {
                         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                             Ok(event) => event,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
+                                service.run_deferred_refreshes();
                                 service.finish_launches();
                                 service.publish();
                                 continue;
@@ -251,6 +265,7 @@ pub(super) fn start(
                     match event {
                         Event::Activated(frontmost, info) => {
                             service.frontmost = frontmost;
+                            service.activated(frontmost, info.is_some());
                             if let Some(info) = info {
                                 let mut apps = service.available_apps.clone();
                                 if let Some(old) = apps.iter_mut().find(|app| app.pid == info.pid) {
@@ -338,6 +353,7 @@ pub(super) fn start(
                         Event::Shutdown => break,
                     }
                     service.reports();
+                    service.run_deferred_refreshes();
                     service.finish_launches();
                     service.apply(Vec::new());
                     service.publish();
@@ -463,7 +479,10 @@ impl Service {
         self.workers.retain(|pid, _| alive.contains(pid));
         for app in apps {
             if let Some(worker) = self.workers.get(&app.pid) {
-                if refresh_all || self.frontmost == Some(app.pid) {
+                if refresh_all
+                    || (self.frontmost == Some(app.pid)
+                        && !self.deferred_refresh.contains_key(&app.pid))
+                {
                     worker.send(Task::Refresh {
                         focus: !refresh_all,
                         hidden: app.hidden,
@@ -481,7 +500,57 @@ impl Service {
         }
     }
 
+    /// Cmd-Tab, the Dock or a click activated an app. When Sift already
+    /// knows which window that brings forward (all the app's windows are on
+    /// one workspace), act now, revealing its workspace if hidden, instead
+    /// of waiting for a scan of a possibly slow app; scan once it settles.
+    fn activated(&mut self, pid: Option<i32>, managed: bool) {
+        let Some(pid) = pid.filter(|_| managed) else {
+            return;
+        };
+        let Some(id) = self.engine.app_focus_target(pid) else {
+            return;
+        };
+        if self.engine.focused != Some(id) && self.accept_observed_focus(id) {
+            let _ = self.engine.observed_focus(id);
+        }
+        self.deferred_refresh
+            .insert(pid, Instant::now() + ACTIVATION_SETTLE);
+    }
+
+    fn run_deferred_refreshes(&mut self) {
+        let now = Instant::now();
+        let due: Vec<i32> = self
+            .deferred_refresh
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(pid, _)| *pid)
+            .collect();
+        for pid in due {
+            self.deferred_refresh.remove(&pid);
+            if let Some(worker) = self.workers.get(&pid) {
+                worker.send(Task::Refresh {
+                    focus: self.frontmost == Some(pid),
+                    hidden: self
+                        .available_apps
+                        .iter()
+                        .any(|app| app.pid == pid && app.hidden),
+                });
+            }
+        }
+    }
+
     fn reports(&mut self) {
+        let parked_frames: Vec<_> = self
+            .workers
+            .values()
+            .flat_map(|w| {
+                std::mem::take(&mut *w.before_park.lock().unwrap_or_else(|e| e.into_inner()))
+            })
+            .collect();
+        for (id, frame) in parked_frames {
+            self.engine.observed_frame(id, frame);
+        }
         let reports: Vec<_> = self
             .workers
             .values()
@@ -492,7 +561,12 @@ impl Service {
                 self.message = Some(failure);
                 continue;
             }
-            for id in remove_absent(&mut self.engine, &report) {
+            let absent = if report.focus_only {
+                Vec::new()
+            } else {
+                remove_absent(&mut self.engine, &report)
+            };
+            for id in absent {
                 self.parked.remove(&id);
                 self.restoring.retain(|r| r.id != id || r.pid != report.pid);
                 self.recovery.retain(|r| r.id != id || r.pid != report.pid);
