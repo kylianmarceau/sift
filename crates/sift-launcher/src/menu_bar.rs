@@ -7,7 +7,7 @@ use crate::{commands, updates::UpdateState};
 use futures::{StreamExt, channel::mpsc::unbounded};
 use gpui::{App, AppContext, Context, Entity, Global, Subscription, WindowHandle};
 use serde::{Deserialize, Serialize};
-use sift_macos::status_bar::{Item, MenuBar};
+use sift_macos::status_bar::{self, Indicator, Item, MenuBar};
 use sift_state::Setting;
 use sift_wm::{Command, Snapshot, Window as ManagedWindow};
 use std::{
@@ -89,6 +89,11 @@ fn icon(mut item: Item, symbol: &str) -> Item {
     item.symbol = Some(symbol.into());
     item
 }
+fn detail(mut item: Item, text: impl Into<String>) -> Item {
+    let text = text.into();
+    item.detail = (!text.is_empty()).then_some(text);
+    item
+}
 fn builtin(title: &str, id: &str) -> Item {
     let mut item = action(title, Action::Builtin(id.into()));
     item.key = match id {
@@ -109,6 +114,40 @@ fn short(text: &str, limit: usize) -> String {
     } else {
         clean
     }
+}
+
+/// A binding such as `alt-1` as a menu key equivalent. Keys that are not a
+/// single character (arrows, `minus`) are left out of the menu.
+fn key_equivalent(binding: &str) -> Option<(String, u8)> {
+    let mut parts: Vec<&str> = binding.split('-').collect();
+    let key = parts.pop()?;
+    if key.chars().count() != 1 {
+        return None;
+    }
+    let mut modifiers = 0;
+    for part in parts {
+        modifiers |= match part {
+            "cmd" | "command" => status_bar::COMMAND,
+            "alt" | "opt" | "option" => status_bar::OPTION,
+            "ctrl" | "control" => status_bar::CONTROL,
+            "shift" => status_bar::SHIFT,
+            _ => return None,
+        };
+    }
+    (modifiers != 0).then(|| (key.to_lowercase(), modifiers))
+}
+
+/// The main-mode shortcut that does exactly `workspace <name>`, if any.
+fn workspace_key(
+    bindings: &std::collections::BTreeMap<String, Vec<String>>,
+    name: &str,
+) -> Option<(String, u8)> {
+    let quoted = serde_json::to_string(name).ok()?;
+    bindings.iter().find_map(|(key, commands)| {
+        matches!(commands.as_slice(), [only] if *only == format!("workspace {name}") || *only == format!("workspace {quoted}"))
+            .then(|| key_equivalent(key))
+            .flatten()
+    })
 }
 
 fn assignment_notice(app: &str, workspace: &str, active: bool) -> String {
@@ -140,6 +179,9 @@ struct State {
     notice: Option<String>,
     key: Option<u64>,
     login: sift_macos::login_item::Status,
+    /// The app-assignment tree (every installed app), rebuilt only when the
+    /// catalog, workspace names or assignments change.
+    picker: Option<(u64, Vec<Item>)>,
     _subscriptions: Vec<Subscription>,
 }
 struct KeepAlive {
@@ -201,6 +243,7 @@ pub(crate) fn install(window: WindowHandle<Launcher>, cx: &mut App) {
             notice: None,
             key: None,
             login: sift_macos::login_item::status(),
+            picker: None,
             _subscriptions: vec![
                 cx.subscribe(&launcher, |this, _, _: &IndexStatusChanged, cx| {
                     this.refresh(cx)
@@ -223,37 +266,71 @@ pub(crate) fn install(window: WindowHandle<Launcher>, cx: &mut App) {
 
 impl State {
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if let Some(native) = &self.native {
-            let launcher = self.launcher.read(cx);
-            let mut key = menu_key(launcher, self.error.as_deref(), self.login);
-            if let Some(notice) = &self.notice {
-                let mut hash = std::collections::hash_map::DefaultHasher::new();
-                (key, notice).hash(&mut hash);
-                key = hash.finish();
-            }
-            if self.key == Some(key) {
-                return;
-            }
-            let (mut title, mut items) = model(launcher, self.error.as_deref(), self.login);
-            if let Some(notice) = &self.notice {
-                items.insert(1, Item::label(notice));
-                if launcher.window_manager.is_none() {
-                    title = " ✓".into();
-                }
-            }
-            native.update(
-                title,
-                format!(
-                    "Sift {} · {}",
-                    env!("CARGO_PKG_VERSION"),
-                    self.notice
-                        .as_deref()
-                        .unwrap_or(&launcher.window_management_status())
-                ),
-                items,
-            );
-            self.key = Some(key);
+        if self.native.is_none() {
+            return;
         }
+        let shortcuts = cx
+            .try_global::<crate::hotkey::Hotkeys>()
+            .map(|hotkeys| {
+                [crate::hotkey::Slot::Panel, crate::hotkey::Slot::Clipboard]
+                    .map(|slot| hotkeys.current(slot).map(|s| s.display()))
+            })
+            .unwrap_or_default();
+        let launcher = self.launcher.read(cx);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (
+            menu_key(launcher, self.error.as_deref(), self.login),
+            &self.notice,
+            &shortcuts,
+        )
+            .hash(&mut hash);
+        let key = hash.finish();
+        if self.key == Some(key) {
+            return;
+        }
+        let config = launcher.user.window_manager_config();
+        let names = workspace_names(config, &launcher.window_snapshot);
+        let picker_key = {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            (launcher.catalog_loaded_at, &names).hash(&mut hash);
+            for rule in &config.rules {
+                (&rule.app_id, &rule.workspace, &rule.title, &rule.app_name).hash(&mut hash);
+            }
+            hash.finish()
+        };
+        if self.picker.as_ref().is_none_or(|(k, _)| *k != picker_key) {
+            self.picker = Some((
+                picker_key,
+                app_picker(launcher.apps.as_deref(), config, &names),
+            ));
+        }
+        let picker = self
+            .picker
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default();
+        let (indicator, items) = model(
+            launcher,
+            &Extras {
+                error: self.error.as_deref(),
+                notice: self.notice.as_deref(),
+                login: self.login,
+                panel_shortcut: shortcuts[0].clone(),
+                clipboard_shortcut: shortcuts[1].clone(),
+                picker,
+            },
+        );
+        let tooltip = format!(
+            "Sift {} · {}",
+            env!("CARGO_PKG_VERSION"),
+            self.notice
+                .as_deref()
+                .unwrap_or(&launcher.window_management_status())
+        );
+        if let Some(native) = &self.native {
+            native.update(indicator, tooltip, items);
+        }
+        self.key = Some(key);
     }
     fn perform(&mut self, action: Action, cx: &mut Context<Self>) -> Result<(), String> {
         self.notice = None;
@@ -479,7 +556,7 @@ impl State {
 }
 
 // Geometry publications are frequent during drags. Hash only information shown
-// by this menu so those events do not rebuild thousands of app-menu entries.
+// by this menu so those events do not rebuild it.
 fn menu_key(
     launcher: &Launcher,
     error: Option<&str>,
@@ -508,17 +585,23 @@ fn menu_key(
             &w.title,
             &w.workspace,
             w.minimized,
-            w.floating,
-            w.native_fullscreen,
         )
             .hash(&mut hash);
     }
     for ws in &snapshot.workspaces {
         (&ws.name, ws.monitor).hash(&mut hash);
     }
-    serde_json::to_string(launcher.user.window_manager_config())
-        .ok()
+    let config = launcher.user.window_manager_config();
+    (
+        config.enabled,
+        config.automatic_tiling,
+        &config.workspaces,
+        config.bindings.get("main"),
+    )
         .hash(&mut hash);
+    for rule in &config.rules {
+        (&rule.app_id, &rule.workspace, &rule.title, &rule.app_name).hash(&mut hash);
+    }
     launcher.window_error.hash(&mut hash);
     launcher.window_manager.is_some().hash(&mut hash);
     launcher.clipboard_enabled().hash(&mut hash);
@@ -533,161 +616,160 @@ fn menu_key(
     hash.finish()
 }
 
-fn model(
-    launcher: &Launcher,
-    error: Option<&str>,
+/// Menu state that lives outside the launcher.
+struct Extras<'a> {
+    error: Option<&'a str>,
+    notice: Option<&'a str>,
     login: sift_macos::login_item::Status,
-) -> (String, Vec<Item>) {
+    panel_shortcut: Option<String>,
+    clipboard_shortcut: Option<String>,
+    picker: Vec<Item>,
+}
+
+/// The whole menu, top to bottom:
+///
+/// - messages, then Open Sift and clipboard search with their shortcuts;
+/// - the workspaces, each a click away, with their apps and shortcuts, plus
+///   every window and the focused window's actions;
+/// - Window Management, Clipboard History and Search Folders settings;
+/// - Settings, updates, login item, help and Quit.
+fn model(launcher: &Launcher, extras: &Extras) -> (Indicator, Vec<Item>) {
     let snapshot = &launcher.window_snapshot;
-    let build = sift_macos::status_bar::build_number()
-        .map(|n| format!(" · build {n}"))
-        .unwrap_or_default();
-    let mut items = vec![Item::label(format!(
-        "Sift {}{build}",
-        env!("CARGO_PKG_VERSION")
-    ))];
-    if let Some(error) = error {
-        items.push(Item::label(short(error, 100)));
-        items.push(action("Dismiss Message", Action::ClearError));
+    let config = launcher.user.window_manager_config();
+    let mut items = Vec::new();
+    if let Some(error) = extras.error {
+        items.push(icon(
+            Item::label(short(error, 100)),
+            "exclamationmark.triangle",
+        ));
+        items.push(action("Dismiss", Action::ClearError));
+        items.push(Item::separator());
+    } else if let Some(notice) = extras.notice {
+        items.push(icon(Item::label(short(notice, 100)), "checkmark.circle"));
+        items.push(Item::separator());
     }
-    items.extend([
+    items.push(detail(
         icon(
             action("Open Sift", Action::Search(String::new())),
             "magnifyingglass",
         ),
-        icon(builtin("Settings…", commands::SETTINGS), "gearshape"),
-        Item::separator(),
-    ]);
-    let mut title = String::new();
+        extras.panel_shortcut.clone().unwrap_or_default(),
+    ));
+    if launcher.clipboard_enabled() {
+        items.push(detail(
+            icon(
+                action("Search Clipboard History", Action::Search("clip ".into())),
+                "doc.on.clipboard",
+            ),
+            extras.clipboard_shortcut.clone().unwrap_or_default(),
+        ));
+    }
+    items.push(Item::separator());
+
+    let running = launcher.window_manager.is_some();
+    let mut indicator = Indicator::Glyph;
     if launcher.window_management_enabled() {
-        if launcher.window_manager.is_none() {
-            items.push(Item::label("Window controls are not running"));
+        if running {
+            let names = workspace_names(config, snapshot);
+            indicator = workspace_indicator(snapshot, &names);
+            items.extend(workspace_section(snapshot, config, &names));
+        } else {
+            items.push(Item::header("Window Management"));
+            items.push(icon(
+                Item::label(short(&launcher.window_management_status(), 80)),
+                "exclamationmark.triangle",
+            ));
             items.push(action(
                 "Grant Window Control Permission…",
                 Action::Permission,
             ));
-            items.push(action("Show This Sift App in Finder", Action::ShowApp));
             items.push(action("Retry Window Controls", Action::Reload));
-        } else {
-            let paused = !snapshot.enabled;
-            if paused {
-                title = " Ⅱ".into();
-            } else {
-                title = snapshot
-                    .visible
-                    .get(&snapshot.active_monitor)
-                    .map(|s| format!(" {}", short(s, 10)))
-                    .unwrap_or_default();
-                if snapshot.mode != "main" {
-                    title.push_str(&format!(" · {}", short(&snapshot.mode, 8)));
-                }
-            }
-            items.push(Item::label(if paused {
-                "Window Management Paused".into()
-            } else {
-                launcher.window_management_status()
-            }));
-            items.push(workspace_menu(snapshot));
-            items.push(window_menu(snapshot));
-            items.push(action("Search Open Windows", Action::Search("win ".into())));
-            items.push(action(
-                if paused {
-                    "Resume Window Management"
-                } else {
-                    "Pause Window Management"
-                },
-                Action::WindowCommand(Command::Enable(paused), None),
-            ));
+            items.push(action("Show This Sift App in Finder", Action::ShowApp));
         }
+        items.push(Item::separator());
     }
-    let can_control = launcher.window_manager.is_some() && snapshot.enabled;
-    items.push(manage_workspaces(
-        snapshot,
-        launcher.user.window_manager_config(),
-        launcher.apps.as_deref(),
-        can_control,
+
+    items.push(icon(
+        window_management_menu(launcher, snapshot, config, extras.picker.clone()),
+        "macwindow.on.rectangle",
     ));
-    items.push(submenu(
-        "Window Management",
-        vec![
-            check(
-                "Window Shortcuts and Controls",
-                Action::Setting(SettingAction::Controls(
-                    !launcher.window_management_enabled(),
-                )),
-                launcher.window_management_enabled(),
+    items.push(icon(
+        detail(
+            submenu(
+                "Clipboard History",
+                vec![
+                    action("Search Clipboard History", Action::Search("clip ".into())),
+                    check(
+                        "Record Clipboard History",
+                        Action::Setting(SettingAction::Clipboard(!launcher.clipboard_enabled())),
+                        launcher.clipboard_enabled(),
+                    ),
+                    builtin("Clear Unpinned History", commands::CLEAR_CLIPBOARD),
+                ],
             ),
-            check(
-                "Automatic Tiling",
-                Action::Setting(SettingAction::Tiling(!launcher.automatic_tiling_enabled())),
-                launcher.automatic_tiling_enabled(),
-            ),
-            builtin("Edit Rules and Shortcuts…", commands::EDIT_CONFIG),
-            action("Reload Configuration", Action::Reload),
-        ],
-    ));
-    items.push(Item::separator());
-    items.push(submenu(
-        format!("Clipboard History · {} entries", launcher.clipboard_count()),
-        vec![
-            action("Search Clipboard History", Action::Search("clip ".into())),
-            check(
-                "Record Clipboard History",
-                Action::Setting(SettingAction::Clipboard(!launcher.clipboard_enabled())),
-                launcher.clipboard_enabled(),
-            ),
-            builtin("Clear Unpinned History", commands::CLEAR_CLIPBOARD),
-            builtin("Clipboard Settings…", commands::SETTINGS),
-        ],
+            format!("{}", launcher.clipboard_count()),
+        ),
+        "clipboard",
     ));
     let roots = &launcher.index_status.roots;
     let mut index = vec![Item::label(format!(
-        "{} indexed items · {} folders",
+        "{} items in {} folders",
         roots.iter().map(|r| r.entries).sum::<u64>(),
         roots.len()
     ))];
     if let Some(message) = &launcher.index_status.message {
         index.push(Item::label(short(message, 100)));
     }
+    if !roots.is_empty() {
+        index.push(Item::separator());
+    }
     for root in roots {
-        index.push(Item::label(format!(
-            "{} · {}",
-            short(&root.path.display().to_string(), 55),
+        index.push(detail(
+            Item::label(short(&root.path.display().to_string(), 55)),
             match &root.state {
                 sift_files::RootState::Watching => format!("{} items", root.entries),
                 sift_files::RootState::Indexing { entries } => format!("indexing {entries}…"),
                 sift_files::RootState::Unavailable => "unavailable".into(),
                 sift_files::RootState::Failed(e) => short(e, 40),
-            }
-        )));
+            },
+        ));
     }
+    index.push(Item::separator());
     index.push(builtin("Manage Search Folders…", commands::SETTINGS));
-    items.push(submenu("File Index", index));
+    items.push(icon(submenu("Search Folders", index), "folder"));
     items.push(Item::separator());
-    items.push(match login {
+
+    items.push(builtin("Settings…", commands::SETTINGS));
+    items.push(match launcher.update_state() {
+        UpdateState::Checking => Item::label("Checking for Updates…"),
+        UpdateState::Available(version) => builtin(
+            &format!("Update to Sift {version}…"),
+            commands::CHECK_UPDATES,
+        ),
+        _ => builtin("Check for Updates…", commands::CHECK_UPDATES),
+    });
+    items.push(match extras.login {
         sift_macos::login_item::Status::Unavailable => {
-            Item::label("Open at Login · install Sift.app to enable")
+            detail(Item::label("Open at Login"), "install Sift.app to enable")
         }
-        sift_macos::login_item::Status::NeedsApproval => {
-            builtin("Open at Login · Approval Needed…", commands::SETTINGS)
-        }
-        _ => check(
+        sift_macos::login_item::Status::NeedsApproval => detail(
+            builtin("Open at Login…", commands::SETTINGS),
+            "needs approval",
+        ),
+        login => check(
             "Open at Login",
             Action::Login(login != sift_macos::login_item::Status::On),
             login == sift_macos::login_item::Status::On,
         ),
     });
-    items.push(match launcher.update_state() {
-        UpdateState::Checking => Item::label("Checking for Updates…"),
-        UpdateState::Available(version) => builtin(
-            &format!("Sift {version} Available…"),
-            commands::CHECK_UPDATES,
-        ),
-        _ => builtin("Check for Updates…", commands::CHECK_UPDATES),
-    });
+    let build = sift_macos::status_bar::build_number()
+        .map(|n| format!(" (build {n})"))
+        .unwrap_or_default();
     items.push(submenu(
         "Help",
         vec![
+            Item::label(format!("Sift {}{build}", env!("CARGO_PKG_VERSION"))),
+            Item::separator(),
             action(
                 "Sift Guide and Keyboard Shortcuts",
                 Action::Help("README.md#using-sift".into()),
@@ -696,52 +778,386 @@ fn model(
                 "Window Management Guide",
                 Action::Help("docs/window-manager.md".into()),
             ),
-            builtin("Edit Configuration…", commands::EDIT_CONFIG),
-            action("Reload Configuration", Action::Reload),
+            Item::separator(),
+            builtin("Edit Configuration File…", commands::EDIT_CONFIG),
             action("Open Logs Folder", Action::OpenLogs),
             action("Show This Sift App in Finder", Action::ShowApp),
         ],
     ));
     items.push(Item::separator());
     items.push(builtin("Quit Sift", commands::QUIT));
-    (title, items)
+    (indicator, items)
 }
 
-fn workspace_menu(snapshot: &Snapshot) -> Item {
-    submenu(
-        "Workspaces",
-        ordered_workspaces(snapshot)
-            .into_iter()
-            .map(|ws| {
-                let apps: BTreeSet<_> = snapshot
+/// The current workspace, plus the others that have windows, in menu order.
+fn workspace_indicator(snapshot: &Snapshot, names: &[String]) -> Indicator {
+    let current = snapshot.visible.get(&snapshot.active_monitor);
+    let mut labels: Vec<(String, bool)> = names
+        .iter()
+        .filter(|name| {
+            current == Some(*name)
+                || snapshot
                     .windows
                     .iter()
-                    .filter(|w| w.workspace == ws.name)
-                    .map(|w| w.app_name.as_str())
-                    .collect();
-                let names = apps.into_iter().collect::<Vec<_>>().join(", ");
-                let visible = snapshot.visible.get(&ws.monitor) == Some(&ws.name);
-                let label = format!(
-                    "{}{}{}",
-                    ws.name,
-                    if names.is_empty() { "" } else { " — " },
-                    short(&names, 48)
-                );
-                let mut entry = if snapshot.enabled {
-                    action(
-                        label,
-                        Action::WindowCommand(Command::Workspace(ws.name.clone()), None),
-                    )
-                } else {
-                    Item::label(label)
-                };
-                entry.checked = visible;
-                entry
-            })
-            .collect(),
-    )
+                    .any(|w| &w.workspace == *name && !w.minimized)
+        })
+        .map(|name| (short(name, 6), current == Some(name)))
+        .collect();
+    // A long row would crowd other menu bar items; keep the current one.
+    if labels.len() > 8 {
+        labels.retain(|(_, current)| *current);
+    }
+    Indicator::Workspaces {
+        labels,
+        paused: !snapshot.enabled,
+    }
 }
 
+/// App names on a workspace, in the order their windows were found.
+fn workspace_apps(snapshot: &Snapshot, name: &str) -> String {
+    let mut seen = BTreeSet::new();
+    snapshot
+        .windows
+        .iter()
+        .filter(|w| w.workspace == name && seen.insert(w.app_name.as_str()))
+        .map(|w| w.app_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn workspace_section(snapshot: &Snapshot, config: &sift_wm::Config, names: &[String]) -> Vec<Item> {
+    let paused = !snapshot.enabled;
+    let mut items = vec![Item::header(match (paused, snapshot.mode.as_str()) {
+        (true, _) => "Workspaces · Paused".to_owned(),
+        (false, "main" | "") => "Workspaces".to_owned(),
+        (false, mode) => format!("Workspaces · {} mode", short(mode, 12)),
+    })];
+    let bindings = config.bindings_for_mode("main").unwrap_or_default();
+    for name in names {
+        let mut item = detail(
+            if paused {
+                Item::label(name.clone())
+            } else {
+                action(
+                    name.clone(),
+                    Action::WindowCommand(Command::Workspace(name.clone()), None),
+                )
+            },
+            short(&workspace_apps(snapshot, name), 40),
+        );
+        item.checked = snapshot.visible.values().any(|v| v == name);
+        if let Some((key, modifiers)) = workspace_key(&bindings, name) {
+            item.key = key;
+            item.modifiers = modifiers;
+        }
+        items.push(item);
+    }
+    if paused {
+        items.push(icon(
+            action(
+                "Resume Window Management",
+                Action::WindowCommand(Command::Enable(true), None),
+            ),
+            "play",
+        ));
+        return items;
+    }
+    items.push(icon(windows_menu(snapshot, names), "macwindow"));
+    if let Some(focused) = focused_menu(snapshot, config, names) {
+        items.push(icon(focused, "scope"));
+    }
+    items
+}
+
+/// Every managed window, grouped by workspace. Choosing one focuses it.
+fn windows_menu(snapshot: &Snapshot, names: &[String]) -> Item {
+    let mut children = vec![action("Search Windows…", Action::Search("win ".into()))];
+    for name in names {
+        let windows: Vec<_> = snapshot
+            .windows
+            .iter()
+            .filter(|w| &w.workspace == name)
+            .collect();
+        if windows.is_empty() {
+            continue;
+        }
+        children.push(Item::separator());
+        children.push(Item::header(format!("Workspace {name}")));
+        for w in windows {
+            let mut item = detail(
+                action(
+                    w.app_name.clone(),
+                    Action::WindowCommand(Command::FocusId(w.id), Some(w.into())),
+                ),
+                format!(
+                    "{}{}",
+                    short(&w.title, 50),
+                    if w.minimized { " (minimized)" } else { "" }
+                ),
+            );
+            item.checked = snapshot.focused == Some(w.id);
+            children.push(item);
+        }
+    }
+    let count = snapshot.windows.len();
+    detail(submenu("Windows", children), format!("{count}"))
+}
+
+/// Actions for the focused window: move it, assign its app, and arrange it.
+fn focused_menu(snapshot: &Snapshot, config: &sift_wm::Config, names: &[String]) -> Option<Item> {
+    let w = snapshot
+        .windows
+        .iter()
+        .find(|w| Some(w.id) == snapshot.focused)?;
+    let target = |command: Command| {
+        Action::WindowCommand(Command::Target(w.id, Box::new(command)), Some(w.into()))
+    };
+    let mut children = vec![
+        Item::label(short(
+            &if w.title.is_empty() {
+                w.app_name.clone()
+            } else {
+                format!("{} — {}", w.app_name, w.title)
+            },
+            70,
+        )),
+        Item::separator(),
+    ];
+    let mut moves: Vec<Item> = names
+        .iter()
+        .map(|name| {
+            let mut item = if *name == w.workspace {
+                Item::label(format!("Workspace {name}"))
+            } else {
+                action(
+                    format!("Workspace {name}"),
+                    target(Command::MoveToWorkspace(name.clone(), false)),
+                )
+            };
+            item.checked = *name == w.workspace;
+            item
+        })
+        .collect();
+    let new = next_workspace(names);
+    moves.push(Item::separator());
+    moves.push(action(
+        format!("New Workspace {new}"),
+        target(Command::MoveToWorkspace(new, false)),
+    ));
+    children.push(submenu("Move to Workspace", moves));
+    if !w.app_id.is_empty() {
+        children.push(submenu(
+            format!("Always Open {} In", short(&w.app_name, 30)),
+            assign_menu(&w.app_name, &w.app_id, config, names, None),
+        ));
+    }
+    children.push(Item::separator());
+    let arrange: &[(&str, &str)] = if snapshot.automatic_tiling {
+        &[
+            ("Toggle Floating", "layout floating tiling"),
+            ("Toggle Fullscreen", "fullscreen"),
+        ]
+    } else {
+        &[
+            ("Snap Left", "snap left"),
+            ("Snap Right", "snap right"),
+            ("Center", "snap center"),
+            ("Maximize", "snap maximize"),
+            ("Restore Size", "snap restore"),
+            ("Toggle Fullscreen", "fullscreen"),
+        ]
+    };
+    for (label, text) in arrange {
+        if let Ok(command) = sift_wm::parse(text) {
+            children.push(action(*label, target(command)));
+        }
+    }
+    Some(detail(
+        submenu("Focused Window", children),
+        short(&w.app_name, 30),
+    ))
+}
+
+/// Workspaces an app can be assigned to, with its current one checked and
+/// a way to remove the assignment.
+fn assign_menu(
+    app_name: &str,
+    app_id: &str,
+    config: &sift_wm::Config,
+    names: &[String],
+    open: Option<PathBuf>,
+) -> Vec<Item> {
+    let current = saved_assignment(config, app_id);
+    let mut items: Vec<Item> = names
+        .iter()
+        .map(|name| {
+            check(
+                &format!("Workspace {name}"),
+                Action::AssignApp {
+                    workspace: name.clone(),
+                    app_id: app_id.to_owned(),
+                    open: open.clone(),
+                },
+                current == Some(name.as_str()),
+            )
+        })
+        .collect();
+    if let Some(workspace) = current {
+        items.push(Item::separator());
+        items.push(action(
+            format!("Don't Assign {}", short(app_name, 30)),
+            Action::UnassignApp {
+                workspace: workspace.to_owned(),
+                app_id: app_id.to_owned(),
+            },
+        ));
+    }
+    items
+}
+
+/// Assigned apps first, then every installed app by first letter; each
+/// opens its list of workspaces. Submenus are built when opened, so the
+/// size of this tree does not slow the menu down.
+fn app_picker(
+    apps: Option<&sift_apps::AppProvider>,
+    config: &sift_wm::Config,
+    names: &[String],
+) -> Vec<Item> {
+    let catalog_name = |app_id: &str| {
+        apps.and_then(|apps| {
+            apps.catalog()
+                .apps()
+                .iter()
+                .find(|app| app.bundle_id.as_deref() == Some(app_id))
+        })
+        .map(|app| app.name.to_string())
+    };
+    let mut items = Vec::new();
+    let mut assigned: Vec<(String, String, String)> = names
+        .iter()
+        .flat_map(|name| {
+            config.assigned_apps(name).into_iter().map(|app_id| {
+                let app_name = catalog_name(&app_id).unwrap_or_else(|| app_id.clone());
+                (app_name, app_id, name.clone())
+            })
+        })
+        .collect();
+    assigned.sort();
+    assigned.dedup_by(|a, b| a.1 == b.1);
+    if !assigned.is_empty() {
+        items.push(Item::header("Assigned"));
+        for (app_name, app_id, workspace) in &assigned {
+            items.push(detail(
+                submenu(
+                    short(app_name, 35),
+                    assign_menu(app_name, app_id, config, names, None),
+                ),
+                format!("Workspace {workspace}"),
+            ));
+        }
+        items.push(Item::separator());
+    }
+    let Some(apps) = apps else {
+        items.push(Item::label("Loading installed apps…"));
+        return items;
+    };
+    items.push(Item::header("All Apps"));
+    let mut groups = std::collections::BTreeMap::<String, Vec<Item>>::new();
+    for app in apps.catalog().apps() {
+        let Some(app_id) = &app.bundle_id else {
+            continue;
+        };
+        if app_id == "io.github.kylianmarceau.sift" {
+            continue;
+        }
+        let group = app
+            .name
+            .chars()
+            .next()
+            .filter(|c| c.is_alphabetic())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "#".into());
+        let mut entry = submenu(
+            app.name.as_ref(),
+            assign_menu(&app.name, app_id, config, names, Some(app.path.clone())),
+        );
+        if let Some(workspace) = saved_assignment(config, app_id) {
+            entry = detail(entry, format!("Workspace {workspace}"));
+        }
+        groups.entry(group).or_default().push(entry);
+    }
+    for (letter, mut apps) in groups {
+        apps.sort_by_cached_key(|a| a.title.to_lowercase());
+        items.push(submenu(letter, apps));
+    }
+    items
+}
+
+fn window_management_menu(
+    launcher: &Launcher,
+    snapshot: &Snapshot,
+    config: &sift_wm::Config,
+    picker: Vec<Item>,
+) -> Item {
+    let running = launcher.window_manager.is_some();
+    let mut children = vec![
+        check(
+            "Window Shortcuts and Controls",
+            Action::Setting(SettingAction::Controls(
+                !launcher.window_management_enabled(),
+            )),
+            launcher.window_management_enabled(),
+        ),
+        check(
+            "Automatic Tiling",
+            Action::Setting(SettingAction::Tiling(!launcher.automatic_tiling_enabled())),
+            launcher.automatic_tiling_enabled(),
+        ),
+    ];
+    if running {
+        children.push(if snapshot.enabled {
+            action(
+                "Pause Window Management",
+                Action::WindowCommand(Command::Enable(false), None),
+            )
+        } else {
+            action(
+                "Resume Window Management",
+                Action::WindowCommand(Command::Enable(true), None),
+            )
+        });
+    }
+    children.push(Item::separator());
+    children.push(submenu("Assign Apps to Workspaces", picker));
+    let names = workspace_names(config, snapshot);
+    if names.len() < 256 {
+        let next = next_workspace(&names);
+        children.push(action(
+            format!("Add Workspace {next}"),
+            Action::AddWorkspace(next),
+        ));
+    }
+    children.push(action(
+        "Add Missing Workspace Shortcuts",
+        Action::AddWorkspaceShortcuts,
+    ));
+    children.push(Item::separator());
+    children.push(builtin("Edit Rules and Shortcuts…", commands::EDIT_CONFIG));
+    children.push(action("Reload Configuration", Action::Reload));
+    children.push(action(
+        "Window Management Guide",
+        Action::Help("docs/window-manager.md".into()),
+    ));
+    let mut item = submenu("Window Management", children);
+    if !running && launcher.window_management_enabled() {
+        item = detail(item, "not running");
+    } else if !launcher.window_management_enabled() {
+        item = detail(item, "off");
+    }
+    item
+}
+
+/// Configured workspaces then any others in use: numbers first, in order.
 fn workspace_names(config: &sift_wm::Config, snapshot: &Snapshot) -> Vec<String> {
     let mut names: Vec<_> = config
         .workspaces
@@ -760,227 +1176,48 @@ fn workspace_names(config: &sift_wm::Config, snapshot: &Snapshot) -> Vec<String>
     names
 }
 
-fn manage_workspaces(
-    snapshot: &Snapshot,
-    config: &sift_wm::Config,
-    apps: Option<&sift_apps::AppProvider>,
-    can_control: bool,
-) -> Item {
-    let mut workspaces = Vec::new();
-    if !can_control {
-        workspaces.push(Item::label(
-            "Setup is available; workspace control is inactive",
-        ));
-    }
-    let names = workspace_names(config, snapshot);
-    for name in &names {
-        let windows: Vec<_> = snapshot
-            .windows
-            .iter()
-            .filter(|w| &w.workspace == name)
-            .collect();
-        let mut children = vec![Item::label(format!("{} windows", windows.len()))];
-        // Saved assignments, each removable by clicking it. Assignments for
-        // apps that are not installed (or have no bundle name in the
-        // catalog) still appear, by bundle identifier.
-        let assigned: Vec<_> = config
-            .assigned_apps(name)
-            .into_iter()
-            .map(|app_id| {
-                let app_name = apps
-                    .and_then(|apps| {
-                        apps.catalog()
-                            .apps()
-                            .iter()
-                            .find(|app| app.bundle_id.as_deref() == Some(app_id.as_str()))
-                    })
-                    .map(|app| app.name.to_string())
-                    .unwrap_or_else(|| app_id.clone());
-                action(
-                    format!("Remove {} from Workspace {}", short(&app_name, 35), name),
-                    Action::UnassignApp {
-                        workspace: name.clone(),
-                        app_id,
-                    },
-                )
-            })
-            .collect();
-        if !assigned.is_empty() {
-            children.push(submenu("Assigned Apps", assigned));
-        }
-        if can_control {
-            if let Some(focused) = snapshot
-                .windows
-                .iter()
-                .find(|w| Some(w.id) == snapshot.focused)
-            {
-                children.push(action(
-                    "Move Focused Window Here",
-                    Action::WindowCommand(
-                        Command::Target(
-                            focused.id,
-                            Box::new(Command::MoveToWorkspace(name.clone(), false)),
-                        ),
-                        Some(focused.into()),
-                    ),
-                ));
-                if !focused.app_id.is_empty() {
-                    children.push(action(
-                        format!("Always Put {} Here", short(&focused.app_name, 35)),
-                        Action::AssignApp {
-                            workspace: name.clone(),
-                            app_id: focused.app_id.clone(),
-                            open: None,
-                        },
-                    ));
-                }
-            }
-        }
-        if let Some(apps) = apps {
-            let mut groups = std::collections::BTreeMap::<String, Vec<Item>>::new();
-            for app in apps.catalog().apps() {
-                let Some(app_id) = &app.bundle_id else {
-                    continue;
-                };
-                if app_id == "io.github.kylianmarceau.sift" {
-                    continue;
-                }
-                let group = app
-                    .name
-                    .chars()
-                    .next()
-                    .unwrap_or('#')
-                    .to_uppercase()
-                    .to_string();
-                let mut entry = action(
-                    app.name.as_ref(),
-                    Action::AssignApp {
-                        workspace: name.clone(),
-                        app_id: app_id.clone(),
-                        open: can_control.then(|| app.path.clone()),
-                    },
-                );
-                entry.checked = saved_assignment(config, app_id) == Some(name.as_str());
-                groups.entry(group).or_default().push(entry);
-            }
-            children.push(submenu(
-                if can_control {
-                    "Add and Open App…"
-                } else {
-                    "Assign App…"
-                },
-                groups
-                    .into_iter()
-                    .map(|(name, mut apps)| {
-                        apps.sort_by(|a, b| a.title.cmp(&b.title));
-                        submenu(name, apps)
-                    })
-                    .collect(),
-            ));
-        } else {
-            children.push(Item::label("Loading installed apps…"));
-        }
-        children.push(Item::separator());
-        for w in windows {
-            let label = format!(
-                "{} — {}{}",
-                w.app_name,
-                short(&w.title, 50),
-                if w.minimized { " (minimized)" } else { "" }
-            );
-            children.push(if can_control {
-                action(
-                    label,
-                    Action::WindowCommand(Command::FocusId(w.id), Some(w.into())),
-                )
-            } else {
-                Item::label(label)
-            });
-        }
-        workspaces.push(submenu(format!("Workspace {name}"), children));
-    }
-    let name = next_workspace(&names);
-    workspaces.push(Item::separator());
-    if names.len() < 256 {
-        workspaces.push(action(
-            format!("Add Workspace {name}"),
-            Action::AddWorkspace(name),
-        ));
-    }
-    workspaces.push(builtin(
-        "Edit Workspace Names and Rules…",
-        commands::EDIT_CONFIG,
-    ));
-    workspaces.push(action(
-        "Add Missing Workspace Shortcuts",
-        Action::AddWorkspaceShortcuts,
-    ));
-    submenu("Workspace Apps and Windows", workspaces)
-}
 fn next_workspace(names: &[String]) -> String {
     (1u32..)
         .find(|n| !names.iter().any(|s| s == &n.to_string()))
         .expect("finite workspace list")
         .to_string()
 }
-fn ordered_workspaces(snapshot: &Snapshot) -> Vec<&sift_wm::Workspace> {
-    let mut workspaces: Vec<_> = snapshot.workspaces.iter().collect();
-    workspaces.sort_by(
-        |a, b| match (a.name.parse::<u64>(), b.name.parse::<u64>()) {
-            (Ok(a), Ok(b)) => a.cmp(&b),
-            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        },
-    );
-    workspaces
-}
-fn window_menu(snapshot: &Snapshot) -> Item {
-    let Some(w) = snapshot
-        .windows
-        .iter()
-        .find(|w| Some(w.id) == snapshot.focused)
-    else {
-        return submenu(
-            "Focused Window",
-            vec![Item::label("No managed window is focused")],
-        );
-    };
-    let mut entries = vec![Item::label(short(
-        &format!("{} — {}", w.app_name, w.title),
-        70,
-    ))];
-    if snapshot.enabled {
-        let commands = [
-            ("Snap Left", "snap left"),
-            ("Snap Right", "snap right"),
-            ("Center", "snap center"),
-            ("Maximize", "snap maximize"),
-            ("Restore Size", "snap restore"),
-            ("Toggle Floating", "layout floating tiling"),
-            ("Toggle Fullscreen", "fullscreen"),
-        ];
-        for (label, text) in commands {
-            if snapshot.automatic_tiling && text.starts_with("snap") {
-                continue;
-            }
-            if !snapshot.automatic_tiling && text.starts_with("layout") {
-                continue;
-            }
-            if let Ok(command) = sift_wm::parse(text) {
-                entries.push(action(
-                    label,
-                    Action::WindowCommand(Command::Target(w.id, Box::new(command)), Some(w.into())),
-                ));
-            }
-        }
-    }
-    submenu("Focused Window", entries)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn engine(workspaces: &[&str]) -> sift_wm::Engine {
+        sift_wm::Engine::new(
+            sift_wm::Config {
+                automatic_tiling: true,
+                workspaces: workspaces.iter().map(|w| w.to_string()).collect(),
+                ..Default::default()
+            },
+            vec![sift_wm::Monitor {
+                id: 1,
+                name: "Display".into(),
+                main: true,
+                frame: sift_wm::Rect::new(0., 0., 1200., 800.),
+                usable: sift_wm::Rect::new(0., 25., 1200., 775.),
+            }],
+        )
+        .unwrap()
+    }
+
+    fn decode(item: &Item) -> Action {
+        serde_json::from_str(item.action.as_ref().expect("an action")).unwrap()
+    }
+
+    fn find<'a>(items: &'a [Item], title: &str) -> &'a Item {
+        items.iter().find(|i| i.title == title).unwrap_or_else(|| {
+            panic!(
+                "no {title:?} in {:?}",
+                items.iter().map(|i| &i.title).collect::<Vec<_>>()
+            )
+        })
+    }
+
     #[test]
     fn stale_window_identity_cannot_target_a_reused_id() {
         let mut w = ManagedWindow::new(42, 10, sift_wm::Rect::default());
@@ -994,43 +1231,67 @@ mod tests {
         snapshot.windows[0].pid = 11;
         assert!(!identity.exists(&snapshot));
     }
+
     #[test]
-    fn workspace_labels_and_commands_preserve_unicode_and_quotes() {
-        let mut engine = sift_wm::Engine::new(
-            sift_wm::Config {
-                automatic_tiling: true,
-                workspaces: vec!["10".into(), "dev \"é\"".into()],
-                ..Default::default()
-            },
-            vec![sift_wm::Monitor {
-                id: 1,
-                name: "Display".into(),
-                main: true,
-                frame: sift_wm::Rect::new(0., 0., 1200., 800.),
-                usable: sift_wm::Rect::new(0., 25., 1200., 775.),
-            }],
-        )
-        .unwrap();
+    fn workspace_section_switches_with_shortcuts_and_preserves_unicode() {
+        let mut engine = engine(&["1", "10", "dev \"é\""]);
+        let config = sift_wm::Config::default();
         let snapshot = engine.snapshot();
-        let menu = workspace_menu(&snapshot);
-        let entry = menu
-            .children
-            .iter()
-            .find(|i| i.title.starts_with("dev"))
-            .unwrap();
-        let action: Action = serde_json::from_str(entry.action.as_ref().unwrap()).unwrap();
+        let names = workspace_names(&engine.config, &snapshot);
+        let section = workspace_section(&snapshot, &config, &names);
+        assert!(section[0].header);
+        let entry = find(&section, "dev \"é\"");
         assert_eq!(
-            action,
+            decode(entry),
             Action::WindowCommand(Command::Workspace("dev \"é\"".into()), None)
         );
+        // The default bindings put workspace 1 on Option-1.
+        let one = find(&section, "1");
+        assert_eq!((one.key.as_str(), one.modifiers), ("1", status_bar::OPTION));
         engine.enabled = false;
+        let paused = workspace_section(&engine.snapshot(), &config, &names);
+        assert!(paused[0].title.contains("Paused"));
         assert!(
-            workspace_menu(&engine.snapshot())
-                .children
+            paused
                 .iter()
+                .filter(|i| names.contains(&i.title))
                 .all(|i| i.action.is_none())
         );
+        assert!(paused.iter().any(|i| i.title == "Resume Window Management"));
     }
+
+    #[test]
+    fn workspace_items_show_their_apps_and_the_current_one() {
+        let mut a = ManagedWindow::new(1, 2, sift_wm::Rect::default());
+        a.app_name = "Safari".into();
+        a.workspace = "2".into();
+        let mut b = a.clone();
+        b.id = 3;
+        b.app_name = "Terminal".into();
+        let mut c = a.clone();
+        c.id = 4;
+        let snapshot = Snapshot {
+            enabled: true,
+            active_monitor: 1,
+            visible: [(1, "2".to_owned())].into(),
+            windows: vec![a, b, c],
+            ..Default::default()
+        };
+        let names: Vec<String> = ["1", "2", "3"].map(String::from).into();
+        let section = workspace_section(&snapshot, &sift_wm::Config::default(), &names);
+        let two = find(&section, "2");
+        assert!(two.checked);
+        assert_eq!(two.detail.as_deref(), Some("Safari, Terminal"));
+        assert_eq!(find(&section, "1").detail, None);
+        assert_eq!(
+            workspace_indicator(&snapshot, &names),
+            Indicator::Workspaces {
+                labels: vec![("2".into(), true)],
+                paused: false
+            }
+        );
+    }
+
     #[test]
     fn numeric_workspaces_extend_past_nine() {
         assert_eq!(
@@ -1038,215 +1299,133 @@ mod tests {
             "10"
         );
     }
+
+    #[test]
+    fn key_equivalents_only_for_single_keys_with_modifiers() {
+        assert_eq!(
+            key_equivalent("alt-1"),
+            Some(("1".into(), status_bar::OPTION))
+        );
+        assert_eq!(
+            key_equivalent("ctrl-alt-shift-K"),
+            Some((
+                "k".into(),
+                status_bar::CONTROL | status_bar::OPTION | status_bar::SHIFT
+            ))
+        );
+        assert_eq!(key_equivalent("ctrl-alt-left"), None);
+        assert_eq!(key_equivalent("1"), None);
+        assert_eq!(key_equivalent("hyper-1"), None);
+    }
+
     #[test]
     fn manual_and_tiling_menus_offer_supported_actions() {
-        let w = ManagedWindow::new(1, 2, sift_wm::Rect::default());
+        let mut w = ManagedWindow::new(1, 2, sift_wm::Rect::default());
+        w.workspace = "1".into();
+        w.app_id = "com.example.editor".into();
+        w.app_name = "Editor".into();
         let mut snapshot = Snapshot {
             enabled: true,
             focused: Some(1),
             windows: vec![w],
             ..Default::default()
         };
-        assert!(
-            window_menu(&snapshot)
-                .children
-                .iter()
-                .any(|i| i.title == "Snap Left")
+        let names: Vec<String> = ["1", "2"].map(String::from).into();
+        let config = sift_wm::Config::default();
+        let menu = focused_menu(&snapshot, &config, &names).unwrap();
+        assert!(menu.children.iter().any(|i| i.title == "Snap Left"));
+        assert!(!menu.children.iter().any(|i| i.title == "Toggle Floating"));
+        let moves = find(&menu.children, "Move to Workspace");
+        assert!(find(&moves.children, "Workspace 1").action.is_none());
+        assert_eq!(
+            decode(find(&moves.children, "Workspace 2")),
+            Action::WindowCommand(
+                Command::Target(1, Box::new(Command::MoveToWorkspace("2".into(), false))),
+                Some(WindowIdentity {
+                    id: 1,
+                    pid: 2,
+                    app_id: "com.example.editor".into()
+                })
+            )
         );
+        assert!(moves.children.iter().any(|i| i.title == "New Workspace 3"));
         assert!(
-            !window_menu(&snapshot)
-                .children
+            menu.children
                 .iter()
-                .any(|i| i.title == "Toggle Floating")
+                .any(|i| i.title == "Always Open Editor In")
         );
         snapshot.automatic_tiling = true;
-        assert!(
-            !window_menu(&snapshot)
-                .children
-                .iter()
-                .any(|i| i.title == "Snap Left")
-        );
-        assert!(
-            window_menu(&snapshot)
-                .children
-                .iter()
-                .any(|i| i.title == "Toggle Floating")
-        );
+        let menu = focused_menu(&snapshot, &config, &names).unwrap();
+        assert!(!menu.children.iter().any(|i| i.title == "Snap Left"));
+        assert!(menu.children.iter().any(|i| i.title == "Toggle Floating"));
+        snapshot.focused = None;
+        assert!(focused_menu(&snapshot, &config, &names).is_none());
     }
-    #[test]
-    fn workspace_setup_is_available_before_window_controls_start() {
-        let config = sift_wm::Config::default();
-        let menu = manage_workspaces(&Snapshot::default(), &config, None, false);
-        assert!(menu.children.iter().any(|i| i.title == "Workspace 1"));
-        let add = menu
-            .children
-            .iter()
-            .find(|i| i.title == "Add Workspace 10")
-            .expect("add workspace action");
-        assert_eq!(
-            serde_json::from_str::<Action>(add.action.as_ref().unwrap()).unwrap(),
-            Action::AddWorkspace("10".into())
-        );
+
+    fn catalog(dir: &std::path::Path, name: &str, id: &str) -> sift_apps::AppProvider {
+        let contents = dir.join(format!("{name}.app/Contents"));
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::write(contents.join("Info.plist"), format!(r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleName</key><string>{name}</string></dict></plist>"#)).unwrap();
+        sift_apps::AppProvider::new(sift_apps::AppCatalog::discover(&[
+            sift_apps::Location::Folder(dir.into()),
+        ]))
     }
 
     #[test]
-    fn offline_app_assignment_saves_without_launching() {
+    fn apps_are_assigned_from_one_picker_without_a_running_manager() {
         let dir = tempfile::tempdir().unwrap();
-        let contents = dir.path().join("Test Editor.app/Contents");
-        std::fs::create_dir_all(&contents).unwrap();
-        std::fs::write(contents.join("Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.editor</string><key>CFBundleName</key><string>Test Editor</string></dict></plist>"#).unwrap();
-        let catalog =
-            sift_apps::AppCatalog::discover(&[sift_apps::Location::Folder(dir.path().into())]);
-        let apps = sift_apps::AppProvider::new(catalog);
-        let menu = manage_workspaces(
-            &Snapshot::default(),
-            &sift_wm::Config::default(),
-            Some(&apps),
-            false,
-        );
-        let workspace = menu
-            .children
-            .iter()
-            .find(|i| i.title == "Workspace 1")
-            .unwrap();
-        let assign = workspace
-            .children
-            .iter()
-            .find(|i| i.title == "Assign App…")
-            .unwrap();
-        let entry = &assign.children[0].children[0];
+        let apps = catalog(dir.path(), "Test Editor", "com.example.editor");
+        let names: Vec<String> = ["1", "2"].map(String::from).into();
+        let picker = app_picker(Some(&apps), &sift_wm::Config::default(), &names);
+        assert!(!picker.iter().any(|i| i.title == "Assigned"));
+        let app = find(&find(&picker, "T").children, "Test Editor");
         assert_eq!(
-            serde_json::from_str::<Action>(entry.action.as_ref().unwrap()).unwrap(),
+            decode(find(&app.children, "Workspace 2")),
             Action::AssignApp {
-                workspace: "1".into(),
+                workspace: "2".into(),
                 app_id: "com.example.editor".into(),
-                open: None,
+                open: Some(dir.path().join("Test Editor.app")),
             }
         );
-        assert!(
-            !workspace
-                .children
-                .iter()
-                .any(|i| i.title == "Move Focused Window Here")
-        );
-    }
-    #[test]
-    fn saved_apps_are_visible_and_checked_without_a_running_manager() {
-        let dir = tempfile::tempdir().unwrap();
-        let contents = dir.path().join("Editor.app/Contents");
-        std::fs::create_dir_all(&contents).unwrap();
-        std::fs::write(contents.join("Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.editor</string></dict></plist>"#).unwrap();
-        let apps = sift_apps::AppProvider::new(sift_apps::AppCatalog::discover(&[
-            sift_apps::Location::Folder(dir.path().into()),
-        ]));
-        let edited = sift_state::Config::parse(
-            "[[window_manager.rules]]\napp_id = '^com\\.example\\.editor$'\nworkspace = '1'\n",
-        );
-        assert!(edited.problems.is_empty());
-        let menu = manage_workspaces(
-            &Snapshot::default(),
-            &edited.config.window_manager,
-            Some(&apps),
-            false,
-        );
-        let workspace = menu
-            .children
-            .iter()
-            .find(|i| i.title == "Workspace 1")
-            .unwrap();
-        assert_eq!(
-            workspace
-                .children
-                .iter()
-                .find(|i| i.title.starts_with("Assigned Apps"))
-                .unwrap()
-                .children[0]
-                .title,
-            "Remove Editor from Workspace 1"
-        );
-        let remove = workspace
-            .children
-            .iter()
-            .find(|i| i.title == "Assigned Apps")
-            .unwrap()
-            .children[0]
-            .clone();
-        assert_eq!(
-            serde_json::from_str::<Action>(remove.action.as_ref().unwrap()).unwrap(),
-            Action::UnassignApp {
-                workspace: "1".into(),
-                app_id: "com.example.editor".into(),
-            }
-        );
-        let picker = workspace
-            .children
-            .iter()
-            .find(|i| i.title == "Assign App…")
-            .unwrap();
-        assert!(picker.children[0].children[0].checked);
+        assert!(!app.children.iter().any(|i| i.title.starts_with("Don't")));
         assert!(assignment_notice("Editor", "1", false).contains("Nothing moved"));
     }
+
     #[test]
-    fn assigned_apps_are_listed_as_removals_even_without_a_catalog() {
+    fn assigned_apps_are_listed_first_and_removable_even_without_a_catalog() {
         let config = sift_state::Config::parse(
             "[[window_manager.rules]]\napp_id = '^com\\.example\\.gone$'\nworkspace = '2'\n[[window_manager.rules]]\napp_id = '^com\\.example\\.editor$'\nworkspace = '1'\n",
         );
         assert!(config.problems.is_empty());
-        // No app catalog at all: the assignment is still removable, by
-        // bundle identifier.
-        let menu = manage_workspaces(
-            &Snapshot::default(),
-            &config.config.window_manager,
-            None,
-            false,
-        );
-        let workspace = menu
-            .children
-            .iter()
-            .find(|i| i.title == "Workspace 1")
-            .unwrap();
-        let remove = workspace
-            .children
-            .iter()
-            .find(|i| i.title == "Assigned Apps")
-            .expect("assigned apps submenu")
-            .children[0]
-            .clone();
-        assert_eq!(remove.title, "Remove com.example.editor from Workspace 1");
+        let config = &config.config.window_manager;
+        let names: Vec<String> = ["1", "2", "3"].map(String::from).into();
+        let picker = app_picker(None, config, &names);
+        assert!(picker[0].header);
+        let editor = find(&picker, "com.example.editor");
+        assert_eq!(editor.detail.as_deref(), Some("Workspace 1"));
+        assert!(find(&editor.children, "Workspace 1").checked);
         assert_eq!(
-            serde_json::from_str::<Action>(remove.action.as_ref().unwrap()).unwrap(),
+            decode(find(&editor.children, "Don't Assign com.example.editor")),
             Action::UnassignApp {
                 workspace: "1".into(),
                 app_id: "com.example.editor".into(),
             }
         );
-        let gone = menu
-            .children
-            .iter()
-            .find(|i| i.title == "Workspace 2")
-            .unwrap();
-        let gone_remove = gone
-            .children
-            .iter()
-            .find(|i| i.title == "Assigned Apps")
-            .expect("assigned apps submenu for the uninstalled app")
-            .children[0]
-            .clone();
         assert_eq!(
-            gone_remove.title,
-            "Remove com.example.gone from Workspace 2"
+            find(&picker, "com.example.gone").detail.as_deref(),
+            Some("Workspace 2")
         );
-        // A workspace without assignments has no Assigned Apps submenu.
-        let workspace = menu
-            .children
-            .iter()
-            .find(|i| i.title == "Workspace 3")
-            .unwrap();
-        assert!(
-            !workspace
-                .children
-                .iter()
-                .any(|i| i.title == "Assigned Apps")
+        assert!(picker.iter().any(|i| i.title == "Loading installed apps…"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let apps = catalog(dir.path(), "Editor", "com.example.editor");
+        let picker = app_picker(Some(&apps), config, &names);
+        // The catalog name replaces the bundle identifier.
+        assert_eq!(
+            find(&picker, "Editor").detail.as_deref(),
+            Some("Workspace 1")
         );
+        let listed = find(&find(&picker, "E").children, "Editor");
+        assert_eq!(listed.detail.as_deref(), Some("Workspace 1"));
     }
 }

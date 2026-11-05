@@ -1375,13 +1375,31 @@ impl Launcher {
                                     }) {
                                         this.reload_config(cx);
                                     }
-                                    this.window_snapshot = snapshot;
-                                    this.sync_window_hotkeys(cx);
-                                    this.rebuild_search();
-                                    if this.is_visible() && !this.query.trim().is_empty() {
-                                        this.run_query(this.query.clone(), cx);
+                                    // Most publications are geometry from moves
+                                    // and resizes, which search, shortcuts and
+                                    // the menu do not show. Skip their work.
+                                    let previous =
+                                        std::mem::replace(&mut this.window_snapshot, snapshot);
+                                    if previous.mode != this.window_snapshot.mode
+                                        || previous.enabled != this.window_snapshot.enabled
+                                    {
+                                        this.sync_window_hotkeys(cx);
                                     }
-                                    cx.emit(WindowManagerChanged);
+                                    if !crate::window_manager::same_search_content(
+                                        &previous,
+                                        &this.window_snapshot,
+                                    ) {
+                                        this.rebuild_search();
+                                        if this.is_visible() && !this.query.trim().is_empty() {
+                                            this.run_query(this.query.clone(), cx);
+                                        }
+                                    }
+                                    if !crate::window_manager::same_overview(
+                                        &previous,
+                                        &this.window_snapshot,
+                                    ) {
+                                        cx.emit(WindowManagerChanged);
+                                    }
                                 })
                                 .is_err()
                             {

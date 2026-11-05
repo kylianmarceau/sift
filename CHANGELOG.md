@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+- A redesigned menu bar. With window controls running, the icon shows your
+  workspaces: the current one in a filled badge and the others with windows
+  dimmed beside it (outlined when paused). The menu leads with the
+  workspaces, each with its apps and Option-number shortcut, then every
+  window by workspace and the focused window's actions (move, always open
+  in, snap/float, fullscreen). App assignment is one picker under Window
+  Management, where each app's workspace is checked and removable. Duplicate
+  entries are gone, and submenus are built only when opened.
+- Switching workspaces quickly (Option-1, Option-2) no longer flickers back
+  to the previous workspace. A late activation report from the first switch
+  was taken as a focus change and switched back, then forward again; reports
+  that disagree with Sift's own latest focus request are now ignored for
+  half a second.
+- Workspace switches no longer flash the desktop or an old window. Windows
+  of the new workspace come on screen and are focused before the old
+  workspace's windows are parked, across apps, and a window is raised before
+  its app is activated, so the app's previous window does not show first.
+- Workspace switches start about 3 ms sooner: the recovery journal written
+  before each switch uses a plain fsync instead of a full drive-cache flush.
+- Moving or resizing windows no longer rebuilds search, re-registers window
+  shortcuts or refreshes the menu and Settings on the main thread; only
+  changes they show do.
+
+- The panel no longer fades when it appears or closes. GPUI marks the
+  window a utility window, which macOS fades in and out; the panel now
+  orders in and out instantly, as a launcher should.
+- Spamming a launcher shortcut now ends in the right state instead of
+  flapping: presses that queue up while the app is busy are collapsed, so
+  two rapid presses cancel out and three leave the panel open, instead of
+  the panel toggling once per queued press after a delay.
+
 ## 0.4.5 (2026-10-28)
 
 - The menu bar icon matches the app icon: the same three narrowing bars

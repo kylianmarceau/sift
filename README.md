@@ -123,12 +123,11 @@ data too, except `~/.config/sift`). Otherwise:
 
 ## Using Sift
 
-**Menu bar:** click Sift's Sieve icon for search, settings, clipboard history,
-file-index status, Open at Login, updates and window controls. With window
-controls enabled, the active workspace appears beside the icon and **Workspaces**
-switches between them. **Workspace Apps and Windows** lets you move the focused
-window, assign an app permanently, remove an assignment, add and open an
-installed app, or add another numbered workspace. See the [menu bar guide](docs/menu-bar.md).
+**Menu bar:** with window controls running, Sift's menu bar icon shows your
+workspaces, the current one highlighted. Click it to switch workspace (each
+listed with its apps and shortcut), jump to any window, move or assign the
+focused window, and reach settings, clipboard history, search folders, updates
+and Open at Login. With window controls off it shows the sieve glyph. See the [menu bar guide](docs/menu-bar.md).
 
 - Type to search apps, files and folders (files need two characters).
   With nothing typed, the panel lists your favorites and recent items.

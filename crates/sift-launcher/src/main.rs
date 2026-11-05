@@ -134,13 +134,40 @@ fn main() {
             launcher::menu_bar::install(window, cx);
             cx.spawn(async move |cx| {
                 while let Some((slot, pressed_at)) = hotkey_rx.next().await {
-                    let _ = window.update(cx, |launcher, window, cx| match slot {
-                        hotkey::Slot::Panel => launcher.toggle(pressed_at, window, cx),
-                        hotkey::Slot::Clipboard => {
-                            launcher.toggle_clipboard(pressed_at, window, cx)
+                    // Spamming a shortcut queues presses while the main
+                    // thread is busy. Collapse each run of the same shortcut
+                    // into one action: an even number of toggle presses
+                    // cancels out and an odd number acts as one, so a spam
+                    // ends in the requested state instead of flapping once
+                    // per queued press as the backlog drains. Every Pop
+                    // press still pops, since each one pastes an entry.
+                    let mut pending: Vec<(hotkey::Slot, Instant)> = vec![(slot, pressed_at)];
+                    while let Ok(next) = hotkey_rx.try_recv() {
+                        pending.push(next);
+                    }
+                    let mut i = 0;
+                    while i < pending.len() {
+                        let (slot, pressed_at) = pending[i];
+                        let mut run = 1;
+                        while i + run < pending.len() && pending[i + run].0 == slot {
+                            run += 1;
                         }
-                        hotkey::Slot::Pop => launcher.paste_and_pop(cx),
-                    });
+                        i += run;
+                        let times = if slot == hotkey::Slot::Pop {
+                            run
+                        } else {
+                            run % 2
+                        };
+                        for _ in 0..times {
+                            let _ = window.update(cx, |launcher, window, cx| match slot {
+                                hotkey::Slot::Panel => launcher.toggle(pressed_at, window, cx),
+                                hotkey::Slot::Clipboard => {
+                                    launcher.toggle_clipboard(pressed_at, window, cx)
+                                }
+                                hotkey::Slot::Pop => launcher.paste_and_pop(cx),
+                            });
+                        }
+                    }
                 }
             })
             .detach();

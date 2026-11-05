@@ -10,7 +10,8 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep,
     NSCompositingOperation, NSDeviceRGBColorSpace, NSEvent, NSGraphicsContext, NSModalResponse,
     NSOpenPanel, NSPasteboard, NSPasteboardTypeString, NSRunningApplication, NSScreen, NSView,
-    NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWorkspace, NSWorkspaceOpenConfiguration,
+    NSWindow, NSWindowAnimationBehavior, NSWindowButton, NSWindowTitleVisibility, NSWorkspace,
+    NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{
     NSArray, NSDate, NSDateFormatter, NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString,
@@ -525,6 +526,10 @@ impl Panel {
         }
         window.setMovable(false);
         window.setHidesOnDeactivate(false);
+        // GPUI marks this panel a utility window (NSWindowAnimationBehavior
+        // UtilityWindow), which macOS fades in and out. A launcher should
+        // appear and vanish instantly, so drop the system fade.
+        window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     }
 
     pub fn is_visible(&self) -> bool {
